@@ -1,0 +1,14 @@
+node_modules
+dist
+out
+.DS_Store
+.eslintcache
+*.log*
+nohup.out
+.backup
+*_gemini.*
+.*_gemini*
+.env
+.env.*
+.vscode
+*.tsbuildinfo

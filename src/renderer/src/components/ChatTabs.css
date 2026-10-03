@@ -1,0 +1,164 @@
+.chat-tabs-scroller {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-height: 40px;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0 8px;
+  width: 100%;
+  position: relative;
+  scrollbar-width: none;
+  /* Hybrid shrink: pills compress toward min-width, then strip scrolls */
+}
+
+.chat-tabs-scroller::-webkit-scrollbar {
+  display: none;
+}
+
+/* Edge fade affordance (Q5): gradient mask toggled by scroll state */
+.chat-tabs-scroller.fade-left {
+  mask-image: linear-gradient(
+    to right,
+    transparent 0,
+    black 12px,
+    black calc(100% - 12px),
+    transparent 100%
+  );
+  -webkit-mask-image: linear-gradient(
+    to right,
+    transparent 0,
+    black 12px,
+    black calc(100% - 12px),
+    transparent 100%
+  );
+}
+
+.chat-tabs-scroller.fade-right {
+  mask-image: linear-gradient(to right, black 0, black calc(100% - 12px), transparent 100%);
+  -webkit-mask-image: linear-gradient(to right, black 0, black calc(100% - 12px), transparent 100%);
+}
+
+/* Hybrid: title shrinks until pill hits min-width, then strip scrolls */
+.chat-tab-wrap {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.chat-tab-pill {
+  flex: 1 1 auto;
+  min-width: 64px;
+  max-width: 360px;
+}
+
+.chat-tab-title {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-tab-close-btn {
+  flex: 0 0 auto;
+}
+
+/* Keep animation class referenced */
+.tab-switch-pop {
+  animation: tab-pop 0.25s ease-out;
+}
+
+@keyframes tab-pop {
+  0% {
+    transform: scale(0.9);
+  }
+  60% {
+    transform: scale(1.06);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+/* Modern Hover Animation Overlay */
+@keyframes spin-gradient {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.glowing-tab-wrapper {
+  position: relative;
+  overflow: hidden;
+  border-radius: 9999px;
+  padding: 1px;
+}
+
+.glowing-tab-wrapper::before {
+  content: '';
+  position: absolute;
+  top: -100%;
+  left: -100%;
+  width: 300%;
+  height: 300%;
+  background: conic-gradient(from 0deg, transparent 0%, var(--accent) 25%, transparent 50%);
+  animation: spin-gradient 2.5s linear infinite;
+  z-index: -1;
+}
+
+.glowing-tab-content {
+  background: var(--bg);
+  border-radius: 9999px;
+  width: 100%;
+  height: 100%;
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+}
+
+/* Float expansion */
+.tab-floating-overlay {
+  position: fixed;
+  z-index: 999999;
+  pointer-events: none; /* Let the underlying tab handle mouse leave and clicks! */
+  transition: max-width 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+
+/* Built-in Active Tab Glow & Animation */
+@keyframes active-tab-pulse {
+  0%, 100% {
+    box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 40%, transparent), 
+                inset 0 0 2px color-mix(in srgb, var(--accent) 20%, transparent);
+    border-color: color-mix(in srgb, var(--accent) 70%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 18px color-mix(in srgb, var(--accent) 85%, transparent), 
+                inset 0 0 6px color-mix(in srgb, var(--accent) 40%, transparent);
+    border-color: var(--accent);
+  }
+}
+
+@keyframes shimmer-shine {
+  0% { background-position: -200% center; }
+  100% { background-position: 200% center; }
+}
+
+.chat-tab-pill[data-active='true'] {
+  background: linear-gradient(110deg, 
+    color-mix(in srgb, var(--accent) 10%, var(--surface)) 25%, 
+    color-mix(in srgb, var(--accent) 35%, var(--surface)) 50%, 
+    color-mix(in srgb, var(--accent) 10%, var(--surface)) 75%
+  ) !important;
+  background-size: 200% auto !important;
+  animation: active-tab-pulse 3s ease-in-out infinite, shimmer-shine 4s linear infinite !important;
+  border: 1px solid var(--accent) !important;
+  color: var(--text) !important;
+}

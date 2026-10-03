@@ -1,0 +1,51 @@
+/* 
+This file is deliberately left mostly empty because the Command Palette 
+is now entirely styled using Tailwind utility classes natively in the React component.
+*/
+.history-overlay-wrapper {
+  animation: fadeIn 0.15s ease-out;
+}
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* Iron Man J.A.R.V.I.S. HUD Databank Overrides */
+body[data-preset='iron-man-hud'] .history-overlay-wrapper {
+  background: rgba(5, 15, 20, 0.96) !important;
+  border: 1px solid rgba(0, 229, 255, 0.5) !important;
+  box-shadow: 0 0 35px rgba(0, 229, 255, 0.3), inset 0 0 20px rgba(0, 229, 255, 0.08) !important;
+  border-radius: 4px !important;
+  position: relative;
+}
+
+body[data-preset='iron-man-hud'] .history-overlay-wrapper::before,
+body[data-preset='iron-man-hud'] .history-overlay-wrapper::after {
+  content: '';
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  pointer-events: none;
+  z-index: 10;
+}
+
+body[data-preset='iron-man-hud'] .history-overlay-wrapper::before {
+  top: -2px;
+  left: -2px;
+  border-top: 3px solid #00e5ff;
+  border-left: 3px solid #00e5ff;
+}
+
+body[data-preset='iron-man-hud'] .history-overlay-wrapper::after {
+  bottom: -2px;
+  right: -2px;
+  border-bottom: 3px solid #00e5ff;
+  border-right: 3px solid #00e5ff;
+}
+

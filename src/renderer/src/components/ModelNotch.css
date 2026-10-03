@@ -1,0 +1,120 @@
+/* ModelNotch — Dynamic-Island provider selector.
+   Collapsed: active provider's brand-color pill + ink icon.
+   Hover: expands to neutral surface, all providers fade in. */
+
+.model-notch {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  background: var(--notch-bg, var(--surface));
+  border-radius: calc(var(--radius) * 2);
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.15);
+  /* Collapsed: only the active icon fits (28px btn + 8px padding). */
+  max-width: 36px;
+  overflow: hidden;
+  transition:
+    max-width 0.22s ease,
+    background 0.22s ease,
+    box-shadow 0.22s ease;
+}
+
+.model-notch:hover,
+.model-notch:focus-within {
+  /* Expanded: 5 x 28px buttons + 4 x 4px gaps + 8px padding = 164px. */
+  max-width: 164px;
+  background: var(--surface);
+  box-shadow:
+    inset 0 1px 3px rgba(0, 0, 0, 0.15),
+    0 2px 8px rgba(0, 0, 0, 0.35);
+}
+
+.model-notch-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  cursor: pointer;
+  opacity: 0;
+  transition:
+    opacity 0.18s ease,
+    background 0.18s ease,
+    box-shadow 0.18s ease;
+}
+
+/* Active icon sits on the brand pill in collapsed state. */
+.model-notch-btn.active {
+  opacity: 1;
+  background: transparent;
+  color: var(--notch-fg, #fff);
+}
+
+/* Expanded: active gets accent fill so it stands out on neutral surface. */
+.model-notch:hover .model-notch-btn.active,
+.model-notch:focus-within .model-notch-btn.active {
+  background: var(--accent);
+  color: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+}
+
+/* Expand: all icons fade in. */
+.model-notch:hover .model-notch-btn,
+.model-notch:focus-within .model-notch-btn {
+  opacity: 1;
+}
+
+.model-notch-btn:not(.active):hover {
+  background: var(--surface-2, rgba(255, 255, 255, 0.08));
+}
+
+.model-notch-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.model-notch-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.model-notch-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.model-notch-fallback {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
+
+/* Iron Man J.A.R.V.I.S. HUD Overrides */
+body[data-preset='iron-man-hud'] .model-notch {
+  background: rgba(5, 15, 20, 0.95);
+  border: 1px solid rgba(0, 229, 255, 0.5);
+  border-radius: 4px;
+  box-shadow: 0 0 12px rgba(0, 229, 255, 0.3);
+}
+
+body[data-preset='iron-man-hud'] .model-notch:hover,
+body[data-preset='iron-man-hud'] .model-notch:focus-within {
+  background: rgba(7, 16, 30, 0.98);
+  border-color: #00e5ff;
+  box-shadow: 0 0 20px rgba(0, 229, 255, 0.5);
+}
+
+body[data-preset='iron-man-hud'] .model-notch-btn {
+  border-radius: 4px;
+}
+
+body[data-preset='iron-man-hud'] .model-notch-btn.active {
+  color: #00e5ff !important;
+  filter: drop-shadow(0 0 6px #00e5ff);
+}
+
