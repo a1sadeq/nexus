@@ -2,7 +2,7 @@ import { dialog, type BrowserWindow, type WebContentsView } from 'electron'
 import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
-import type { FolderScanResult, ScannedFileInfo } from '../shared/folderUpload'
+import type { FolderScanResult, ScannedFileInfo, BundlePreviewResult } from '../shared/folderUpload'
 
 const SUGGESTED_REMOVAL_FILENAMES = new Set([
   'package-lock.json',
@@ -249,6 +249,36 @@ export async function handleFolderUpload(
     isDialogOpen = false
     lastDialogTimestamp = Date.now()
   }
+}
+
+/**
+ * Generates a unified plain-text codebase bundle containing all selected files
+ * with structured file separation headers, suitable for inspection and export.
+ */
+export function generateBundleText(
+  folderPath: string,
+  selectedPaths: string[]
+): BundlePreviewResult {
+  const folderName = path.basename(folderPath)
+  let text = `================================================================\nCodebase Bundle: ${folderName}\nTotal Selected Files: ${selectedPaths.length}\n================================================================\n\n`
+  let fileCount = 0
+  const filesIncluded: string[] = []
+
+  for (const fullPath of selectedPaths) {
+    try {
+      const contentStr = fs.readFileSync(fullPath, 'utf-8')
+      const relativePath = path.relative(folderPath, fullPath)
+      const fileHeader = `================================================================\nFile: ${relativePath}\n================================================================\n\n`
+      text += fileHeader + contentStr + '\n\n'
+      fileCount++
+      filesIncluded.push(relativePath)
+    } catch (err) {
+      console.error(`Failed to read file for bundle generation: ${fullPath}`, err)
+    }
+  }
+
+  const byteSize = Buffer.byteLength(text, 'utf-8')
+  return { text, fileCount, byteSize, filesIncluded }
 }
 
 /**

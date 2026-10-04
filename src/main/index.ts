@@ -31,7 +31,7 @@ import {
   importCookiesFromJson,
   type GoogleSignInEvent
 } from './googleAuth'
-import { handleFolderUpload, handleFileUpload, bundleAndInjectSelectedFiles } from './uploadManager'
+import { handleFolderUpload, handleFileUpload, bundleAndInjectSelectedFiles, generateBundleText } from './uploadManager'
 import type { ConfirmFolderUploadPayload } from '../shared/folderUpload'
 import { buildAgentHandoffPrompt, type CompressionOptions } from '../shared/contextCompressor'
 
@@ -266,6 +266,43 @@ ipcMain.on('confirm_folder_upload', async (_event, payload: ConfirmFolderUploadP
     }
   }
 })
+
+ipcMain.handle('preview_folder_bundle', async (_event, payload: ConfirmFolderUploadPayload) => {
+  if (!payload || !Array.isArray(payload.selectedPaths) || payload.selectedPaths.length === 0) {
+    return { text: '', fileCount: 0, byteSize: 0, filesIncluded: [] }
+  }
+  return generateBundleText(payload.folderPath, payload.selectedPaths)
+})
+
+ipcMain.handle('save_folder_bundle_to_disk', async (_event, payload: ConfirmFolderUploadPayload) => {
+  if (!payload || !Array.isArray(payload.selectedPaths) || payload.selectedPaths.length === 0) {
+    return { success: false, error: 'No files selected to bundle.' }
+  }
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return { success: false, error: 'Main window is not available.' }
+  }
+  const folderName = path.basename(payload.folderPath).replace(/[^a-zA-Z0-9_-]/g, '_')
+  const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
+    title: 'Save Codebase Bundle',
+    defaultPath: `${folderName}_codebase_bundle.txt`,
+    filters: [
+      { name: 'Text Bundle (*.txt)', extensions: ['txt'] },
+      { name: 'All Files (*.*)', extensions: ['*'] }
+    ]
+  })
+  if (canceled || !filePath) {
+    return { success: false, canceled: true }
+  }
+  try {
+    const { text, fileCount, byteSize } = generateBundleText(payload.folderPath, payload.selectedPaths)
+    fs.writeFileSync(filePath, text, 'utf-8')
+    return { success: true, savedPath: filePath, fileCount, byteSize }
+  } catch (err: any) {
+    console.error('Failed to save codebase bundle to disk:', err)
+    return { success: false, error: err?.message || 'Failed to write bundle file.' }
+  }
+})
+
 
 ipcMain.on('trigger_active_upload', async () => {
   if (activeViewId && mainWindow && !mainWindow.isDestroyed()) {

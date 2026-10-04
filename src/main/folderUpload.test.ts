@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
-import { scanFolder } from './uploadManager'
+import { scanFolder, generateBundleText } from './uploadManager'
 
 describe('scanFolder', () => {
   let tempDir: string
@@ -72,5 +72,22 @@ describe('scanFolder', () => {
     const result = scanFolder(tempDir)
     expect(result.totalFiles).toBe(1)
     expect(result.files[0].relativePath).toBe('main.js')
+  })
+
+  it('generates bundle text with file separators and accurate statistics', () => {
+    const f1 = path.join(tempDir, 'file1.txt')
+    const f2 = path.join(tempDir, 'src', 'file2.js')
+    fs.mkdirSync(path.join(tempDir, 'src'), { recursive: true })
+    fs.writeFileSync(f1, 'Content of file 1', 'utf8')
+    fs.writeFileSync(f2, 'console.log("hello")', 'utf8')
+
+    const bundle = generateBundleText(tempDir, [f1, f2])
+    expect(bundle.fileCount).toBe(2)
+    expect(bundle.filesIncluded).toEqual(['file1.txt', 'src/file2.js'])
+    expect(bundle.text).toContain('File: file1.txt')
+    expect(bundle.text).toContain('Content of file 1')
+    expect(bundle.text).toContain('File: src/file2.js')
+    expect(bundle.text).toContain('console.log("hello")')
+    expect(bundle.byteSize).toBeGreaterThan(0)
   })
 })

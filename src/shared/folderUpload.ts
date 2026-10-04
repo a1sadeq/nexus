@@ -19,3 +19,17 @@ export interface ConfirmFolderUploadPayload {
   folderPath: string
   selectedPaths: string[]
 }
+
+export interface BundlePreviewResult {
+  text: string
+  fileCount: number
+  byteSize: number
+  filesIncluded: string[]
+}
+
+export interface SaveBundleResult {
+  success: boolean
+  canceled?: boolean
+  savedPath?: string
+  error?: string
+}
