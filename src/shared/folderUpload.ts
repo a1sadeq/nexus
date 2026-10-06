@@ -13,6 +13,8 @@ export interface FolderScanResult {
   totalFiles: number
   totalBytes: number
   files: ScannedFileInfo[]
+  prunedDirs?: string[]
+  isTruncated?: boolean
 }
 
 export interface ConfirmFolderUploadPayload {
@@ -33,3 +35,35 @@ export interface SaveBundleResult {
   savedPath?: string
   error?: string
 }
+
+export interface ChunkFileItem {
+  relativePath: string
+  size: number
+}
+
+export interface BundleChunk {
+  index: number
+  totalChunks: number
+  byteSize: number
+  fileCount: number
+  files: ChunkFileItem[]
+  content: string
+}
+
+export interface PartitionResult {
+  chunks: BundleChunk[]
+  totalBytes: number
+  totalFiles: number
+  originalBytes: number
+  savedBytes: number
+  reductionPercent: number
+}
+
+export interface UploadChunkProgress {
+  currentChunk: number
+  totalChunks: number
+  byteSize: number
+  status: 'uploading' | 'completed' | 'failed'
+  message?: string
+}
+

@@ -31,8 +31,15 @@ import {
   importCookiesFromJson,
   type GoogleSignInEvent
 } from './googleAuth'
-import { handleFolderUpload, handleFileUpload, bundleAndInjectSelectedFiles, generateBundleText } from './uploadManager'
-import type { ConfirmFolderUploadPayload } from '../shared/folderUpload'
+import {
+  handleFolderUpload,
+  handleFileUpload,
+  bundleAndInjectSelectedFiles,
+  generateBundleText,
+  partitionCodebaseFiles,
+  uploadChunksSequentially
+} from './uploadManager'
+import type { ConfirmFolderUploadPayload, BundleChunk } from '../shared/folderUpload'
 import { buildAgentHandoffPrompt, type CompressionOptions } from '../shared/contextCompressor'
 
 // HW Acceleration is enabled for smooth UX; we offset its 300MB cost via network
@@ -302,6 +309,109 @@ ipcMain.handle('save_folder_bundle_to_disk', async (_event, payload: ConfirmFold
     return { success: false, error: err?.message || 'Failed to write bundle file.' }
   }
 })
+
+ipcMain.handle(
+  'partition_folder_bundle',
+  async (
+    _event,
+    payload: {
+      folderPath: string
+      selectedPaths: string[]
+      maxChunkBytes?: number
+      enableCompression?: boolean
+    }
+  ) => {
+    if (!payload || !Array.isArray(payload.selectedPaths) || payload.selectedPaths.length === 0) {
+      return null
+    }
+    return partitionCodebaseFiles(
+      payload.folderPath,
+      payload.selectedPaths,
+      payload.maxChunkBytes || 8 * 1024 * 1024,
+      payload.enableCompression ?? true
+    )
+  }
+)
+
+ipcMain.handle(
+  'upload_chunks_sequentially',
+  async (_event, payload: { folderName: string; chunks: BundleChunk[] }) => {
+    if (
+      activeViewId &&
+      mainWindow &&
+      !mainWindow.isDestroyed() &&
+      payload &&
+      Array.isArray(payload.chunks) &&
+      payload.chunks.length > 0
+    ) {
+      const view = aiViews.get(activeViewId)
+      if (view && !view.webContents.isDestroyed()) {
+        const modelKey = viewModelKeys.get(activeViewId) || ''
+        const feats = getMergedProviderFeatures(modelKey, providerConfig[modelKey])
+        await uploadChunksSequentially(
+          view,
+          mainWindow,
+          payload.chunks,
+          payload.folderName,
+          feats.attachmentSelector
+        )
+        return { success: true }
+      }
+    }
+    return { success: false, error: 'Active AI view is not available' }
+  }
+)
+
+ipcMain.handle(
+  'upload_single_chunk',
+  async (_event, payload: { folderName: string; chunk: BundleChunk }) => {
+    if (activeViewId && mainWindow && !mainWindow.isDestroyed() && payload?.chunk) {
+      const view = aiViews.get(activeViewId)
+      if (view && !view.webContents.isDestroyed()) {
+        const modelKey = viewModelKeys.get(activeViewId) || ''
+        const feats = getMergedProviderFeatures(modelKey, providerConfig[modelKey])
+        await uploadChunksSequentially(
+          view,
+          mainWindow,
+          [payload.chunk],
+          payload.folderName,
+          feats.attachmentSelector
+        )
+        return { success: true }
+      }
+    }
+    return { success: false, error: 'Active AI view is not available' }
+  }
+)
+
+ipcMain.handle(
+  'save_single_chunk_to_disk',
+  async (_event, payload: { folderName: string; chunk: BundleChunk }) => {
+    if (!mainWindow || mainWindow.isDestroyed() || !payload?.chunk) {
+      return { success: false, error: 'Main window is not available.' }
+    }
+    const chunk = payload.chunk
+    const safeName = (payload.folderName || 'bundle').replace(/[^a-zA-Z0-9_-]/g, '_')
+    const defaultName = `${safeName}_part${chunk.index}_of_${chunk.totalChunks}.txt`
+    const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
+      title: `Save Chunk Part ${chunk.index}`,
+      defaultPath: defaultName,
+      filters: [
+        { name: 'Text File (*.txt)', extensions: ['txt'] },
+        { name: 'All Files (*.*)', extensions: ['*'] }
+      ]
+    })
+    if (canceled || !filePath) {
+      return { success: false, canceled: true }
+    }
+    try {
+      fs.writeFileSync(filePath, chunk.content, 'utf-8')
+      return { success: true, savedPath: filePath }
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Failed to save chunk.' }
+    }
+  }
+)
 
 
 ipcMain.on('trigger_active_upload', async () => {
