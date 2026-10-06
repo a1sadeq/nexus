@@ -742,54 +742,96 @@ async function injectFilesViaCDP(
       }
     }
 
+    let injectedViaInput = false
     if (targetNodeId !== undefined) {
       await view.webContents.debugger.sendCommand('DOM.setFileInputFiles', {
         nodeId: targetNodeId,
         files: filePaths
       })
-    }
-  } catch (e) {
-    console.error('CDP DOM file injection failed:', e)
-  }
-
-  // Method 2: Native Drag & Drop Simulation targeting prompt coordinates
-  try {
-    const data = {
-      items: [],
-      files: filePaths,
-      dragOperationsMask: 1
+      injectedViaInput = true
     }
 
-    const targetX = Math.round(domInfo.dropX)
-    const targetY = Math.round(domInfo.dropY)
+    // Method 2: Native Drag & Drop Simulation targeting prompt coordinates (Fallback ONLY if DOM input was not available)
+    if (!injectedViaInput) {
+      try {
+        const data = {
+          items: [],
+          files: filePaths,
+          dragOperationsMask: 1
+        }
 
-    await view.webContents.debugger.sendCommand('Input.dispatchDragEvent', {
-      type: 'dragEnter',
-      x: 10,
-      y: 10,
-      data,
-      modifiers: 0
-    })
-    await new Promise((r) => setTimeout(r, 50))
+        const targetX = Math.round(domInfo.dropX)
+        const targetY = Math.round(domInfo.dropY)
 
-    await view.webContents.debugger.sendCommand('Input.dispatchDragEvent', {
-      type: 'dragOver',
-      x: targetX,
-      y: targetY,
-      data,
-      modifiers: 0
-    })
-    await new Promise((r) => setTimeout(r, 50))
+        await view.webContents.debugger.sendCommand('Input.dispatchDragEvent', {
+          type: 'dragEnter',
+          x: 10,
+          y: 10,
+          data,
+          modifiers: 0
+        })
+        await new Promise((r) => setTimeout(r, 50))
 
-    await view.webContents.debugger.sendCommand('Input.dispatchDragEvent', {
-      type: 'drop',
-      x: targetX,
-      y: targetY,
-      data,
-      modifiers: 0
-    })
+        await view.webContents.debugger.sendCommand('Input.dispatchDragEvent', {
+          type: 'dragOver',
+          x: targetX,
+          y: targetY,
+          data,
+          modifiers: 0
+        })
+        await new Promise((r) => setTimeout(r, 50))
+
+        await view.webContents.debugger.sendCommand('Input.dispatchDragEvent', {
+          type: 'drop',
+          x: targetX,
+          y: targetY,
+          data,
+          modifiers: 0
+        })
+      } catch (dragErr) {
+        console.error('CDP Drag Drop event dispatch failed:', dragErr)
+      }
+    }
   } catch (e) {
-    console.error('CDP Drag Drop event dispatch failed:', e)
+    console.error('CDP DOM file injection failed, attempting Drag & Drop fallback:', e)
+    try {
+      const data = {
+        items: [],
+        files: filePaths,
+        dragOperationsMask: 1
+      }
+
+      const targetX = Math.round(domInfo.dropX)
+      const targetY = Math.round(domInfo.dropY)
+
+      await view.webContents.debugger.sendCommand('Input.dispatchDragEvent', {
+        type: 'dragEnter',
+        x: 10,
+        y: 10,
+        data,
+        modifiers: 0
+      })
+      await new Promise((r) => setTimeout(r, 50))
+
+      await view.webContents.debugger.sendCommand('Input.dispatchDragEvent', {
+        type: 'dragOver',
+        x: targetX,
+        y: targetY,
+        data,
+        modifiers: 0
+      })
+      await new Promise((r) => setTimeout(r, 50))
+
+      await view.webContents.debugger.sendCommand('Input.dispatchDragEvent', {
+        type: 'drop',
+        x: targetX,
+        y: targetY,
+        data,
+        modifiers: 0
+      })
+    } catch (dragErr) {
+      console.error('CDP Drag Drop fallback also failed:', dragErr)
+    }
   }
 
   safeDetachDebugger(view)
