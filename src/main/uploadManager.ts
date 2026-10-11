@@ -658,7 +658,12 @@ async function injectFilesViaCDP(
   view: WebContentsView,
   filePaths: string[],
   customSelector?: string
-): Promise<void> {
+): Promise<{ success: boolean; method: 'input' | 'drag' | 'none' }> {
+  let injectionResult: { success: boolean; method: 'input' | 'drag' | 'none' } = {
+    success: false,
+    method: 'none'
+  }
+
   const domInfo: { w: number; h: number; dropX: number; dropY: number; targetInputIndex: number } =
     await view.webContents
       .executeJavaScript(`
@@ -669,7 +674,7 @@ async function injectFilesViaCDP(
           let dropY = Math.round(h * 0.82);
 
           const promptArea = document.querySelector(
-            'textarea, [contenteditable="true"], [role="textbox"], [data-testid="prompt-textarea"], #prompt-textarea, form'
+            'textarea, [contenteditable="true"], [role="textbox"], [data-testid="prompt-textarea"], #prompt-textarea, rich-textarea, .chat-input-editor, .ProseMirror, form'
           );
           if (promptArea) {
             const rect = promptArea.getBoundingClientRect();
@@ -711,13 +716,17 @@ async function injectFilesViaCDP(
     view.webContents.debugger.attach('1.3')
   }
 
-  // Method 1: Direct DOM input[type="file"] node injection
+  // Method 1: Direct DOM input[type="file"] node injection (only if a compatible document input exists)
+  let injectedViaInput = false
   try {
     const { root } = (await view.webContents.debugger.sendCommand('DOM.getDocument', {
       depth: -1
     })) as { root: { nodeId: number } }
 
-    const selectorToUse = customSelector?.trim() || 'input[type="file"]'
+    const selectorToUse =
+      customSelector && customSelector.includes('input')
+        ? customSelector.trim()
+        : 'input[type="file"]'
     let targetNodeId: number | undefined
 
     const { nodeIds } = (await view.webContents.debugger.sendCommand('DOM.querySelectorAll', {
@@ -725,78 +734,36 @@ async function injectFilesViaCDP(
       selector: selectorToUse
     })) as { nodeIds: number[] }
 
-    if (nodeIds && nodeIds.length > 0) {
-      if (domInfo.targetInputIndex >= 0 && domInfo.targetInputIndex < nodeIds.length) {
-        targetNodeId = nodeIds[domInfo.targetInputIndex]
-      } else {
-        targetNodeId = nodeIds[nodeIds.length - 1]
-      }
-    } else if (selectorToUse !== 'input[type="file"]') {
-      // Fallback to standard file input
-      const fallback = (await view.webContents.debugger.sendCommand('DOM.querySelectorAll', {
-        nodeId: root.nodeId,
-        selector: 'input[type="file"]'
-      })) as { nodeIds: number[] }
-      if (fallback.nodeIds && fallback.nodeIds.length > 0) {
-        targetNodeId = fallback.nodeIds[fallback.nodeIds.length - 1]
-      }
+    // ONLY target the input if it's confirmed compatible (never force media-only inputs!)
+    if (
+      nodeIds &&
+      nodeIds.length > 0 &&
+      domInfo.targetInputIndex >= 0 &&
+      domInfo.targetInputIndex < nodeIds.length
+    ) {
+      targetNodeId = nodeIds[domInfo.targetInputIndex]
     }
 
-    let injectedViaInput = false
     if (targetNodeId !== undefined) {
       await view.webContents.debugger.sendCommand('DOM.setFileInputFiles', {
         nodeId: targetNodeId,
         files: filePaths
       })
       injectedViaInput = true
-    }
-
-    // Method 2: Native Drag & Drop Simulation targeting prompt coordinates (Fallback ONLY if DOM input was not available)
-    if (!injectedViaInput) {
-      try {
-        const data = {
-          items: [],
-          files: filePaths,
-          dragOperationsMask: 1
-        }
-
-        const targetX = Math.round(domInfo.dropX)
-        const targetY = Math.round(domInfo.dropY)
-
-        await view.webContents.debugger.sendCommand('Input.dispatchDragEvent', {
-          type: 'dragEnter',
-          x: 10,
-          y: 10,
-          data,
-          modifiers: 0
-        })
-        await new Promise((r) => setTimeout(r, 50))
-
-        await view.webContents.debugger.sendCommand('Input.dispatchDragEvent', {
-          type: 'dragOver',
-          x: targetX,
-          y: targetY,
-          data,
-          modifiers: 0
-        })
-        await new Promise((r) => setTimeout(r, 50))
-
-        await view.webContents.debugger.sendCommand('Input.dispatchDragEvent', {
-          type: 'drop',
-          x: targetX,
-          y: targetY,
-          data,
-          modifiers: 0
-        })
-      } catch (dragErr) {
-        console.error('CDP Drag Drop event dispatch failed:', dragErr)
-      }
+      injectionResult = { success: true, method: 'input' }
     }
   } catch (e) {
-    console.error('CDP DOM file injection failed, attempting Drag & Drop fallback:', e)
+    console.warn('CDP DOM file injection skipped or failed, falling back to Drag & Drop:', e)
+  }
+
+  // Method 2: Native Drag & Drop Simulation targeting prompt coordinates (Fallback when DOM file input was media-only or absent)
+  if (!injectedViaInput) {
     try {
       const data = {
-        items: [],
+        items: [
+          { mimeType: 'text/plain', data: '' },
+          { mimeType: 'application/octet-stream', data: '' }
+        ],
         files: filePaths,
         dragOperationsMask: 1
       }
@@ -804,14 +771,15 @@ async function injectFilesViaCDP(
       const targetX = Math.round(domInfo.dropX)
       const targetY = Math.round(domInfo.dropY)
 
+      // Enter directly at the active composer/dropzone coordinates to trigger webview drop listeners
       await view.webContents.debugger.sendCommand('Input.dispatchDragEvent', {
         type: 'dragEnter',
-        x: 10,
-        y: 10,
+        x: targetX,
+        y: targetY,
         data,
         modifiers: 0
       })
-      await new Promise((r) => setTimeout(r, 50))
+      await new Promise((r) => setTimeout(r, 60))
 
       await view.webContents.debugger.sendCommand('Input.dispatchDragEvent', {
         type: 'dragOver',
@@ -820,7 +788,7 @@ async function injectFilesViaCDP(
         data,
         modifiers: 0
       })
-      await new Promise((r) => setTimeout(r, 50))
+      await new Promise((r) => setTimeout(r, 60))
 
       await view.webContents.debugger.sendCommand('Input.dispatchDragEvent', {
         type: 'drop',
@@ -829,12 +797,17 @@ async function injectFilesViaCDP(
         data,
         modifiers: 0
       })
+      injectionResult = { success: true, method: 'drag' }
     } catch (dragErr) {
-      console.error('CDP Drag Drop fallback also failed:', dragErr)
+      console.error('CDP Drag Drop event dispatch failed:', dragErr)
     }
   }
 
+  // Await 400ms settlement so Chromium and webview drop event listeners finish reading files before detaching debugger
+  await new Promise((r) => setTimeout(r, 400))
   safeDetachDebugger(view)
+
+  return injectionResult
 }
 
 function safeDetachDebugger(view: WebContentsView): void {

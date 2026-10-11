@@ -150,21 +150,22 @@ export const DEFAULT_PROVIDER_FEATURES: Record<string, ProviderFeatureConfig> = 
     virtualizationSelector: 'user-query, model-response, .user-query-bubble-with-background',
     enableSlashFocus: true,
     enableFocusRetention: true,
-    attachmentSelector: 'input[type="file"], button[aria-label*="Upload image"]'
+    attachmentSelector: 'input[type="file"]'
   },
   deepseek: {
     promptNavSelector: '.ds-message, [class*="ds-message-user"], [class*="user-message"]',
     chatTitleSelector: '[class*="chat-title"], [class*="session-item-active"], header h2',
     chatTitlePollingIntervalMs: 1500,
     defaultChatTitles: ['DeepSeek', 'DeepSeek Coder', 'New chat', 'Untitled'],
-    composerSelector: 'textarea.ant-input, #chat-input, textarea[placeholder*="DeepSeek"]',
+    composerSelector: 'textarea.ant-input, #chat-input, textarea[placeholder*="DeepSeek"], div[contenteditable="true"]',
     sendButtonSelector: 'button[class*="send"], [class*="send-btn"], button[type="submit"]',
     autoSubmitSkillPrompt: true,
     newChatSelector: 'button[class*="new-chat"], [class*="add-chat-btn"]',
     stopGenerationSelector: 'button[class*="stop-btn"], [class*="stop-generating"]',
     virtualizationSelector: '[class*="ds-message"]',
     enableSlashFocus: true,
-    enableFocusRetention: true
+    enableFocusRetention: true,
+    attachmentSelector: 'input[type="file"]'
   },
   perplexity: {
     promptNavSelector: '[data-testid="query-bubble"], [class*="user-query"], [class*="query-text"]',
@@ -178,7 +179,8 @@ export const DEFAULT_PROVIDER_FEATURES: Record<string, ProviderFeatureConfig> = 
     stopGenerationSelector: 'button[aria-label*="Stop"]',
     virtualizationSelector: '[data-testid="thread-turn"]',
     enableSlashFocus: true,
-    enableFocusRetention: true
+    enableFocusRetention: true,
+    attachmentSelector: 'input[type="file"]'
   },
   qwen: {
     promptNavSelector: '.chat-user-message, .qwen-chat-message-user, [class*="chat-user-message"]',
@@ -192,7 +194,8 @@ export const DEFAULT_PROVIDER_FEATURES: Record<string, ProviderFeatureConfig> = 
     stopGenerationSelector: 'button[class*="stop-btn"]',
     virtualizationSelector: '.qwen-chat-message-user, .qwen-chat-message-assistant',
     enableSlashFocus: true,
-    enableFocusRetention: true
+    enableFocusRetention: true,
+    attachmentSelector: 'input[type="file"]'
   },
   kimi: {
     promptNavSelector: '.segment.segment-user, [class*="segment-user"], [class*="user-segment"]',
@@ -206,7 +209,8 @@ export const DEFAULT_PROVIDER_FEATURES: Record<string, ProviderFeatureConfig> = 
     stopGenerationSelector: 'button[class*="stop-button"]',
     virtualizationSelector: '.segment.segment-user, .segment.segment-assistant',
     enableSlashFocus: true,
-    enableFocusRetention: true
+    enableFocusRetention: true,
+    attachmentSelector: 'input[type="file"]'
   },
   generic: {
     promptNavSelector: '[class*="user-query"]:not([class*="assistant"]), [class*="user-message"], [class*="UserMessage"], [data-message-author="user"]',
@@ -221,7 +225,7 @@ export const DEFAULT_PROVIDER_FEATURES: Record<string, ProviderFeatureConfig> = 
     virtualizationSelector: '[class*="user"], [class*="assistant"], [class*="message"]',
     enableSlashFocus: true,
     enableFocusRetention: true,
-    attachmentSelector: 'input[type="file"], button[aria-label*="Attach"], button[aria-label*="Upload"]'
+    attachmentSelector: 'input[type="file"]'
   }
 }
 

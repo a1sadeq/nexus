@@ -180,6 +180,36 @@ export const ProviderFeaturesSection: React.FC<Props> = ({
     }
   }
 
+  const [isTestingHooks, setIsTestingHooks] = useState(false)
+
+  const handleTestLiveHooks = async () => {
+    setIsTestingHooks(true)
+    try {
+      // @ts-ignore
+      const res = await window.electron?.ipcRenderer?.invoke('test_provider_live_hooks', selectedKey)
+      if (res?.success) {
+        const compMsg = res.compFound ? '✓ Composer found' : '✗ Composer not found'
+        const attachMsg = res.attachFound ? '✓ Upload found' : '✗ Upload not found'
+        if (setToast) {
+          setToast(`🎯 Tested live tab: ${compMsg}, ${attachMsg} (pulsed on screen)`)
+          setTimeout(() => setToast(null), 4000)
+        }
+      } else {
+        if (setToast) {
+          setToast(`⚠️ Please open a tab for ${modelLabel(selectedKey)} to test selectors live!`)
+          setTimeout(() => setToast(null), 3500)
+        }
+      }
+    } catch {
+      if (setToast) {
+        setToast('Failed to test live hooks')
+        setTimeout(() => setToast(null), 3000)
+      }
+    } finally {
+      setIsTestingHooks(false)
+    }
+  }
+
   const handleGenerateAiPrompt = async () => {
     setIsGeneratingPrompt(true)
     try {
@@ -426,6 +456,17 @@ export const ProviderFeaturesSection: React.FC<Props> = ({
           >
             <IconZap size={12} />
             <span>Quick Auto-Detect</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={handleTestLiveHooks}
+            disabled={isTestingHooks}
+            className="w-full py-1.5 px-3 rounded-xl text-[11px] font-medium border border-cyan-500/30 text-cyan-300 bg-cyan-500/10 hover:bg-cyan-500/20 transition-colors cursor-pointer flex items-center justify-center gap-1.5"
+            title="Sends a visual pulse to highlight composer and attach button inside the active open tab"
+          >
+            <IconMonitor size={12} />
+            <span>{isTestingHooks ? 'Testing Live Tab...' : 'Test Hooks on Live Tab'}</span>
           </button>
 
           {hasCustomFeatures && (

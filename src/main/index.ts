@@ -281,7 +281,7 @@ ipcMain.handle('preview_folder_bundle', async (_event, payload: ConfirmFolderUpl
   return generateBundleText(payload.folderPath, payload.selectedPaths)
 })
 
-ipcMain.handle('save_folder_bundle_to_disk', async (_event, payload: ConfirmFolderUploadPayload) => {
+ipcMain.handle('save_folder_bundle_to_disk', async (_event, payload: ConfirmFolderUploadPayload & { useDialog?: boolean }) => {
   if (!payload || !Array.isArray(payload.selectedPaths) || payload.selectedPaths.length === 0) {
     return { success: false, error: 'No files selected to bundle.' }
   }
@@ -289,21 +289,36 @@ ipcMain.handle('save_folder_bundle_to_disk', async (_event, payload: ConfirmFold
     return { success: false, error: 'Main window is not available.' }
   }
   const folderName = path.basename(payload.folderPath).replace(/[^a-zA-Z0-9_-]/g, '_')
-  const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
-    title: 'Save Codebase Bundle',
-    defaultPath: `${folderName}_codebase_bundle.txt`,
-    filters: [
-      { name: 'Text Bundle (*.txt)', extensions: ['txt'] },
-      { name: 'All Files (*.*)', extensions: ['*'] }
-    ]
-  })
-  if (canceled || !filePath) {
-    return { success: false, canceled: true }
-  }
+  const targetDir = activeProjectDir || join(app.getPath('downloads'), 'nexus')
+
   try {
+    if (!existsSync(targetDir)) {
+      mkdirSync(targetDir, { recursive: true })
+    }
+
+    let filePath: string
+    if (payload.useDialog) {
+      const { canceled, filePath: dialogPath } = await dialog.showSaveDialog(mainWindow, {
+        title: 'Save Codebase Bundle',
+        defaultPath: join(targetDir, `${folderName}_codebase_bundle.txt`),
+        filters: [
+          { name: 'Text Bundle (*.txt)', extensions: ['txt'] },
+          { name: 'All Files (*.*)', extensions: ['*'] }
+        ]
+      })
+      if (canceled || !dialogPath) {
+        return { success: false, canceled: true }
+      }
+      filePath = dialogPath
+    } else {
+      // Auto-download directly to nexus downloads folder
+      filePath = join(targetDir, `${folderName}_codebase_bundle_${Date.now()}.txt`)
+    }
+
     const { text, fileCount, byteSize } = generateBundleText(payload.folderPath, payload.selectedPaths)
     fs.writeFileSync(filePath, text, 'utf-8')
-    return { success: true, savedPath: filePath, fileCount, byteSize }
+    clipboard.writeText(filePath)
+    return { success: true, savedPath: filePath, fileCount, byteSize, copiedToClipboard: true }
   } catch (err: any) {
     console.error('Failed to save codebase bundle to disk:', err)
     return { success: false, error: err?.message || 'Failed to write bundle file.' }
@@ -386,27 +401,44 @@ ipcMain.handle(
 
 ipcMain.handle(
   'save_single_chunk_to_disk',
-  async (_event, payload: { folderName: string; chunk: BundleChunk }) => {
+  async (_event, payload: { folderName: string; chunk: BundleChunk; useDialog?: boolean }) => {
     if (!mainWindow || mainWindow.isDestroyed() || !payload?.chunk) {
       return { success: false, error: 'Main window is not available.' }
     }
     const chunk = payload.chunk
     const safeName = (payload.folderName || 'bundle').replace(/[^a-zA-Z0-9_-]/g, '_')
-    const defaultName = `${safeName}_part${chunk.index}_of_${chunk.totalChunks}.txt`
-    const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
-      title: `Save Chunk Part ${chunk.index}`,
-      defaultPath: defaultName,
-      filters: [
-        { name: 'Text File (*.txt)', extensions: ['txt'] },
-        { name: 'All Files (*.*)', extensions: ['*'] }
-      ]
-    })
-    if (canceled || !filePath) {
-      return { success: false, canceled: true }
-    }
+    const targetDir = activeProjectDir || join(app.getPath('downloads'), 'nexus')
+
     try {
+      if (!existsSync(targetDir)) {
+        mkdirSync(targetDir, { recursive: true })
+      }
+
+      let filePath: string
+      if (payload.useDialog) {
+        const defaultName = `${safeName}_part${chunk.index}_of_${chunk.totalChunks}.txt`
+        const { canceled, filePath: dialogPath } = await dialog.showSaveDialog(mainWindow, {
+          title: `Save Chunk Part ${chunk.index}`,
+          defaultPath: join(targetDir, defaultName),
+          filters: [
+            { name: 'Text File (*.txt)', extensions: ['txt'] },
+            { name: 'All Files (*.*)', extensions: ['*'] }
+          ]
+        })
+        if (canceled || !dialogPath) {
+          return { success: false, canceled: true }
+        }
+        filePath = dialogPath
+      } else {
+        filePath = join(
+          targetDir,
+          `${safeName}_part${chunk.index}_of_${chunk.totalChunks}_${Date.now()}.txt`
+        )
+      }
+
       fs.writeFileSync(filePath, chunk.content, 'utf-8')
-      return { success: true, savedPath: filePath }
+      clipboard.writeText(filePath)
+      return { success: true, savedPath: filePath, copiedToClipboard: true }
     } catch (err: any) {
       return { success: false, error: err?.message || 'Failed to save chunk.' }
     }
@@ -426,7 +458,58 @@ ipcMain.on('trigger_active_upload', async () => {
 })
 
 ipcMain.handle('shell_open', async (_event, url: string) => {
-  await shell.openExternal(url)
+  if (!url || typeof url !== 'string') return
+  try {
+    const parsed = new URL(url)
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:' || parsed.protocol === 'mailto:') {
+      await shell.openExternal(url)
+    } else {
+      console.warn('[Security] Blocked non-http/https external open URL:', url)
+    }
+  } catch {
+    console.warn('[Security] Invalid URL passed to shell_open:', url)
+  }
+})
+
+ipcMain.handle('test_provider_live_hooks', async (_event, modelKey: string) => {
+  let targetView: Electron.WebContentsView | null = null
+  for (const [tabId, view] of aiViews) {
+    if (viewModelKeys.get(tabId) === modelKey) {
+      targetView = view
+      break
+    }
+  }
+  if (!targetView && activeViewId && aiViews.has(activeViewId)) {
+    targetView = aiViews.get(activeViewId)!
+  }
+  if (!targetView || targetView.webContents.isDestroyed()) {
+    return { success: false, reason: 'no_view' }
+  }
+  const feats = getMergedProviderFeatures(modelKey, providerConfig[modelKey])
+  const compSel = feats.composerSelector || 'textarea, [contenteditable="true"]'
+  const attachSel = feats.attachmentSelector || 'input[type="file"]'
+  const script = `(() => {
+    const flashElement = (sel, color) => {
+      const el = document.querySelector(sel);
+      if (el) {
+        const prevOutline = el.style.outline;
+        const prevShadow = el.style.boxShadow;
+        el.style.outline = '3px solid ' + color;
+        el.style.boxShadow = '0 0 20px ' + color;
+        setTimeout(() => {
+          el.style.outline = prevOutline;
+          el.style.boxShadow = prevShadow;
+        }, 1600);
+        return true;
+      }
+      return false;
+    };
+    const compFound = flashElement(${JSON.stringify(compSel)}, '#00e5ff');
+    const attachFound = flashElement(${JSON.stringify(attachSel)}, '#34d399');
+    return { success: true, compFound, attachFound };
+  })()`
+  const result = await targetView.webContents.executeJavaScript(script).catch(() => ({ success: false }))
+  return result
 })
 
 ipcMain.on('window_minimize', () => {
@@ -1565,7 +1648,19 @@ app.on('window-all-closed', () => {
 
 function focusPromptInView(view: Electron.WebContentsView | null | undefined, modelKey?: string): void {
   if (!view || view.webContents.isDestroyed()) return
-  const feats = modelKey ? getMergedProviderFeatures(modelKey, providerConfig[modelKey]) : null
+  let keyToUse = modelKey
+  if (!keyToUse && activeViewId) {
+    keyToUse = viewModelKeys.get(activeViewId)
+  }
+  if (!keyToUse) {
+    for (const [id, v] of aiViews) {
+      if (v === view) {
+        keyToUse = viewModelKeys.get(id)
+        break
+      }
+    }
+  }
+  const feats = keyToUse ? getMergedProviderFeatures(keyToUse, providerConfig[keyToUse]) : null
   const customSel = feats?.composerSelector ? JSON.stringify(feats.composerSelector) : 'null'
   const script = `
     (() => {
@@ -1590,11 +1685,15 @@ function focusPromptInView(view: Electron.WebContentsView | null | undefined, mo
         // DeepSeek
         '#chat-input',
         'textarea#chat-input',
+        'textarea[placeholder*="DeepSeek"]',
         // Perplexity
         'textarea[placeholder*="Ask"]',
-        // Generic Fallbacks
+        'textarea[placeholder*="search"]',
+        // Generic Universal Fallbacks for Any AI
         '[contenteditable="true"][role="textbox"]',
         'div[contenteditable="true"]',
+        '[contenteditable="true"]',
+        '[contenteditable="plaintext-only"]',
         'textarea:not([disabled])',
         'input[type="text"]:not([disabled])'
       ];
@@ -1704,9 +1803,13 @@ if (!window.__slashFocusInjected && ${enableSlash}) {
         'textarea#chat-input', 'textarea[class*="chat-input"]', 'textarea.ant-input:not([style*="display: none"]):not([disabled])',
         '#chat-input',
         'textarea#chat-input',
+        'textarea[placeholder*="DeepSeek"]',
         'textarea[placeholder*="Ask"]',
+        'textarea[placeholder*="search"]',
         '[contenteditable="true"][role="textbox"]',
         'div[contenteditable="true"]',
+        '[contenteditable="true"]',
+        '[contenteditable="plaintext-only"]',
         'textarea:not([disabled])',
         'input[type="text"]:not([disabled])'
       ];
@@ -1812,7 +1915,6 @@ function ensureAiView(tabId: string): Electron.WebContentsView {
   })
 
   view.webContents.userAgent = AI_UA
-  view.webContents.setZoomFactor(currentWebviewZoom);
   view.webContents.setZoomFactor(currentWebviewZoom);
   setViewBackground(view)
   view.setVisible(false)
@@ -2882,11 +2984,15 @@ ipcMain.handle('extract_provider_live_dom', async (_event, modelKey: string, pro
         const overlays = clone.querySelectorAll('[class*="fixed"], [class*="z-10000"], [id^="bits-"]');
         overlays.forEach(el => el.remove());
 
-        // Strip attributes from the root clone itself (TreeWalker misses the root)
+        const shouldKeepAttr = (n) => {
+          return n === 'id' || n === 'class' || n.startsWith('data-') || n === 'role' || n === 'placeholder' || n === 'type' || n === 'contenteditable' || n === 'aria-label' || n === 'accept' || n === 'name' || n === 'title';
+        };
+
+        // Strip non-essential attributes from the root clone itself
         const rootAttrs = Array.from(clone.attributes || []);
         for (const attr of rootAttrs) {
           const name = attr.name.toLowerCase();
-          if (name !== 'id' && name !== 'class' && !name.startsWith('data-') && name !== 'role' && name !== 'placeholder' && name !== 'type' && name !== 'contenteditable') {
+          if (!shouldKeepAttr(name)) {
             clone.removeAttribute(attr.name);
           }
         }
@@ -2900,7 +3006,7 @@ ipcMain.handle('extract_provider_live_dom', async (_event, modelKey: string, pro
             const attrs = Array.from(el.attributes);
             for (const attr of attrs) {
               const name = attr.name.toLowerCase();
-              if (name !== 'id' && name !== 'class' && !name.startsWith('data-') && name !== 'role' && name !== 'placeholder' && name !== 'type' && name !== 'contenteditable') {
+              if (!shouldKeepAttr(name)) {
                 el.removeAttribute(attr.name);
               }
             }

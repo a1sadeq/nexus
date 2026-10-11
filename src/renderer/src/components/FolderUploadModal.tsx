@@ -297,6 +297,8 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
   const [previewMeta, setPreviewMeta] = useState<{ fileCount: number; byteSize: number } | null>(null)
   const [copySuccess, setCopySuccess] = useState(false)
   const [saveStatus, setSaveStatus] = useState<string | null>(null)
+  const [savedFilePath, setSavedFilePath] = useState<string | null>(null)
+  const [pathCopied, setPathCopied] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
 
   // Chunk Partition Drawer state
@@ -568,6 +570,27 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
     }
   }
 
+  // Copy full path to clipboard helper with feedback
+  const copyPathToClipboard = useCallback(async (filePath: string) => {
+    try {
+      await navigator.clipboard.writeText(filePath)
+      setPathCopied(true)
+      setTimeout(() => setPathCopied(false), 2500)
+    } catch {
+      // @ts-ignore
+      window.electron?.ipcRenderer?.send('downloads_copy_path', filePath)
+      setPathCopied(true)
+      setTimeout(() => setPathCopied(false), 2500)
+    }
+  }, [])
+
+  const handleOpenFolder = useCallback((filePath: string) => {
+    // @ts-ignore
+    window.electron?.downloads?.showItemInFolder?.(filePath) ||
+      // @ts-ignore
+      window.electron?.ipcRenderer?.invoke('downloads_show_item_in_folder', filePath)
+  }, [])
+
   // Save single chunk to disk
   const handleSaveSingleChunk = async (chunk: BundleChunk): Promise<void> => {
     try {
@@ -577,8 +600,9 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
         chunk
       })
       if (res?.success && res?.savedPath) {
+        setSavedFilePath(res.savedPath)
         setSaveStatus(`Part ${chunk.index} saved`)
-        setTimeout(() => setSaveStatus(null), 3000)
+        copyPathToClipboard(res.savedPath)
       }
     } catch (err) {
       console.error('Save single chunk failed:', err)
@@ -651,8 +675,9 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
         selectedPaths: Array.from(selectedPaths)
       })
       if (res?.success && res?.savedPath) {
+        setSavedFilePath(res.savedPath)
         setSaveStatus(`Saved to ${res.savedPath}`)
-        setTimeout(() => setSaveStatus(null), 4000)
+        copyPathToClipboard(res.savedPath)
       } else if (!res?.canceled) {
         const element = document.createElement('a')
         const fileBlob = new Blob([previewContent || `Codebase bundle for ${data.folderName}`], {
@@ -664,12 +689,10 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
         element.click()
         document.body.removeChild(element)
         setSaveStatus(`Downloaded ${data.folderName}_codebase_bundle.txt`)
-        setTimeout(() => setSaveStatus(null), 4000)
       }
     } catch (err) {
       console.error('Failed to download bundle:', err)
       setSaveStatus('Failed to save file.')
-      setTimeout(() => setSaveStatus(null), 4000)
     } finally {
       setIsSaving(false)
     }
@@ -1020,11 +1043,50 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
             <span className="text-xs text-gray-400">
               ({formatBytes(selectedStats.bytes)})
             </span>
-            {saveStatus && (
+            {savedFilePath ? (
+              <div className="ml-2 flex items-center gap-1.5 px-3 py-1 rounded-xl bg-cyan-950/40 border border-cyan-500/30 text-cyan-300 text-xs shadow-sm animate-in fade-in">
+                <span className="font-mono text-[11px] truncate max-w-[200px]" title={savedFilePath}>
+                  {savedFilePath.split('/').pop()}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => copyPathToClipboard(savedFilePath)}
+                  className="px-2 py-0.5 rounded-lg bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-200 hover:text-white transition-colors cursor-pointer flex items-center gap-1 font-medium text-[11px]"
+                  title="Copy full path to clipboard"
+                >
+                  {pathCopied ? (
+                    <>
+                      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
+                        <polyline points="20 6 9 17 4 12" />
+                      </svg>
+                      <span className="text-emerald-300">Copied!</span>
+                    </>
+                  ) : (
+                    <>
+                      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
+                        <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
+                      </svg>
+                      <span>Copy Path</span>
+                    </>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleOpenFolder(savedFilePath)}
+                  className="px-1.5 py-0.5 rounded-lg bg-white/5 hover:bg-white/10 text-gray-300 hover:text-white transition-colors cursor-pointer text-[11px]"
+                  title="Reveal in file manager"
+                >
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2" />
+                  </svg>
+                </button>
+              </div>
+            ) : saveStatus ? (
               <span className="ml-2 px-2.5 py-0.5 rounded-full text-[11px] font-medium bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 animate-in fade-in">
                 ✓ {saveStatus}
               </span>
-            )}
+            ) : null}
           </div>
 
           <div className="flex items-center gap-2.5">
@@ -1059,20 +1121,20 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
               <span>Preview</span>
             </button>
 
-            {/* Download / Export to Disk Button */}
+            {/* Download / Auto-Download to Nexus Folder */}
             <button
               type="button"
               disabled={selectedStats.count === 0 || isSaving}
               onClick={handleDownloadBundle}
               className="px-3.5 py-2 rounded-xl text-xs font-medium text-amber-300 hover:text-white bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed shadow-sm"
-              title="Save the complete codebase bundle as a text file to your computer"
+              title="Auto-download complete codebase bundle to Nexus downloads folder and copy path to clipboard"
             >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
                 <polyline points="7 10 12 15 17 10" />
                 <line x1="12" y1="15" x2="12" y2="3" />
               </svg>
-              <span>{isSaving ? 'Saving...' : 'Download'}</span>
+              <span>{isSaving ? 'Saving...' : pathCopied ? '✓ Path Copied' : 'Download'}</span>
             </button>
 
             {/* Cancel Button */}
@@ -1330,7 +1392,21 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
 
             {/* Drawer Bottom Action Bar */}
             <div className="px-6 py-4 border-t border-purple-500/20 bg-purple-950/20 flex flex-wrap items-center justify-between gap-3">
-              <div className="text-xs text-gray-400">
+              <div className="text-xs text-gray-400 flex items-center gap-2">
+                {savedFilePath && (
+                  <div className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-lg bg-cyan-950/60 border border-cyan-500/30 text-cyan-300 text-xs shadow-sm">
+                    <span className="font-mono text-[10px] truncate max-w-[160px]" title={savedFilePath}>
+                      {savedFilePath.split('/').pop()}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => copyPathToClipboard(savedFilePath)}
+                      className="px-1.5 py-0.5 rounded bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-200 text-[10px] cursor-pointer"
+                    >
+                      {pathCopied ? 'Copied!' : 'Copy'}
+                    </button>
+                  </div>
+                )}
                 {isUploadingSequentially ? (
                   <span className="text-cyan-300 font-mono animate-pulse">
                     ⚡ {uploadProgress?.message || 'Uploading chunks sequentially (1.5s delay)...'}
