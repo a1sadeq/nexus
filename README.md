@@ -197,6 +197,29 @@ npm run build:mac     # For macOS (.dmg)
 
 ---
 
+## 📦 Download & Installation
+
+### Latest Release: [v1.0.1](https://github.com/a1sadeq/nexus/releases/tag/v1.0.1)
+
+| Platform | Package | Download | Install Command |
+| :--- | :--- | :--- | :--- |
+| **Windows 10/11** | `nexus-1.0.1-setup.exe` | [Download](https://github.com/a1sadeq/nexus/releases/download/v1.0.1/nexus-1.0.0-setup.exe) | Double-click installer |
+| **Arch Linux / Manjaro** | `nexus-1.0.1.pacman` | [Download](https://github.com/a1sadeq/nexus/releases/download/v1.0.1/nexus-1.0.0.pacman) | `sudo pacman -U nexus-1.0.0.pacman` |
+
+> **Linux (Debian/Ubuntu/AppImage)**: Build from source — Windows & Arch packages available for immediate download above.
+
+### Build from Source
+
+```bash
+git clone https://github.com/a1sadeq/nexus.git
+cd nexus
+npm install
+npm run build:linux    # Linux packages
+npm run build:win      # Windows installer (requires wine)
+```
+
+---
+
 ## 🛠️ Tech Stack & Dependencies
 
 - **Runtime**: [Electron 43](https://electronjs.org/)
