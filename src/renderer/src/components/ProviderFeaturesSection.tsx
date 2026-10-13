@@ -27,6 +27,7 @@ import { generateFeatureHooksPrompt } from '../lib/promptGenerator'
 
 interface Props {
   models: ModelDef[]
+  activeModelKey?: string
   providerConfig: ProviderConfigMap
   setProviderConfig: (updater: (prev: ProviderConfigMap) => ProviderConfigMap) => void
   setToast?: (msg: string | null) => void
@@ -34,11 +35,23 @@ interface Props {
 
 export const ProviderFeaturesSection: React.FC<Props> = ({
   models,
+  activeModelKey,
   providerConfig,
   setProviderConfig,
   setToast
 }) => {
-  const [selectedKey, setSelectedKey] = useState<string>(() => models[0]?.key ?? 'chatgpt')
+  const [selectedKey, setSelectedKey] = useState<string>(() => {
+    if (activeModelKey && models.some((m) => m.key === activeModelKey)) return activeModelKey
+    return models[0]?.key ?? 'chatgpt'
+  })
+  const [testResult, setTestResult] = useState<{
+    compFound: boolean
+    compVia: string | null
+    compTag: string | null
+    attachFound: boolean
+    attachVia: string | null
+    attachTag: string | null
+  } | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
   const [newTitleInput, setNewTitleInput] = useState('')
 
@@ -188,19 +201,22 @@ export const ProviderFeaturesSection: React.FC<Props> = ({
       // @ts-ignore
       const res = await window.electron?.ipcRenderer?.invoke('test_provider_live_hooks', selectedKey)
       if (res?.success) {
-        const compMsg = res.compFound ? '✓ Composer found' : '✗ Composer not found'
-        const attachMsg = res.attachFound ? '✓ Upload found' : '✗ Upload not found'
+        setTestResult(res)
+        const compMsg = res.compFound ? `✓ Composer (${res.compVia || 'found'})` : '✗ Composer not found'
+        const attachMsg = res.attachFound ? `✓ Upload (${res.attachVia || 'found'})` : '✗ Upload not found'
         if (setToast) {
-          setToast(`🎯 Tested live tab: ${compMsg}, ${attachMsg} (pulsed on screen)`)
-          setTimeout(() => setToast(null), 4000)
+          setToast(`🎯 Tested live tab: ${compMsg} | ${attachMsg}`)
+          setTimeout(() => setToast(null), 4500)
         }
       } else {
+        setTestResult(null)
         if (setToast) {
           setToast(`⚠️ Please open a tab for ${modelLabel(selectedKey)} to test selectors live!`)
           setTimeout(() => setToast(null), 3500)
         }
       }
     } catch {
+      setTestResult(null)
       if (setToast) {
         setToast('Failed to test live hooks')
         setTimeout(() => setToast(null), 3000)
@@ -228,9 +244,16 @@ export const ProviderFeaturesSection: React.FC<Props> = ({
         console.warn('Failed to extract live dom for prompt generation:', e)
       }
 
+      const activeUrl = activeModel?.url || ''
+      let host = ''
+      try {
+        if (activeUrl) host = new URL(activeUrl).host
+      } catch {}
+
       const generated = generateFeatureHooksPrompt({
         providerName: activeModel?.label || modelLabel(selectedKey),
-        providerUrl: activeModel?.url,
+        providerUrl: activeUrl,
+        providerHost: host,
         currentFeatures: mergedFeatures,
         liveDomHtml: extractedHtml || undefined
       })
@@ -244,7 +267,7 @@ export const ProviderFeaturesSection: React.FC<Props> = ({
         setCopiedPrompt(true)
         setTimeout(() => setCopiedPrompt(false), 2500)
         if (setToast) {
-          setToast(`📋 Copied AI reverse-engineering prompt for ${modelLabel(selectedKey)} to clipboard!`)
+          setToast(`📋 Copied AI selector extraction prompt for ${modelLabel(selectedKey)} to clipboard!`)
           setTimeout(() => setToast(null), 3500)
         }
       } catch {
@@ -261,6 +284,23 @@ export const ProviderFeaturesSection: React.FC<Props> = ({
     }
   }
 
+  const VALID_FEATURE_KEYS: (keyof ProviderFeatureConfig)[] = [
+    'attachmentSelector',
+    'promptNavSelector',
+    'composerSelector',
+    'sendButtonSelector',
+    'chatTitleSelector',
+    'newChatSelector',
+    'stopGenerationSelector',
+    'virtualizationSelector',
+    'enableSlashFocus',
+    'enableFocusRetention',
+    'autoSubmitSkillPrompt',
+    'customInitScript',
+    'defaultChatTitles',
+    'chatTitlePollingIntervalMs'
+  ]
+
   const handleApplyAiJson = () => {
     try {
       setImportError(null)
@@ -270,36 +310,41 @@ export const ProviderFeaturesSection: React.FC<Props> = ({
         raw = jsonMatch[1].trim()
       }
       const parsed = JSON.parse(raw)
-      if (typeof parsed !== 'object' || parsed === null) {
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
         throw new Error('Imported content must be a JSON object')
       }
 
-      const validKeys: (keyof ProviderFeatureConfig)[] = [
-        'attachmentSelector',
-        'promptNavSelector',
-        'composerSelector',
-        'sendButtonSelector',
-        'chatTitleSelector',
-        'newChatSelector',
-        'stopGenerationSelector',
-        'virtualizationSelector',
-        'enableSlashFocus',
-        'enableFocusRetention',
-        'autoSubmitSkillPrompt',
-        'customInitScript',
-        'defaultChatTitles'
-      ]
-
+      const accepted: string[] = []
+      const rejected: string[] = []
       const nextUpdates: Partial<ProviderFeatureConfig> = {}
-      for (const key of validKeys) {
-        if (key in parsed && parsed[key] !== undefined) {
-          // @ts-ignore
-          nextUpdates[key] = parsed[key]
+
+      for (const [key, value] of Object.entries(parsed)) {
+        if (VALID_FEATURE_KEYS.includes(key as keyof ProviderFeatureConfig)) {
+          if (typeof value === 'string') {
+            const trimmed = value.trim()
+            if (trimmed) {
+              ;(nextUpdates as any)[key] = trimmed
+              accepted.push(key)
+            } else {
+              rejected.push(`${key} (empty string)`)
+            }
+          } else if (typeof value === 'boolean' || typeof value === 'number') {
+            ;(nextUpdates as any)[key] = value
+            accepted.push(key)
+          } else if (Array.isArray(value)) {
+            const arr = value.map((s) => String(s).trim()).filter(Boolean)
+            ;(nextUpdates as any)[key] = arr
+            accepted.push(key)
+          } else {
+            rejected.push(`${key} (invalid type)`)
+          }
+        } else {
+          rejected.push(key)
         }
       }
 
-      if (Object.keys(nextUpdates).length === 0) {
-        throw new Error('No recognized feature selectors found in JSON')
+      if (accepted.length === 0) {
+        throw new Error(`No recognized feature selectors found in JSON.${rejected.length > 0 ? ` Unknown keys: ${rejected.join(', ')}` : ''}`)
       }
 
       setProviderConfig((prev) => {
@@ -318,9 +363,12 @@ export const ProviderFeaturesSection: React.FC<Props> = ({
 
       setShowImportModal(false)
       setImportJsonText('')
+      const reportMsg = `✨ Imported for ${modelLabel(selectedKey)}: Accepted [${accepted.join(', ')}]${
+        rejected.length > 0 ? ` | Ignored [${rejected.join(', ')}]` : ''
+      }`
       if (setToast) {
-        setToast(`✨ Successfully imported AI selectors for ${modelLabel(selectedKey)}!`)
-        setTimeout(() => setToast(null), 3500)
+        setToast(reportMsg)
+        setTimeout(() => setToast(null), 4500)
       }
     } catch (e: any) {
       setImportError(e?.message || 'Invalid JSON format')
@@ -468,6 +516,31 @@ export const ProviderFeaturesSection: React.FC<Props> = ({
             <IconMonitor size={12} />
             <span>{isTestingHooks ? 'Testing Live Tab...' : 'Test Hooks on Live Tab'}</span>
           </button>
+
+          {testResult && (
+            <div className="p-2.5 rounded-xl border border-cyan-500/30 bg-cyan-500/10 text-xs flex flex-col gap-1.5">
+              <div className="flex items-center justify-between font-bold text-[10px] text-cyan-300">
+                <span>Live Probe Results:</span>
+                <span className="text-[9px] font-mono text-cyan-400">Pulsed</span>
+              </div>
+              <div className="flex items-center gap-1.5 text-[10px]">
+                <span className={testResult.compFound ? 'text-emerald-400 font-bold shrink-0' : 'text-red-400 font-bold shrink-0'}>
+                  {testResult.compFound ? '✓ Composer:' : '✗ Composer:'}
+                </span>
+                <span className="font-mono text-[9px] text-gray-300 truncate" title={testResult.compVia || undefined}>
+                  {testResult.compFound ? (testResult.compVia || 'found') : 'not found'}
+                </span>
+              </div>
+              <div className="flex items-center gap-1.5 text-[10px]">
+                <span className={testResult.attachFound ? 'text-emerald-400 font-bold shrink-0' : 'text-red-400 font-bold shrink-0'}>
+                  {testResult.attachFound ? '✓ Upload:' : '✗ Upload:'}
+                </span>
+                <span className="font-mono text-[9px] text-gray-300 truncate" title={testResult.attachVia || undefined}>
+                  {testResult.attachFound ? (testResult.attachVia || 'found') : 'not found'}
+                </span>
+              </div>
+            </div>
+          )}
 
           {hasCustomFeatures && (
             <button

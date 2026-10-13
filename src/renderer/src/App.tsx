@@ -1779,6 +1779,7 @@ Acknowledge these skills with a concise confirmation in this exact format:
           setWebviewThemeOn={setWebviewThemeOn}
           providerConfig={providerConfig}
           setProviderConfig={setProviderConfig}
+          activeModelKey={tabs.find((t) => t.id === activeId)?.model}
           interfaceSettings={interfaceSettings}
           onInterfaceSettingsChange={(newSettings) => {
             setInterfaceSettings(newSettings)

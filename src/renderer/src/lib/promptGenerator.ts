@@ -338,6 +338,7 @@ Output your findings as an organized Markdown Table with columns: \`#\`, \`Secti
 export interface FeaturePromptGenParams {
   providerName?: string
   providerUrl?: string
+  providerHost?: string
   currentFeatures?: ProviderFeatureConfig
   liveDomHtml?: string
 }
@@ -345,6 +346,17 @@ export interface FeaturePromptGenParams {
 export function generateFeatureHooksPrompt(params: FeaturePromptGenParams): string {
   const name = params.providerName || 'Target AI Provider'
   const url = params.providerUrl || 'https://example.com'
+  const host =
+    params.providerHost ||
+    (url
+      ? (() => {
+          try {
+            return new URL(url).host
+          } catch {
+            return ''
+          }
+        })()
+      : '')
 
   const liveDomSection = params.liveDomHtml
     ? `## 📄 EXTRACTED LIVE HTML DOM\nBelow is the real, sanitized DOM hierarchy extracted directly from the active webview of **${name}** (${url}). Analyze the exact tag names, IDs, attributes, and CSS classes present in this HTML:\n\n\`\`\`html\n${params.liveDomHtml.trim()}\n\`\`\`\n`
@@ -359,6 +371,10 @@ export function generateFeatureHooksPrompt(params: FeaturePromptGenParams): stri
 
 You are an expert Frontend Reverse Engineer & DOM Automation Specialist for **Nexus**, a high-performance native desktop AI workstation.
 Nexus controls AI webviews through native Chromium DevTools Protocol (CDP) and DOM automation hooks to power desktop keyboard shortcuts, background sync, and smart integrations.
+
+Target Provider: **${name}**
+Provider Host: **${host || name}**
+Target URL: **${url}**
 
 ## 🎯 OBJECTIVE
 Analyze the DOM structure of **"${name}"** (${url}) and provide the exact, robust, and stable CSS selectors required for the following 8 automation features:
@@ -410,7 +426,7 @@ ${liveDomSection}
 ---
 
 ## ⚡ REQUIRED OUTPUT FORMAT
-Return your response as a valid JSON object wrapped in a \`\`\`json code block with the exact keys:
+IMPORTANT: Return ONLY a valid JSON object with EXACTLY the known keys shown below. Do NOT write conversational filler or explanations outside the JSON code block. Return ONLY the JSON object wrapped in a \`\`\`json code block:
 \`\`\`json
 {
   "attachmentSelector": "...",
@@ -423,6 +439,6 @@ Return your response as a valid JSON object wrapped in a \`\`\`json code block w
   "virtualizationSelector": "..."
 }
 \`\`\`
-Along with a concise explanation of each chosen selector and why it is resilient to site updates.`
+`
 }
 

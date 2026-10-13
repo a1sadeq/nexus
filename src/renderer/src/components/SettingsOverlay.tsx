@@ -54,6 +54,7 @@ interface Props {
   setWebviewThemeOn: (on: boolean) => void
   providerConfig: ProviderConfigMap
   setProviderConfig: (updater: (prev: ProviderConfigMap) => ProviderConfigMap) => void
+  activeModelKey?: string
   tabDiscardMinutes: number
   setTabDiscardMinutes: (mins: number) => void
   maxActiveTabs: number
@@ -651,6 +652,7 @@ export default function SettingsOverlay({
   setWebviewThemeOn,
   providerConfig,
   setProviderConfig,
+  activeModelKey,
   tabDiscardMinutes,
   setTabDiscardMinutes,
   maxActiveTabs,
@@ -2360,6 +2362,7 @@ export default function SettingsOverlay({
           >
             <ProviderFeaturesSection
               models={models}
+              activeModelKey={activeModelKey}
               providerConfig={providerConfig}
               setProviderConfig={setProviderConfig}
               setToast={setCopiedCssToast}
