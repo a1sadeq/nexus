@@ -20,6 +20,14 @@ import { buildEngine } from './promptNav'
 import { getCustomThemeEntry, saveCustomThemeEntry, removeCustomThemeEntry } from './customThemesStore'
 import { PROVIDER_THEMES, mergeOverrides, getStructuralVars } from './providerThemes'
 import { type ProviderOverrides, getMergedProviderFeatures } from '../shared/providerConfig'
+import { splitSelectorList } from '../shared/selectorUtils'
+
+// Page-side helpers embedded into every injected script. Built from the tested
+// shared source via toString() — self-contained, no closures.
+const PAGE_HELPERS = `
+  const splitList = ${splitSelectorList.toString()};
+  const visibleEl = (el) => !!el && (el.offsetParent !== null || el.getClientRects().length > 0);
+`
 import { nextThemeSwap } from './themeSwap'
 import { skillsEngine, type SkillDef } from './skillsEngine'
 import {
