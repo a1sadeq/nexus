@@ -104,7 +104,7 @@ export interface BrowserProfile {
 export const GOOGLE_HOST_PATTERN =
   /(^|\.)(google\.(com|eg|co\.\w+|com\.\w+)|googleusercontent\.com|gstatic\.com|googleapis\.com)$/i
 export const AI_HOST_PATTERN =
-  /(^|\.)(google\.(com|eg|co\.\w+|com\.\w+)|googleusercontent\.com|gstatic\.com|googleapis\.com|openai\.com|chatgpt\.com|oaistatic\.com|oaiusercontent\.com|anthropic\.com|claude\.ai|perplexity\.ai|deepseek\.com|x\.ai|grok\.com|mistral\.ai)$/i
+  /(^|\.)(google\.(com|eg|co\.\w+|com\.\w+)|googleusercontent\.com|gstatic\.com|googleapis\.com|openai\.com|chatgpt\.com|oaistatic\.com|oaiusercontent\.com|anthropic\.com|claude\.ai|perplexity\.ai|deepseek\.com|x\.ai|grok\.com|mistral\.ai|z\.ai)$/i
 
 const SQL_CHROME_AI_WHERE = `
   host_key LIKE '%google%' OR
@@ -116,7 +116,8 @@ const SQL_CHROME_AI_WHERE = `
   host_key LIKE '%deepseek.com%' OR
   host_key LIKE '%x.ai%' OR
   host_key LIKE '%grok.com%' OR
-  host_key LIKE '%mistral.ai%'
+  host_key LIKE '%mistral.ai%' OR
+  host_key LIKE '%z.ai%'
 `
 
 const SQL_FIREFOX_AI_WHERE = `
@@ -129,7 +130,8 @@ const SQL_FIREFOX_AI_WHERE = `
   host LIKE '%deepseek.com%' OR
   host LIKE '%x.ai%' OR
   host LIKE '%grok.com%' OR
-  host LIKE '%mistral.ai%'
+  host LIKE '%mistral.ai%' OR
+  host LIKE '%z.ai%'
 `
 
 const SESSION_COOKIES = ['SID', '__Secure-1PSID', '__Secure-3PSID'] as const

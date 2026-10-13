@@ -23,7 +23,9 @@ describe('AI_HOST_PATTERN and GOOGLE_HOST_PATTERN', () => {
       'x.ai',
       'grok.com',
       'mistral.ai',
-      'chat.mistral.ai'
+      'chat.mistral.ai',
+      'z.ai',
+      'chat.z.ai'
     ]
 
     for (const host of validHosts) {
@@ -35,6 +37,11 @@ describe('AI_HOST_PATTERN and GOOGLE_HOST_PATTERN', () => {
     expect(GOOGLE_HOST_PATTERN.test('googleapis.com')).toBe(true)
     expect(GOOGLE_HOST_PATTERN.test('gstatic.com')).toBe(true)
     expect(GOOGLE_HOST_PATTERN.test('googleusercontent.com')).toBe(true)
+  })
+
+  it('rejects lookalike hosts that merely contain z.ai', () => {
+    expect(AI_HOST_PATTERN.test('quiz.ai')).toBe(false)
+    expect(AI_HOST_PATTERN.test('amazon.z.ai.example.com')).toBe(false)
   })
 
   it('rejects unrelated hostnames', () => {
