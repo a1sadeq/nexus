@@ -526,6 +526,37 @@ ipcMain.handle('test_provider_live_hooks', async (_event, modelKey: string) => {
   return targetView.webContents.executeJavaScript(script).catch(() => ({ success: false }))
 })
 
+async function clickActiveViewFeature(
+  field: 'stopGenerationSelector' | 'newChatSelector'
+): Promise<{ ok: boolean; reason?: string }> {
+  if (!activeViewId) return { ok: false, reason: 'no_active_view' }
+  const view = aiViews.get(activeViewId)
+  if (!view || view.webContents.isDestroyed()) return { ok: false, reason: 'no_active_view' }
+  const modelKey = viewModelKeys.get(activeViewId) || ''
+  const feats = getMergedProviderFeatures(modelKey, providerConfig[modelKey])
+  const sel = feats[field]
+  if (!sel) return { ok: false, reason: 'no_selector_configured' }
+  const script = `(async () => {
+    ${PAGE_HELPERS}
+    for (const s of splitList(${JSON.stringify(sel)})) {
+      try {
+        for (const el of document.querySelectorAll(s)) {
+          if (el instanceof HTMLButtonElement && el.disabled) continue
+          if (!visibleEl(el)) continue
+          el.scrollIntoView({ block: 'center' });
+          el.click();
+          return { ok: true, via: s };
+        }
+      } catch {}
+    }
+    return { ok: false, reason: 'no_match' };
+  })()`
+  return view.webContents.executeJavaScript(script, true).catch(() => ({ ok: false, reason: 'error' }))
+}
+
+ipcMain.handle('ai_stop_generation', () => clickActiveViewFeature('stopGenerationSelector'))
+ipcMain.handle('ai_site_new_chat', () => clickActiveViewFeature('newChatSelector'))
+
 ipcMain.on('window_minimize', () => {
   mainWindow?.minimize()
 })
@@ -1049,7 +1080,9 @@ const DEFAULT_ACTION_KEYS: Record<string, string[]> = {
   'fuzzy-cmd': ['Ctrl', 'Shift', 'P'],
   'model-next': ['Ctrl', ']'],
   'model-prev': ['Ctrl', '['],
-  'guide-open': ['F1']
+  'guide-open': ['F1'],
+  'stop-generation': ['Ctrl', '.'],
+  'site-new-chat': ['Ctrl', 'Shift', 'N']
 }
 
 let customKeymap: Record<string, string[]> = {}
@@ -1091,6 +1124,7 @@ function actionKeys(id: string): string[] {
 // even when input.key reports a layout-specific character.
 const CODE_KEY_MAP: Record<string, string> = {
   KeyB: 'b',
+  KeyN: 'n',
   KeyO: 'o',
   BracketRight: ']',
   BracketLeft: '[',
@@ -1230,6 +1264,17 @@ function routeGlobalShortcut(event: Electron.Event, input: Electron.Input, _sour
     return true
   }
 
+  if (matchesAction(input, 'stop-generation')) {
+    event.preventDefault()
+    clickActiveViewFeature('stopGenerationSelector').catch(() => {})
+    return true
+  }
+  if (matchesAction(input, 'site-new-chat')) {
+    event.preventDefault()
+    clickActiveViewFeature('newChatSelector').catch(() => {})
+    return true
+  }
+
   // Keymap-driven actions (each honors user customizations from Settings)
   const keymapActions: Array<[string, string]> = [
     ['settings-open', 'toggle_settings'],
@@ -1246,7 +1291,9 @@ function routeGlobalShortcut(event: Electron.Event, input: Electron.Input, _sour
     ['model-next', 'model_next'],
     ['model-prev', 'model_prev'],
     ['guide-open', 'guide_open'],
-    ['export-context', 'toggle_export']
+    ['export-context', 'toggle_export'],
+    ['stop-generation', 'stop_generation'],
+    ['site-new-chat', 'site_new_chat']
   ]
   for (const [id, action] of keymapActions) {
     if (matchesAction(input, id)) {

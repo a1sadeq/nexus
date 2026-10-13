@@ -140,6 +140,11 @@ const electronAPI = {
         ipcRenderer.removeListener('download_completed', handler)
       }
     }
+  },
+  aiFeatures: {
+    stopGeneration: (): Promise<unknown> => ipcRenderer.invoke('ai_stop_generation'),
+    siteNewChat: (): Promise<unknown> => ipcRenderer.invoke('ai_site_new_chat'),
+    testLiveHooks: (modelKey: string): Promise<unknown> => ipcRenderer.invoke('test_provider_live_hooks', modelKey)
   }
 }
 

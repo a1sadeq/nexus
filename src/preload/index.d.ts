@@ -148,6 +148,12 @@ export interface NexusDownloads {
   onCompleted: (callback: (info: DownloadItemInfo) => void) => () => void
 }
 
+export interface NexusAiFeatures {
+  stopGeneration: () => Promise<unknown>
+  siteNewChat: () => Promise<unknown>
+  testLiveHooks: (modelKey: string) => Promise<unknown>
+}
+
 declare global {
   interface Window {
     electron: {
@@ -158,6 +164,7 @@ declare global {
       windowControls?: NexusWindowControls
       skills?: NexusSkills
       downloads?: NexusDownloads
+      aiFeatures?: NexusAiFeatures
     }
   }
 }

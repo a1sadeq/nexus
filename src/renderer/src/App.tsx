@@ -1132,6 +1132,16 @@ Acknowledge these skills with a concise confirmation in this exact format:
           window.electron?.ipcRenderer.send('trigger_active_upload_folder')
           break
         }
+        case 'stop_generation': {
+          // @ts-ignore
+          window.electron?.ipcRenderer.invoke('ai_stop_generation').catch(() => {})
+          break
+        }
+        case 'site_new_chat': {
+          // @ts-ignore
+          window.electron?.ipcRenderer.invoke('ai_site_new_chat').catch(() => {})
+          break
+        }
         case 'zoom': {
           const { code, shift } = data
           const isMinus = code === 'Minus' || code === 'NumpadSubtract'

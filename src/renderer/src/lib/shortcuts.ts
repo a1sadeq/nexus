@@ -147,6 +147,20 @@ export const DEFAULT_SHORTCUTS: ShortcutDef[] = [
     category: 'models',
     defaultKeys: ['Ctrl', 'Shift', 'D']
   },
+  {
+    id: 'stop-generation',
+    action: 'Stop AI Generation',
+    desc: 'Click the active AI provider\'s stop generation button',
+    category: 'models',
+    defaultKeys: ['Ctrl', '.']
+  },
+  {
+    id: 'site-new-chat',
+    action: 'Site New Chat',
+    desc: 'Click the active AI provider\'s in-page new chat button',
+    category: 'models',
+    defaultKeys: ['Ctrl', 'Shift', 'N']
+  },
 
   // SuperAntigravity Skills & Tools
   {
