@@ -1933,17 +1933,18 @@ if (!window.__focusRetentionInjected && ${enableRetention}) {
 }
 
 // 4. Virtualized Chat Rendering (Memory Optimization)
-if (!window.__virtualizedChatInjected) {
-  const style = document.createElement('style');
-  style.textContent = \`
-    \${${JSON.stringify(virtSelector)}} {
-      content-visibility: auto;
-      contain-intrinsic-size: 1px 100px;
+(() => {
+  const sel = ${JSON.stringify(virtSelector)};
+  if (sel) {
+    let s = document.getElementById('__nexus_virtualization');
+    if (!s) {
+      s = document.createElement('style');
+      s.id = '__nexus_virtualization';
+      document.head.appendChild(s);
     }
-  \`;
-  document.head.appendChild(style);
-  window.__virtualizedChatInjected = true;
-}
+    s.textContent = \`\${sel} { content-visibility: auto; contain-intrinsic-size: auto 800px; }\`;
+  }
+})();
 
 // 5. Custom Injected User Script
 try {
@@ -2141,7 +2142,10 @@ function ensureAiView(tabId: string): Electron.WebContentsView {
   })
 
   view.webContents.on('dom-ready', () => {
-    applyWebviewTheme(view, viewModelKeys.get(tabId))
+    const modelKey = viewModelKeys.get(tabId) || ''
+    applyWebviewTheme(view, modelKey)
+    injectVirtualizationCss(view, modelKey)
+    executeCustomInitScript(view, modelKey)
   })
 
   view.webContents.on('did-finish-load', () => {
@@ -2344,6 +2348,39 @@ function updateWebviewTitlePoller(view: Electron.WebContentsView, modelKey: stri
     }
   })()`
   view.webContents.executeJavaScript(script).catch(() => {})
+}
+
+function injectVirtualizationCss(view: Electron.WebContentsView, modelKey: string): void {
+  if (view.webContents.isDestroyed()) return
+  const feats = getMergedProviderFeatures(modelKey, providerConfig[modelKey])
+  const sel = feats.virtualizationSelector
+  if (!sel) return
+  const css = `${sel} { content-visibility: auto; contain-intrinsic-size: auto 800px; }`
+  view.webContents
+    .executeJavaScript(`(() => {
+      let s = document.getElementById('__nexus_virtualization');
+      if (!s) { s = document.createElement('style'); s.id = '__nexus_virtualization'; document.head.appendChild(s); }
+      s.textContent = ${JSON.stringify(css)};
+    })()`)
+    .catch(() => {})
+}
+
+function executeCustomInitScript(view: Electron.WebContentsView, modelKey: string): void {
+  if (view.webContents.isDestroyed()) return
+  const feats = getMergedProviderFeatures(modelKey, providerConfig[modelKey])
+  const script = feats.customInitScript
+  if (!script || !script.trim()) return
+  view.webContents
+    .executeJavaScript(`(() => {
+      try {
+        ${script}
+      } catch (err) {
+        console.error('[Nexus Custom Init Script Error]', err);
+      }
+    })()`)
+    .catch((err) => {
+      console.warn(`[nexus] customInitScript failed for ${modelKey}:`, err)
+    })
 }
 
 function hexToRgb(hex) {
@@ -2914,28 +2951,35 @@ ipcMain.handle('get_full_provider_js', (_event, modelKey?: string) => {
 
 ipcMain.handle('execute_live_provider_js', async (_event, modelKey: string, code: string) => {
   const targetKey = (modelKey || '').toLowerCase()
-  for (const [tabId, view] of aiViews) {
-    const vKey = (viewModelKeys.get(tabId) || '').toLowerCase()
-    if (vKey === targetKey || (!targetKey && tabId === activeViewId)) {
-      if (view && !view.webContents.isDestroyed()) {
-        try {
-          const res = await view.webContents.executeJavaScript(code)
-          return { success: true, result: res !== undefined ? String(res) : 'Executed successfully (no return value)' }
-        } catch (err: any) {
-          return { success: false, error: err?.message || String(err) }
-        }
+  let targetView: Electron.WebContentsView | null = null
+
+  if (activeViewId && aiViews.has(activeViewId)) {
+    const activeVKey = (viewModelKeys.get(activeViewId) || '').toLowerCase()
+    if (!targetKey || activeVKey === targetKey) {
+      targetView = aiViews.get(activeViewId)!
+    }
+  }
+
+  if (!targetView) {
+    for (const [tabId, view] of aiViews) {
+      const vKey = (viewModelKeys.get(tabId) || '').toLowerCase()
+      if (vKey === targetKey || (!targetKey && tabId === activeViewId)) {
+        targetView = view
+        break
       }
     }
   }
-  if (activeViewId && aiViews.has(activeViewId)) {
-    const view = aiViews.get(activeViewId)
-    if (view && !view.webContents.isDestroyed()) {
-      try {
-        const res = await view.webContents.executeJavaScript(code)
-        return { success: true, result: res !== undefined ? String(res) : 'Executed successfully' }
-      } catch (err: any) {
-        return { success: false, error: err?.message || String(err) }
-      }
+
+  if (!targetView && activeViewId && aiViews.has(activeViewId)) {
+    targetView = aiViews.get(activeViewId)!
+  }
+
+  if (targetView && !targetView.webContents.isDestroyed()) {
+    try {
+      const res = await targetView.webContents.executeJavaScript(code)
+      return { success: true, result: res !== undefined ? String(res) : 'Executed successfully (no return value)' }
+    } catch (err: any) {
+      return { success: false, error: err?.message || String(err) }
     }
   }
   return { success: false, error: `No active webview tab found for ${modelKey || 'provider'}. Please open a tab first.` }
@@ -3033,29 +3077,45 @@ ipcMain.handle('extract_provider_live_dom', async (_event, modelKey: string, pro
   try {
     let targetView: Electron.WebContentsView | null = null
 
-    // 1. Match by model key in active views
-    for (const [tabId, view] of aiViews) {
-      if (viewModelKeys.get(tabId) === modelKey) {
-        targetView = view
-        break
+    // 1. Prefer active view if it matches the requested modelKey
+    if (activeViewId && aiViews.has(activeViewId) && viewModelKeys.get(activeViewId) === modelKey) {
+      targetView = aiViews.get(activeViewId)!
+    }
+
+    // 2. Match by model key in other active views
+    if (!targetView) {
+      for (const [tabId, view] of aiViews) {
+        if (viewModelKeys.get(tabId) === modelKey) {
+          targetView = view
+          break
+        }
       }
     }
 
-    // 2. Match by URL host if not matched by key
+    // 3. Match by URL host if not matched by key (check active view first)
     if (!targetView && providerUrl) {
       try {
         const targetHost = new URL(providerUrl).host.toLowerCase()
-        for (const [, view] of aiViews) {
-          const vUrl = view.webContents.getURL()
+        if (activeViewId && aiViews.has(activeViewId)) {
+          const active = aiViews.get(activeViewId)!
+          const vUrl = active.webContents.getURL()
           if (vUrl && new URL(vUrl).host.toLowerCase() === targetHost) {
-            targetView = view
-            break
+            targetView = active
+          }
+        }
+        if (!targetView) {
+          for (const [, view] of aiViews) {
+            const vUrl = view.webContents.getURL()
+            if (vUrl && new URL(vUrl).host.toLowerCase() === targetHost) {
+              targetView = view
+              break
+            }
           }
         }
       } catch {}
     }
 
-    // 3. Fallback to active view if model matches or no target found
+    // 4. Fallback to active view if model matches or no target found
     if (!targetView && activeViewId && aiViews.has(activeViewId)) {
       const active = aiViews.get(activeViewId)!
       if (viewModelKeys.get(activeViewId) === modelKey) {
@@ -3153,9 +3213,10 @@ ipcMain.on('set_provider_config', (_event, map) => {
   providerConfig = map && typeof map === 'object' ? map : {}
   persistProviderConfig()
   for (const [tabId, view] of aiViews) {
-    const modelKey = resolveModelKey(tabId, view.webContents.getURL())
+    const modelKey = resolveModelKey(tabId, view.webContents.getURL()) || ''
     applyWebviewTheme(view, modelKey)
     updateWebviewTitlePoller(view, modelKey)
+    injectVirtualizationCss(view, modelKey)
   }
   if (previewTimer) {
     capturePreviewFrame()
@@ -3667,6 +3728,9 @@ ipcMain.handle('capture_tab_snapshot', async (_event, tabId?: string) => {
 // the Settings → Webview tab is open, so theme knobs reflect instantly.
 function findPreviewView(providerKey: string | null): [string, Electron.WebContentsView] | null {
   if (providerKey) {
+    if (activeViewId && viewModelKeys.get(activeViewId) === providerKey && aiViews.has(activeViewId)) {
+      return [activeViewId, aiViews.get(activeViewId)!]
+    }
     for (const [tabId, view] of aiViews) {
       if (viewModelKeys.get(tabId) === providerKey) return [tabId, view]
     }

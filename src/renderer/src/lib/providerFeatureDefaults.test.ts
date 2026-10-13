@@ -29,8 +29,8 @@ describe('Provider Feature Configuration Engine', () => {
     expect(feats.defaultChatTitles).toContain('Gemini')
   })
 
-  it('falls back to generic configuration for custom providers like z.ai', () => {
-    const feats = getProviderDefaultFeatures('z-ai-custom')
+  it('falls back to generic configuration for unknown custom providers', () => {
+    const feats = getProviderDefaultFeatures('my-custom-provider')
     expect(feats.promptNavSelector).toContain('[class*="user-query"]')
     expect(feats.composerSelector).toContain('textarea:not([disabled])')
     expect(feats.defaultChatTitles).toContain('New Chat')
@@ -67,4 +67,3 @@ describe('Provider Feature Configuration Engine', () => {
     )
   })
 })
-
