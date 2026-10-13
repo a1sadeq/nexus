@@ -15,7 +15,7 @@ import {
   dialog
 } from 'electron'
 import { join, basename, extname } from 'path'
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs'
+import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, copyFileSync } from 'fs'
 import { buildEngine } from './promptNav'
 import { getCustomThemeEntry, saveCustomThemeEntry, removeCustomThemeEntry } from './customThemesStore'
 import { PROVIDER_THEMES, mergeOverrides, getStructuralVars } from './providerThemes'
@@ -1870,21 +1870,34 @@ if (!window.__slashFocusInjected && ${enableSlash}) {
 }
 
 // 2. Chat Title Extractor / Polling
-if (!window.__titleExtractionInjected) {
+(() => {
+  ${PAGE_HELPERS}
+  if (window.__nexusTitleInterval) {
+    clearInterval(window.__nexusTitleInterval);
+    window.__nexusTitleInterval = null;
+  }
   const titleSel = ${customTitleSel};
   if (titleSel && ${pollInterval > 0}) {
-    setInterval(() => {
+    const updateTitle = () => {
       try {
-        const el = document.querySelector(titleSel);
-        const txt = el ? (el.innerText || el.textContent || '').trim() : '';
+        let txt = '';
+        for (const s of splitList(titleSel)) {
+          const el = document.querySelector(s);
+          if (el) {
+            const candidate = (el.innerText || el.textContent || '').trim();
+            if (candidate) { txt = candidate; break; }
+          }
+        }
         if (txt && document.title !== txt) {
           document.title = txt;
         }
       } catch(e) {}
-    }, ${pollInterval});
+    };
+    updateTitle();
+    window.__nexusTitleInterval = setInterval(updateTitle, ${pollInterval});
   }
   window.__titleExtractionInjected = true;
-}
+})();
 
 // 3. Focus retention
 if (!window.__focusRetentionInjected && ${enableRetention}) {
@@ -2271,23 +2284,66 @@ function providerConfigFile() {
 }
 
 function loadProviderConfigFromDisk() {
+  const filePath = providerConfigFile()
+  if (!existsSync(filePath)) return
   try {
-    const raw = readFileSync(providerConfigFile(), 'utf-8')
+    const raw = readFileSync(filePath, 'utf-8')
     const parsed = JSON.parse(raw)
     if (parsed && typeof parsed === 'object') providerConfig = parsed
-  } catch {
-    // first run: no file yet
+  } catch (e) {
+    console.error('[ProviderConfig] Corrupted providers.json, creating backup:', e)
+    try {
+      copyFileSync(filePath, `${filePath}.corrupt.${Date.now()}`)
+    } catch {}
   }
 }
 
 function persistProviderConfig() {
   try {
+    const filePath = providerConfigFile()
     const dir = app.getPath('userData')
     mkdirSync(dir, { recursive: true })
-    writeFileSync(providerConfigFile(), JSON.stringify(providerConfig, null, 2))
-  } catch {
-    // non-fatal
+    const tmpPath = `${filePath}.tmp`
+    writeFileSync(tmpPath, JSON.stringify(providerConfig, null, 2), 'utf-8')
+    renameSync(tmpPath, filePath)
+  } catch (e) {
+    console.error('[ProviderConfig] Failed to persist providers.json atomically:', e)
   }
+}
+
+function updateWebviewTitlePoller(view: Electron.WebContentsView, modelKey: string): void {
+  if (view.webContents.isDestroyed()) return
+  const feats = getMergedProviderFeatures(modelKey, providerConfig[modelKey])
+  const customTitleSel = feats.chatTitleSelector ? JSON.stringify(feats.chatTitleSelector) : 'null'
+  const pollInterval = typeof feats.chatTitlePollingIntervalMs === 'number' ? feats.chatTitlePollingIntervalMs : 1500
+  const script = `(() => {
+    ${PAGE_HELPERS}
+    if (window.__nexusTitleInterval) {
+      clearInterval(window.__nexusTitleInterval);
+      window.__nexusTitleInterval = null;
+    }
+    const titleSel = ${customTitleSel};
+    if (titleSel && ${pollInterval > 0}) {
+      const updateTitle = () => {
+        try {
+          let txt = '';
+          for (const s of splitList(titleSel)) {
+            const el = document.querySelector(s);
+            if (el) {
+              const candidate = (el.innerText || el.textContent || '').trim();
+              if (candidate) { txt = candidate; break; }
+            }
+          }
+          if (txt && document.title !== txt) {
+            document.title = txt;
+          }
+        } catch(e) {}
+      };
+      updateTitle();
+      window.__nexusTitleInterval = setInterval(updateTitle, ${pollInterval});
+    }
+  })()`
+  view.webContents.executeJavaScript(script).catch(() => {})
 }
 
 function hexToRgb(hex) {
@@ -3097,7 +3153,9 @@ ipcMain.on('set_provider_config', (_event, map) => {
   providerConfig = map && typeof map === 'object' ? map : {}
   persistProviderConfig()
   for (const [tabId, view] of aiViews) {
-    applyWebviewTheme(view, resolveModelKey(tabId, view.webContents.getURL()))
+    const modelKey = resolveModelKey(tabId, view.webContents.getURL())
+    applyWebviewTheme(view, modelKey)
+    updateWebviewTitlePoller(view, modelKey)
   }
   if (previewTimer) {
     capturePreviewFrame()
