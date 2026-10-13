@@ -480,11 +480,16 @@ ipcMain.handle('shell_open', async (_event, url: string) => {
 })
 
 ipcMain.handle('test_provider_live_hooks', async (_event, modelKey: string) => {
+  // ACTIVE view first when it belongs to this provider — the old code broke on
+  // the FIRST-inserted tab of the model (Map iteration order).
   let targetView: Electron.WebContentsView | null = null
-  for (const [tabId, view] of aiViews) {
-    if (viewModelKeys.get(tabId) === modelKey) {
-      targetView = view
-      break
+  if (activeViewId) {
+    const v = aiViews.get(activeViewId)
+    if (v && viewModelKeys.get(activeViewId) === modelKey) targetView = v
+  }
+  if (!targetView) {
+    for (const [tabId, view] of aiViews) {
+      if (viewModelKeys.get(tabId) === modelKey) { targetView = view; break }
     }
   }
   if (!targetView && activeViewId && aiViews.has(activeViewId)) {
@@ -497,27 +502,28 @@ ipcMain.handle('test_provider_live_hooks', async (_event, modelKey: string) => {
   const compSel = feats.composerSelector || 'textarea, [contenteditable="true"]'
   const attachSel = feats.attachmentSelector || 'input[type="file"]'
   const script = `(() => {
-    const flashElement = (sel, color) => {
-      const el = document.querySelector(sel);
-      if (el) {
-        const prevOutline = el.style.outline;
-        const prevShadow = el.style.boxShadow;
-        el.style.outline = '3px solid ' + color;
-        el.style.boxShadow = '0 0 20px ' + color;
-        setTimeout(() => {
-          el.style.outline = prevOutline;
-          el.style.boxShadow = prevShadow;
-        }, 1600);
-        return true;
+    ${PAGE_HELPERS}
+    const flash = (list, color) => {
+      for (const s of splitList(list)) {
+        try {
+          for (const el of document.querySelectorAll(s)) {
+            if (!visibleEl(el)) continue
+            const prevO = el.style.outline, prevS = el.style.boxShadow;
+            el.style.outline = '3px solid ' + color;
+            el.style.boxShadow = '0 0 20px ' + color;
+            setTimeout(() => { el.style.outline = prevO; el.style.boxShadow = prevS; }, 1600);
+            return { found: true, via: s, tag: el.tagName.toLowerCase() };
+          }
+        } catch {}
       }
-      return false;
+      return { found: false };
     };
-    const compFound = flashElement(${JSON.stringify(compSel)}, '#00e5ff');
-    const attachFound = flashElement(${JSON.stringify(attachSel)}, '#34d399');
-    return { success: true, compFound, attachFound };
+    const comp = flash(${JSON.stringify(compSel)}, '#00e5ff');
+    const attach = flash(${JSON.stringify(attachSel)}, '#34d399');
+    return { success: true, compFound: comp.found, compVia: comp.via || null, compTag: comp.tag || null,
+             attachFound: attach.found, attachVia: attach.via || null, attachTag: attach.tag || null };
   })()`
-  const result = await targetView.webContents.executeJavaScript(script).catch(() => ({ success: false }))
-  return result
+  return targetView.webContents.executeJavaScript(script).catch(() => ({ success: false }))
 })
 
 ipcMain.on('window_minimize', () => {
