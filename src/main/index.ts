@@ -179,7 +179,7 @@ setInterval(() => {
 
     const title = viewTitles.get(id) || ''
     const tl = title.toLowerCase()
-    const isDefaultTitle = tl === 'new chat' || tl === 'gemini' || tl === 'gemini chat' || tl === 'qwen' || tl === 'qwen chat' || tl === 'kimi' || tl === 'kimi chat' || tl === 'deepseek' || tl === 'deepseek chat'
+    const isDefaultTitle = tl === 'new chat' || tl === 'gemini' || tl === 'gemini chat' || tl === 'qwen' || tl === 'qwen chat' || tl === 'kimi' || tl === 'kimi chat' || tl === 'deepseek' || tl === 'deepseek chat' || tl === 'z.ai' || tl === 'z chat'
     
     const minutesSinceAccess = (now - ts) / 60000
     const threshold = isDefaultTitle ? 1 : tabDiscardMinutes
@@ -2114,7 +2114,7 @@ function ensureAiView(tabId: string): Electron.WebContentsView {
              titleLower.startsWith(defaultLower + ' |') ||
              titleLower === 'chatgpt' ||
              titleLower === 'qwen' ||
-             titleLower === 'claude' || titleLower === 'google gemini' || titleLower === 'kimi ai' || titleLower === 'qwen studio';
+             titleLower === 'claude' || titleLower === 'google gemini' || titleLower === 'kimi ai' || titleLower === 'qwen studio' || titleLower === 'z.ai' || titleLower === 'z chat';
     });
     
     // Also ignore empty titles or generic "new chat" variations

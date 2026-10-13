@@ -434,6 +434,8 @@ Acknowledge these skills with a concise confirmation in this exact format:
       const ml = m.toLowerCase().trim();
       return tl === 'new chat' || tl === 'untitled' || tl.startsWith('new chat') || 
              tl === ml || tl === ml + ' chat' || tl.startsWith(ml + ' -') || tl.startsWith(ml + ' |') ||
+             tl === 'z.ai' || tl.startsWith('z.ai -') || tl.startsWith('z.ai |') ||
+             tl === 'z chat' || tl === 'glm' || tl.startsWith('glm -') ||
              tl === 'chatgpt' || tl.startsWith('chatgpt -') ||
              tl === 'qwen' || tl.startsWith('qwen -') || tl === 'tongyi qianwen' ||
              tl === 'claude' || tl.startsWith('claude -') ||
