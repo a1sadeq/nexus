@@ -808,106 +808,85 @@ async function injectSkillPromptIntoWebview(
 
   const modelKey = viewModelKeys.get(tabId) || ''
   const feats = getMergedProviderFeatures(modelKey, providerConfig[modelKey])
-  const customComposer = feats.composerSelector ? JSON.stringify(feats.composerSelector) : 'null'
-  const customSend = feats.sendButtonSelector ? JSON.stringify(feats.sendButtonSelector) : 'null'
   const effectiveAutoSend = autoSend || feats.autoSubmitSkillPrompt === true
 
   const script = `
-    (() => {
+    (async () => {
+      ${PAGE_HELPERS}
       const text = ${JSON.stringify(promptText)};
       const autoSend = ${Boolean(effectiveAutoSend)};
-      const customComp = ${customComposer};
-      const customSnd = ${customSend};
+      const customComp = ${JSON.stringify(feats.composerSelector || '')};
+      const customSnd = ${JSON.stringify(feats.sendButtonSelector || '')};
 
       const baseSelectors = [
-        // Gemini
-        '.ql-editor',
-        'rich-textarea [contenteditable="true"]',
-        // ChatGPT
-        '#prompt-textarea',
-        'div#prompt-textarea',
-        'textarea[data-id="root"]',
-        // Claude
-        'div.ProseMirror',
-        'div[contenteditable="true"].ProseMirror',
-        // Kimi
-        'div.chat-input-editor',
-        '.chat-input [contenteditable="true"]',
-        '.chat-input textarea',
-        // Qwen
-        'textarea#chat-input', 'textarea[class*="chat-input"]', 'textarea.ant-input:not([style*="display: none"]):not([disabled])',
-        // DeepSeek
-        '#chat-input',
-        'textarea#chat-input',
-        // Perplexity
-        'textarea[placeholder*="Ask"]',
-        // Generic Fallbacks
-        '[contenteditable="true"][role="textbox"]',
-        'div[contenteditable="true"]',
-        'textarea:not([disabled])',
-        'input[type="text"]:not([disabled])'
+        '.ql-editor', 'rich-textarea [contenteditable="true"]',
+        '#prompt-textarea', 'div#prompt-textarea', 'textarea[data-id="root"]',
+        'div.ProseMirror', 'div[contenteditable="true"].ProseMirror',
+        'div.chat-input-editor', '.chat-input [contenteditable="true"]', '.chat-input textarea',
+        'textarea#chat-input', 'textarea[class*="chat-input"]', 'textarea.ant-input:not([disabled])',
+        '#chat-input', 'textarea[placeholder*="Ask"]',
+        '[contenteditable="true"][role="textbox"]', 'div[contenteditable="true"]',
+        'textarea:not([disabled])'
       ];
-      const selectors = customComp ? [customComp, ...baseSelectors] : baseSelectors;
+      const selectors = [...splitList(customComp), ...baseSelectors];
 
       let el = null;
-      for (const sel of selectors) {
-        const found = document.querySelector(sel);
-        if (found && found.offsetParent !== null) {
-          el = found;
-          break;
-        }
+      for (const s of selectors) {
+        try { const f = document.querySelector(s); if (f && visibleEl(f)) { el = f; break } } catch {}
       }
       if (!el) {
-        for (const sel of selectors) {
-          const found = document.querySelector(sel);
-          if (found) {
-            el = found;
-            break;
-          }
+        for (const s of selectors) {
+          try { const f = document.querySelector(s); if (f) { el = f; break } } catch {}
         }
       }
-
       if (!el) return false;
-
       el.focus();
 
       if (el.isContentEditable) {
-        document.execCommand('selectAll', false, null);
-        document.execCommand('insertText', false, text);
+        const wsel = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        wsel.removeAllRanges(); wsel.addRange(range);
+        document.execCommand('insertText', false, text); // fires real input events (Lexical/ProseMirror)
         el.dispatchEvent(new Event('input', { bubbles: true }));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
       } else {
-        el.value = text;
+        // React value-tracker bypass: plain el.value = text gets deduplicated by
+        // React, so the composer never updates and the send button never enables.
+        const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype
+          : el instanceof HTMLInputElement ? HTMLInputElement.prototype : null;
+        const setter = proto && Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+        if (setter) setter.call(el, text); else el.value = text;
         el.dispatchEvent(new Event('input', { bubbles: true }));
         el.dispatchEvent(new Event('change', { bubbles: true }));
       }
 
-      try {
-        el.scrollTop = el.scrollHeight;
-      } catch(e) {}
+      try { el.scrollTop = el.scrollHeight; } catch (e) {}
+      if (!autoSend) return true;
 
-      if (autoSend) {
-        setTimeout(() => {
-          const baseSendSelectors = [
-            'button[aria-label*="Send"]',
-            'button[data-testid="send-button"]',
-            'button[aria-label*="Submit"]',
-            '.send-button',
-            'button.mb-1.me-1',
-            'button[type="submit"]'
-          ];
-          const sendSelectors = customSnd ? [customSnd, ...baseSendSelectors] : baseSendSelectors;
-          for (const s of sendSelectors) {
-            const btn = document.querySelector(s);
-            if (btn && !btn.disabled && btn.offsetParent !== null) {
-              btn.click();
-              return;
+      // Poll up to 2.5 s for the site to ENABLE its send button after the input event.
+      const baseSendSelectors = [
+        'button[aria-label*="Send"]', 'button[data-testid="send-button"]',
+        'button[aria-label*="Submit"]', '.send-button', 'button.mb-1.me-1', 'button[type="submit"]'
+      ];
+      const sendSegments = [...splitList(customSnd), ...baseSendSelectors];
+      const findSendButton = () => {
+        for (const s of sendSegments) {
+          try {
+            for (const b of document.querySelectorAll(s)) {
+              if (b instanceof HTMLButtonElement && !b.disabled && visibleEl(b)) return b;
             }
-          }
-          el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
-        }, 200);
+          } catch {}
+        }
+        return null;
+      };
+      for (let i = 0; i < 25; i++) {
+        const btn = findSendButton();
+        if (btn) { btn.click(); return true; }
+        await new Promise((r) => setTimeout(r, 100));
       }
-
+      el.dispatchEvent(new KeyboardEvent('keydown', {
+        key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true
+      }));
       return true;
     })()
   `
