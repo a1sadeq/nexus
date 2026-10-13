@@ -106,6 +106,28 @@ export interface CustomProviderTheme {
 
 export type ProviderConfigMap = Record<string, ProviderOverrides>
 
+const ZAI_FEATURES: ProviderFeatureConfig = {
+  promptNavSelector:
+    '[data-message-author-role="user"], div[class*="user-message" i]:not([class*="assistant" i]), div[class*="user-query" i]:not([class*="assistant" i])',
+  chatTitleSelector: '[data-testid*="chat-title" i], header h1, nav a[aria-current="page"]',
+  chatTitlePollingIntervalMs: 1500,
+  defaultChatTitles: ['Z.ai', 'Z Chat', 'GLM', '智谱清言', 'New chat', 'New Chat', 'Untitled'],
+  composerSelector:
+    'div[contenteditable="true"][role="textbox"], .ProseMirror[contenteditable="true"], div[contenteditable="plaintext-only"], textarea#prompt-textarea',
+  sendButtonSelector:
+    'button[aria-label*="send" i], button[aria-label*="发送" i], button[data-testid*="send" i], form button[class*="send" i]',
+  autoSubmitSkillPrompt: true,
+  newChatSelector:
+    'button[aria-label*="new" i], button[aria-label*="新建" i], button[aria-label*="新对话" i], button[data-testid*="new-chat" i]',
+  stopGenerationSelector:
+    'button[aria-label*="stop" i], button[aria-label*="停止" i], button[data-testid*="stop" i], button[class*="stop" i]',
+  virtualizationSelector:
+    '[data-message-id], [data-message-author-role], div[class*="message-id" i], div[class*="conversation-turn" i], article[class*="message" i]',
+  enableSlashFocus: true,
+  enableFocusRetention: true,
+  attachmentSelector: 'input[type="file"]'
+}
+
 export const DEFAULT_PROVIDER_FEATURES: Record<string, ProviderFeatureConfig> = {
   chatgpt: {
     promptNavSelector: '[data-message-author-role="user"]',
@@ -212,6 +234,9 @@ export const DEFAULT_PROVIDER_FEATURES: Record<string, ProviderFeatureConfig> = 
     enableFocusRetention: true,
     attachmentSelector: 'input[type="file"]'
   },
+  'z.ai': ZAI_FEATURES,
+  zai: ZAI_FEATURES,
+  'z-ai': ZAI_FEATURES,
   generic: {
     promptNavSelector: '[class*="user-query"]:not([class*="assistant"]), [class*="user-message"], [class*="UserMessage"], [data-message-author="user"]',
     chatTitleSelector: 'header h1, header h2, nav a[class*="active"], [class*="active"] [class*="title"]',
