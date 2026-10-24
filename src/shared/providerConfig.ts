@@ -128,6 +128,23 @@ const ZAI_FEATURES: ProviderFeatureConfig = {
   attachmentSelector: 'input[type="file"]'
 }
 
+const ARENA_FEATURES: ProviderFeatureConfig = {
+  promptNavSelector:
+    '[data-agent-transcript-message="true"][data-chat-message-id]:has(> [data-user-message-layout="true"])',
+  chatTitleSelector: 'button[aria-haspopup="menu"] > span[dir="auto"].truncate',
+  chatTitlePollingIntervalMs: 1500,
+  defaultChatTitles: ['Chatbot Arena', 'Arena', 'Direct Chat', 'Side-by-Side', 'New Chat', 'Untitled'],
+  composerSelector: 'textarea, [contenteditable="true"]',
+  sendButtonSelector: 'button[type="submit"], button[aria-label*="Send"]',
+  autoSubmitSkillPrompt: true,
+  newChatSelector: 'button[aria-label*="New"], a[href*="arena"]',
+  stopGenerationSelector: 'button[aria-label*="Stop"]',
+  virtualizationSelector: '[data-agent-transcript-message="true"]',
+  enableSlashFocus: true,
+  enableFocusRetention: true,
+  attachmentSelector: 'input[type="file"]'
+}
+
 export const DEFAULT_PROVIDER_FEATURES: Record<string, ProviderFeatureConfig> = {
   chatgpt: {
     promptNavSelector: '[data-message-author-role="user"]',
@@ -237,6 +254,8 @@ export const DEFAULT_PROVIDER_FEATURES: Record<string, ProviderFeatureConfig> = 
   'z.ai': ZAI_FEATURES,
   zai: ZAI_FEATURES,
   'z-ai': ZAI_FEATURES,
+  arena: ARENA_FEATURES,
+  'arena-ai': ARENA_FEATURES,
   generic: {
     promptNavSelector: '[class*="user-query"]:not([class*="assistant"]), [class*="user-message"], [class*="UserMessage"], [data-message-author="user"]',
     chatTitleSelector: 'header h1, header h2, nav a[class*="active"], [class*="active"] [class*="title"]',

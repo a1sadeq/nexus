@@ -10,6 +10,19 @@ describe('z.ai provider resolution', () => {
   })
 })
 
+describe('arena provider resolution', () => {
+  it('resolves arena spellings to the arena entry with verified promptNavSelector', () => {
+    for (const key of ['arena', 'arena-ai', 'chatbot-arena', 'ARENA']) {
+      const feats = getProviderDefaultFeatures(key)
+      expect(feats).toBe(DEFAULT_PROVIDER_FEATURES.arena)
+      expect(feats.promptNavSelector).toBe(
+        '[data-agent-transcript-message="true"][data-chat-message-id]:has(> [data-user-message-layout="true"])'
+      )
+      expect(feats.chatTitleSelector).toBe('button[aria-haspopup="menu"] > span[dir="auto"].truncate')
+    }
+  })
+})
+
 describe('getMergedProviderFeatures precedence', () => {
   it('user features override defaults; unknown keys pass through; nesting is features:{}', () => {
     const merged = getMergedProviderFeatures('z.ai', { features: { composerSelector: '#mine' } })

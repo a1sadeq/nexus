@@ -1200,7 +1200,14 @@ function routeGlobalShortcut(event: Electron.Event, input: Electron.Input, _sour
         const feats = getMergedProviderFeatures(modelKey, providerConfig[modelKey])
         view.webContents
           .executeJavaScript(buildEngine(dir, feats.promptNavSelector))
-          .catch(() => {})
+          .then((res: import('./promptNav').NavigationResult) => {
+            if (res && res.status !== 'ok' && res.status !== 'cancelled') {
+              console.debug('[prompt-nav]', modelKey, dir, res)
+            }
+          })
+          .catch((err) => {
+            console.error('[prompt-nav] execution failed', modelKey, dir, err)
+          })
       }
       return true
     }
