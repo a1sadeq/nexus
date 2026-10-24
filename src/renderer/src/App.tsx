@@ -162,6 +162,50 @@ function App() {
 
   const [tabDiscardMinutes, setTabDiscardMinutes] = useState(10)
   const [maxActiveTabs, setMaxActiveTabs] = useState(0)
+
+  useEffect(() => {
+    let mounted = true
+    // @ts-ignore
+    window.electron?.ipcRenderer?.invoke?.('get_tab_discard_policy').then((res: any) => {
+      if (mounted && res?.success && res.policy) {
+        setTabDiscardMinutes(res.policy.tabDiscardMinutes)
+        setMaxActiveTabs(res.policy.maxActiveTabs)
+      }
+    }).catch(() => {})
+    return () => {
+      mounted = false
+    }
+  }, [])
+
+  const handleUpdateTabDiscardMinutes = async (minutes: number) => {
+    setTabDiscardMinutes(minutes)
+    try {
+      // @ts-ignore
+      const res = await window.electron?.ipcRenderer?.invoke?.('set_tab_discard_policy', { tabDiscardMinutes: minutes })
+      if (res?.success && res.policy) {
+        setTabDiscardMinutes(res.policy.tabDiscardMinutes)
+      } else if (res?.reason) {
+        console.error('Failed to update tab discard policy:', res.reason)
+      }
+    } catch (e) {
+      console.error('Failed to update tab discard policy:', e)
+    }
+  }
+
+  const handleUpdateMaxActiveTabs = async (max: number) => {
+    setMaxActiveTabs(max)
+    try {
+      // @ts-ignore
+      const res = await window.electron?.ipcRenderer?.invoke?.('set_tab_discard_policy', { maxActiveTabs: max })
+      if (res?.success && res.policy) {
+        setMaxActiveTabs(res.policy.maxActiveTabs)
+      } else if (res?.reason) {
+        console.error('Failed to update max active tabs policy:', res.reason)
+      }
+    } catch (e) {
+      console.error('Failed to update max active tabs policy:', e)
+    }
+  }
   const [history, setHistory] = useState<HistoryItem[]>([])
   const [historyLoaded, setHistoryLoaded] = useState(false)
 
@@ -1769,7 +1813,7 @@ Acknowledge these skills with a concise confirmation in this exact format:
       />
 
       {showSettings && (
-        <SettingsOverlay tabDiscardMinutes={tabDiscardMinutes} setTabDiscardMinutes={setTabDiscardMinutes} maxActiveTabs={maxActiveTabs} setMaxActiveTabs={setMaxActiveTabs}
+        <SettingsOverlay tabDiscardMinutes={tabDiscardMinutes} setTabDiscardMinutes={handleUpdateTabDiscardMinutes} maxActiveTabs={maxActiveTabs} setMaxActiveTabs={handleUpdateMaxActiveTabs}
           uiZoom={uiZoom} setUiZoom={setUiZoom} webviewZoom={webviewZoom} setWebviewZoom={setWebviewZoom}
           models={models}
           setModels={setModels}

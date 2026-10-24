@@ -20,6 +20,7 @@ import { buildEngine } from './promptNav'
 import { buildFeatureHookEvidenceScript, type collectFeatureHookEvidence } from './featureHookEvidence'
 import { executeHookCapture, hookContextId } from './featureHookCapture'
 import { parseFeatureHookImport } from '../shared/featureHookImport'
+import { TabDiscardManager, type DiscardableView } from './tabDiscardManager'
 import { getCustomThemeEntry, saveCustomThemeEntry, removeCustomThemeEntry } from './customThemesStore'
 import { PROVIDER_THEMES, mergeOverrides, getStructuralVars } from './providerThemes'
 import { type ProviderOverrides, getMergedProviderFeatures } from '../shared/providerConfig'
@@ -79,9 +80,6 @@ function sendToMainWindow(channel: string, ...args: any[]) {
 const aiViews = new Map<string, Electron.WebContentsView>()
 let activeViewId: string | null = null
 let activeViewVisible = true
-let tabDiscardMinutes = 10
-let maxActiveTabs = 0
-const evictingTabs = new Set<string>()
 const viewTitles = new Map<string, string>()
 const viewModelKeys = new Map<string, string>()
 let providerConfig: import('../shared/providerConfig').ProviderConfigMap = {}
@@ -97,18 +95,83 @@ app.userAgentFallback = AI_UA
 app.commandLine.appendSwitch('disable-site-isolation-trials')
 app.commandLine.appendSwitch('js-flags', '--max-old-space-size=256')
 
-// LRU memory pool: last touch time per tab + saved state of evicted tabs so
-// their URL and scroll position can be restored on reactivation.
-const lastAccessedTimestamps = new Map<string, number>()
-const evictedTabStates = new Map<string, { url: string; scrollY: number }>()
+export const tabDiscardManager = new TabDiscardManager({
+  getUserDataDir: () => app.getPath('userData'),
+  isPinned: (tabId: string) => {
+    try {
+      const pinnedFile = join(app.getPath('userData'), 'pinned.json')
+      if (existsSync(pinnedFile)) {
+        const arr = JSON.parse(readFileSync(pinnedFile, 'utf-8'))
+        if (Array.isArray(arr) && arr.includes(tabId)) return true
+      }
+    } catch {}
+    return false
+  },
+  onTeardown: (tabId: string, view: DiscardableView) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      try {
+        mainWindow.contentView.removeChildView(view as unknown as Electron.WebContentsView)
+      } catch {}
+    }
+    try {
+      const wc = view.webContents as unknown as Electron.WebContents & { destroy: () => void }
+      if (!wc.isDestroyed?.()) {
+        wc.destroy()
+      }
+    } catch {}
+
+    aiViews.delete(tabId)
+    viewModelKeys.delete(tabId)
+    lastRealBounds.delete(tabId)
+    viewTitles.delete(tabId)
+
+    const safeId = tabId.replace(/[^a-zA-Z0-9._-]/g, '')
+    const thumbFilename = lastThumbnailFiles.get(safeId)
+    if (thumbFilename) {
+      try {
+        const fs = require('fs')
+        fs.unlink(join(app.getPath('userData'), 'thumbnails', thumbFilename), () => {})
+      } catch {}
+      lastThumbnailFiles.delete(safeId)
+    }
+
+    console.log('[evict]', tabId)
+  }
+})
+
+// IPC endpoints for tab discard policy & status
+ipcMain.handle('get_tab_discard_policy', (event) => {
+  if (!mainWindow || event.sender !== mainWindow.webContents) {
+    return { success: false, reason: 'untrusted_sender' }
+  }
+  const { policy, revision } = tabDiscardManager.getPolicy()
+  return { success: true, policy, revision }
+})
+
+ipcMain.handle('set_tab_discard_policy', (event, partial: unknown, expectedRevision?: number) => {
+  if (!mainWindow || event.sender !== mainWindow.webContents) {
+    return { success: false, reason: 'untrusted_sender' }
+  }
+  return tabDiscardManager.setPolicy(partial, expectedRevision)
+})
+
+ipcMain.handle('get_tab_discard_status', (event) => {
+  if (!mainWindow || event.sender !== mainWindow.webContents) {
+    return { success: false, reason: 'untrusted_sender' }
+  }
+  return { success: true, status: tabDiscardManager.getStatus() }
+})
 
 ipcMain.on('set_tab_discard_time', (_event, minutes) => {
-  tabDiscardMinutes = typeof minutes === 'number' ? minutes : 10
+  if (typeof minutes === 'number' && Number.isInteger(minutes) && minutes >= 0) {
+    tabDiscardManager.setPolicy({ tabDiscardMinutes: minutes })
+  }
 })
 
 ipcMain.on('set_max_active_tabs', (_event, max) => {
-  maxActiveTabs = typeof max === 'number' ? max : 0
-  if (activeViewId) enforceMaxActiveTabs(activeViewId)
+  if (typeof max === 'number' && Number.isInteger(max) && max >= 0) {
+    tabDiscardManager.setPolicy({ maxActiveTabs: max })
+  }
 })
 
 ipcMain.on('show_toast', (_event, msg: string) => {
@@ -141,59 +204,7 @@ ipcMain.on('show_toast', (_event, msg: string) => {
 })
 
 
-function enforceMaxActiveTabs(excludeTabId: string) {
-  if (maxActiveTabs <= 0) return
-  
-  const activeIds = Array.from(aiViews.keys()).filter(id => !evictingTabs.has(id))
-  if (activeIds.length <= maxActiveTabs) return
 
-  const sorted = activeIds
-    .filter(id => id !== excludeTabId)
-    .map(id => ({ id, ts: lastAccessedTimestamps.get(id) || 0 }))
-    .sort((a, b) => a.ts - b.ts)
-    
-  const evictCount = activeIds.length - maxActiveTabs
-  for (let i = 0; i < evictCount && i < sorted.length; i++) {
-    const id = sorted[i].id
-    const v = aiViews.get(id)
-    if (v) {
-      evictingTabs.add(id)
-      v.webContents.executeJavaScript('window.scrollY')
-        .then((scrollY) => {
-          evictingTabs.delete(id)
-          finishEvict(id, v, Number(scrollY) || 0)
-        })
-        .catch(() => {
-          evictingTabs.delete(id)
-          finishEvict(id, v, 0)
-        })
-    }
-  }
-}
-
-setInterval(() => {
-  if (tabDiscardMinutes === 0) return
-  const now = Date.now()
-  for (const [id, v] of aiViews) {
-    if (id === activeViewId) continue // Never evict the currently active tab, even if hidden behind settings or window is unfocused
-    const ts = lastAccessedTimestamps.get(id)
-    if (!ts) continue
-    if (v.webContents.isLoading()) continue
-
-    const title = viewTitles.get(id) || ''
-    const tl = title.toLowerCase()
-    const isDefaultTitle = tl === 'new chat' || tl === 'gemini' || tl === 'gemini chat' || tl === 'qwen' || tl === 'qwen chat' || tl === 'kimi' || tl === 'kimi chat' || tl === 'deepseek' || tl === 'deepseek chat' || tl === 'z.ai' || tl === 'z chat'
-    
-    const minutesSinceAccess = (now - ts) / 60000
-    const threshold = isDefaultTitle ? 1 : tabDiscardMinutes
-    
-    if (minutesSinceAccess >= threshold) {
-      v.webContents.executeJavaScript('window.scrollY')
-        .then((scrollY) => finishEvict(id, v, Number(scrollY) || 0))
-        .catch(() => finishEvict(id, v, 0))
-    }
-  }
-}, 30000)
 
 let tray: Tray | null = null
 let isQuitting = false
@@ -1524,6 +1535,7 @@ app.whenReady().then(() => {
   loadCustomKeymap()
   loadThemeFromDisk()
   loadProviderConfigFromDisk()
+  tabDiscardManager.init()
   session.fromPartition('persist:ai-shared').clearCache().catch(console.error)
 
   // One-time migration: the old OAuth cookie bridge left empty/corrupted
@@ -2220,12 +2232,13 @@ function ensureAiView(tabId: string): Electron.WebContentsView {
   })
 
   aiViews.set(tabId, view)
-  lastAccessedTimestamps.set(tabId, Date.now())
+  tabDiscardManager.registerView(tabId, view as unknown as DiscardableView)
   return view
 }
 
 ipcMain.on('navigate_to_url', (_event, tabId, url, bounds, modelKey) => {
   console.log('[navigate_to_url]', tabId, url)
+  tabDiscardManager.onExplicitNavigation(tabId)
   resolveModelKey(tabId, url, modelKey)
   
   if (currentUiZoom !== 1.0 && bounds) {
@@ -3274,8 +3287,6 @@ ipcMain.on('set_provider_config', (_event, map) => {
 
 // Switch tabs: show target view, hide the rest. Loads URL only on first visit.
 ipcMain.on('activate_tab', (_event, tabId, url, bounds, modelKey) => {
-  lastAccessedTimestamps.set(tabId, Date.now())
-
   if (currentUiZoom !== 1.0 && bounds) {
     bounds = {
       x: Math.round(bounds.x * currentUiZoom),
@@ -3285,7 +3296,8 @@ ipcMain.on('activate_tab', (_event, tabId, url, bounds, modelKey) => {
     }
   }
 
-  const wasEvicted = evictedTabStates.has(tabId)
+  const wasEvicted = tabDiscardManager.isTabEvicted(tabId)
+  const evicted = tabDiscardManager.consumeEvictedTabState(tabId)
   const view = ensureAiView(tabId)
   console.log('[activate_tab]', tabId, 'url=', url, 'current=', view.webContents.getURL())
   resolveModelKey(tabId, url, modelKey)
@@ -3297,17 +3309,13 @@ ipcMain.on('activate_tab', (_event, tabId, url, bounds, modelKey) => {
   view.setBounds(bounds)
   if (!isHidden) lastRealBounds.set(tabId, bounds)
   const current = view.webContents.getURL()
-  if (wasEvicted) {
+  if (wasEvicted && evicted) {
     // Tab was evicted from memory: recreate with its saved URL and restore scroll.
-    const evicted = evictedTabStates.get(tabId)
-    evictedTabStates.delete(tabId)
-    console.log('[activate_tab] RESTORING evicted tab:', tabId, evicted?.url)
-    if (evicted) {
-      view.webContents.once('did-finish-load', () => {
-        view.webContents.executeJavaScript(`window.scrollTo(0, ${evicted.scrollY})`).catch(() => {})
-      })
-      view.webContents.loadURL(evicted.url)
-    }
+    console.log('[activate_tab] RESTORING evicted tab:', tabId, evicted.url)
+    view.webContents.once('did-finish-load', () => {
+      view.webContents.executeJavaScript(`window.scrollTo(0, ${evicted.scrollY})`).catch(() => {})
+    })
+    view.webContents.loadURL(evicted.url)
   } else if (url && !current) {
     console.log('[activate_tab] LOADING empty view:', url)
     view.webContents.loadURL(url)
@@ -3318,10 +3326,11 @@ ipcMain.on('activate_tab', (_event, tabId, url, bounds, modelKey) => {
     focusPromptInView(view)
   }
 
-  enforceMaxActiveTabs(tabId)
+  tabDiscardManager.activateTab(tabId)
 })
 
 ipcMain.on('navigate_tab', (_event, tabId: string, url: string, modelKey?: string) => {
+  tabDiscardManager.onExplicitNavigation(tabId)
   const view = ensureAiView(tabId)
   resolveModelKey(tabId, url, modelKey)
   applyWebviewTheme(view, viewModelKeys.get(tabId))
@@ -3359,43 +3368,9 @@ ipcMain.handle('history_go_forward', () => {
 
 
 
-function finishEvict(tabId: string, view: Electron.WebContentsView, scrollY: number) {
-  if (!aiViews.has(tabId) || aiViews.get(tabId) !== view) return
-  try {
-    evictedTabStates.set(tabId, { url: view.webContents.getURL(), scrollY })
-  } catch {}
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    try {
-      mainWindow.contentView.removeChildView(view)
-    } catch {}
-  }
-  try {
-    ;(view.webContents as Electron.WebContents & { destroy: () => void }).destroy()
-  } catch {}
-  aiViews.delete(tabId)
-  lastAccessedTimestamps.delete(tabId)
-  viewModelKeys.delete(tabId)
-  lastRealBounds.delete(tabId)
-  viewTitles.delete(tabId) // Fix #5: map memory leak
-  
-  // Fix #3: disk/memory leak - cleanup orphaned thumbnails
-  const safeId = tabId.replace(/[^a-zA-Z0-9._-]/g, '')
-  const thumbFilename = lastThumbnailFiles.get(safeId)
-  if (thumbFilename) {
-    try {
-      const fs = require('fs') // ensure fs is available
-      fs.unlink(join(app.getPath('userData'), 'thumbnails', thumbFilename), () => {})
-    } catch {}
-    lastThumbnailFiles.delete(safeId)
-  }
-  
-  console.log('[evict]', tabId, 'scrollY=', scrollY)
-}
-
 ipcMain.on('destroy_tab_view', (_event, tabId) => {
   console.log('[destroy_tab_view]', tabId)
-  evictedTabStates.delete(tabId)
-  lastAccessedTimestamps.delete(tabId)
+  tabDiscardManager.closeTab(tabId)
   lastRealBounds.delete(tabId)
   viewModelKeys.delete(tabId)
   const view = aiViews.get(tabId)

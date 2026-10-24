@@ -676,6 +676,26 @@ export default function SettingsOverlay({
       : 'general'
   })
 
+  const [discardStatus, setDiscardStatus] = useState<{
+    residentCount: number
+    discardedCount: number
+    pendingCount: number
+    protectedCount: number
+  } | null>(null)
+
+  useEffect(() => {
+    let mounted = true
+    // @ts-ignore
+    window.electron?.ipcRenderer?.invoke?.('get_tab_discard_status').then((res: any) => {
+      if (mounted && res?.success && res.status) {
+        setDiscardStatus(res.status)
+      }
+    }).catch(() => {})
+    return () => {
+      mounted = false
+    }
+  }, [tabDiscardMinutes, maxActiveTabs])
+
   useEffect(() => {
     if (initialSection) {
       setTab(initialSection)
@@ -1965,12 +1985,25 @@ export default function SettingsOverlay({
                 <span>Memory & Performance</span>
               </SectionTitle>
 
+              {discardStatus && (
+                <div className="px-3 py-2 rounded-xl border flex flex-wrap items-center gap-4 text-xs font-mono" style={{ background: 'var(--surface2)', borderColor: 'var(--border)', color: 'var(--text2)' }}>
+                  <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-emerald-400"></span>Resident Views: <strong className="text-white">{discardStatus.residentCount}</strong></span>
+                  <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-blue-400"></span>Discarded: <strong className="text-white">{discardStatus.discardedCount}</strong></span>
+                  {discardStatus.pendingCount > 0 && (
+                    <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse"></span>Pending Eviction: <strong className="text-white">{discardStatus.pendingCount}</strong></span>
+                  )}
+                  {discardStatus.protectedCount > 0 && (
+                    <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-purple-400"></span>Protected: <strong className="text-white">{discardStatus.protectedCount}</strong></span>
+                  )}
+                </div>
+              )}
+
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <Card>
                   <div className="flex flex-col gap-1.5">
                     <span className="font-bold text-xs text-white">Tab Discard System</span>
                     <p className="text-[11px] opacity-75 leading-relaxed" style={{ color: 'var(--text2)' }}>
-                      Auto-discards background tabs after inactivity to keep memory usage minimal.
+                      Auto-discards background tabs after inactivity. "Never" disables idle-time discard without disabling resident limits.
                     </p>
                     <div className="pt-2">
                       <select
@@ -1996,7 +2029,7 @@ export default function SettingsOverlay({
                   <div className="flex flex-col gap-1.5">
                     <span className="font-bold text-xs text-white">Max Active Tabs Threshold</span>
                     <p className="text-[11px] opacity-75 leading-relaxed" style={{ color: 'var(--text2)' }}>
-                      Hard limit on tabs kept in memory. Oldest background views are immediately discarded.
+                      Limit on background tabs resident in memory. "Unlimited" disables count eviction without disabling the idle timer.
                     </p>
                     <div className="pt-2">
                       <select
