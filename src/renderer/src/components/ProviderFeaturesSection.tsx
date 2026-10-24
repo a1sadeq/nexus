@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react'
+import React, { useState, useRef, useEffect } from 'react'
 import {
   BrandIcon,
   IconSliders,
@@ -24,6 +24,7 @@ import {
   getMergedProviderFeatures
 } from '../../../shared/providerConfig'
 import { generateFeatureHooksPrompt } from '../lib/promptGenerator'
+import { parseFeatureHookImport, selectMeasuredHookUpdates, type FeatureHookKey, type HookMatchMeasurement } from '../../../shared/featureHookImport'
 
 interface Props {
   models: ModelDef[]
@@ -64,6 +65,21 @@ export const ProviderFeaturesSection: React.FC<Props> = ({
   const [showImportModal, setShowImportModal] = useState(false)
   const [importJsonText, setImportJsonText] = useState('')
   const [importError, setImportError] = useState<string | null>(null)
+  const [isValidatingImport, setIsValidatingImport] = useState(false)
+  const [importPreview, setImportPreview] = useState<{
+    source: string; providerKey: string; contextId: string;
+    measurements: Partial<Record<FeatureHookKey, HookMatchMeasurement>>
+  } | null>(null)
+  const requestRevision = useRef(0)
+  const generationPending = useRef(false)
+  const importPending = useRef(false)
+  useEffect(() => {
+    requestRevision.current++
+    setImportPreview(null)
+    setIsGeneratingPrompt(false)
+    setIsValidatingImport(false)
+    return () => { requestRevision.current++ }
+  }, [selectedKey])
 
   const activeModel = models.find((m) => m.key === selectedKey)
   const currentOverrides = providerConfig[selectedKey] || {}
@@ -230,6 +246,12 @@ export const ProviderFeaturesSection: React.FC<Props> = ({
   currentSelection.current = selectedKey
 
   const handleGenerateAiPrompt = async () => {
+    if (generationPending.current || importPending.current) {
+      if (setToast) setToast('A live hook request is still finishing. Please retry in a moment.')
+      return
+    }
+    generationPending.current = true
+    const revision = ++requestRevision.current
     setIsGeneratingPrompt(true)
     try {
       const captureKey = selectedKey
@@ -239,7 +261,7 @@ export const ProviderFeaturesSection: React.FC<Props> = ({
         captureKey,
         activeModel?.url
       )
-      if (currentSelection.current !== captureKey)
+      if (revision !== requestRevision.current || currentSelection.current !== captureKey)
         throw new Error('Provider selection changed during capture. Retry.')
       if (!res?.success || !res.evidence) {
         throw new Error(
@@ -264,104 +286,75 @@ export const ProviderFeaturesSection: React.FC<Props> = ({
           'Live evidence captured. Review the prompt before copying; absent controls remain unverified.'
         )
     } catch (err) {
+      if (revision !== requestRevision.current) return
       console.error('Error generating AI prompt:', err)
       if (setToast) {
         setToast(err instanceof Error ? err.message : 'Failed to generate AI prompt')
         setTimeout(() => setToast(null), 3000)
       }
     } finally {
-      setIsGeneratingPrompt(false)
+      generationPending.current = false
+      if (revision === requestRevision.current) setIsGeneratingPrompt(false)
     }
   }
 
-  const VALID_FEATURE_KEYS: (keyof ProviderFeatureConfig)[] = [
-    'attachmentSelector',
-    'promptNavSelector',
-    'composerSelector',
-    'sendButtonSelector',
-    'chatTitleSelector',
-    'newChatSelector',
-    'stopGenerationSelector',
-    'virtualizationSelector',
-    'enableSlashFocus',
-    'enableFocusRetention',
-    'autoSubmitSkillPrompt',
-    'customInitScript',
-    'defaultChatTitles',
-    'chatTitlePollingIntervalMs'
-  ]
+  const cancelImport = () => {
+    requestRevision.current++
+    setShowImportModal(false)
+    setImportPreview(null)
+    setIsValidatingImport(false)
+  }
 
-  const handleApplyAiJson = () => {
+  const handleApplyAiJson = async () => {
+    if (importPending.current || generationPending.current) {
+      if (setToast) setToast('A live hook request is still finishing. Please retry in a moment.')
+      return
+    }
+    importPending.current = true
+    const revision = ++requestRevision.current
+    const captureKey = selectedKey, source = importJsonText
+    const prior = importPreview?.source === source && importPreview.providerKey === captureKey ? importPreview : null
+    setIsValidatingImport(true)
     try {
       setImportError(null)
-      let raw = importJsonText.trim()
-      const jsonMatch = raw.match(/```(?:json)?\s*([\s\S]*?)\s*```/)
-      if (jsonMatch && jsonMatch[1]) {
-        raw = jsonMatch[1].trim()
+      const { selectors, ignored } = parseFeatureHookImport(source)
+      const res = await window.electron?.ipcRenderer?.invoke(
+        'validate_feature_hook_selectors', captureKey, activeModel?.url, selectors, prior?.contextId
+      )
+      if (revision !== requestRevision.current || currentSelection.current !== captureKey) return
+      if (!res?.success || !res.evidence?.validations || typeof res.contextId !== 'string') {
+        setImportPreview(null)
+        throw new Error(`Live validation unavailable (${res?.reason || 'IPC unavailable'}). Nothing was applied.`)
       }
-      const parsed = JSON.parse(raw)
-      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-        throw new Error('Imported content must be a JSON object')
+      const measurements = res.evidence.validations as Partial<Record<FeatureHookKey, HookMatchMeasurement>>
+      const { updates, skipped } = selectMeasuredHookUpdates(selectors, measurements)
+      const accepted = Object.keys(updates)
+      if (!accepted.length) throw new Error('No selectors match the current state. Existing settings are unchanged. Capture the relevant UI state and retry.')
+      // First click is read-only preview. Second click rechecks context and counts before applying.
+      const signature = (m: typeof measurements) => JSON.stringify(Object.keys(selectors).map(key => [key, m[key as FeatureHookKey]?.count, m[key as FeatureHookKey]?.error]))
+      if (!prior || prior.contextId !== res.contextId || signature(prior.measurements) !== signature(measurements)) {
+        setImportPreview({ source, providerKey: captureKey, contextId: res.contextId, measurements })
+        return
       }
-
-      const accepted: string[] = []
-      const rejected: string[] = []
-      const nextUpdates: Partial<ProviderFeatureConfig> = {}
-
-      for (const [key, value] of Object.entries(parsed)) {
-        if (VALID_FEATURE_KEYS.includes(key as keyof ProviderFeatureConfig)) {
-          if (typeof value === 'string') {
-            const trimmed = value.trim()
-            if (trimmed) {
-              ;(nextUpdates as any)[key] = trimmed
-              accepted.push(key)
-            } else {
-              rejected.push(`${key} (empty string)`)
-            }
-          } else if (typeof value === 'boolean' || typeof value === 'number') {
-            ;(nextUpdates as any)[key] = value
-            accepted.push(key)
-          } else if (Array.isArray(value)) {
-            const arr = value.map((s) => String(s).trim()).filter(Boolean)
-            ;(nextUpdates as any)[key] = arr
-            accepted.push(key)
-          } else {
-            rejected.push(`${key} (invalid type)`)
-          }
-        } else {
-          rejected.push(key)
-        }
-      }
-
-      if (accepted.length === 0) {
-        throw new Error(`No recognized feature selectors found in JSON.${rejected.length > 0 ? ` Unknown keys: ${rejected.join(', ')}` : ''}`)
-      }
-
-      setProviderConfig((prev) => {
-        const cur = prev[selectedKey] || {}
-        return {
-          ...prev,
-          [selectedKey]: {
-            ...cur,
-            features: {
-              ...(cur.features || {}),
-              ...nextUpdates
-            }
-          }
-        }
+      setProviderConfig(prev => {
+        const cur = prev[captureKey] || {}
+        return { ...prev, [captureKey]: { ...cur, features: { ...(cur.features || {}), ...updates } } }
       })
-
       setShowImportModal(false)
+      setImportPreview(null)
       setImportJsonText('')
-      const reportMsg = `✨ Imported for ${modelLabel(selectedKey)}: Accepted [${accepted.join(', ')}]${
-        rejected.length > 0 ? ` | Ignored [${rejected.join(', ')}]` : ''
-      }`
       if (setToast) {
-        setToast(reportMsg)
-        setTimeout(() => setToast(null), 4500)
+        setToast(`Applied matched selectors: ${accepted.join(', ')}. Preserved existing values for empty/zero-match fields: ${[...ignored, ...skipped].join(', ') || 'none'}. Matches do not prove semantic correctness.`)
+        setTimeout(() => setToast(null), 6500)
       }
-    } catch (e: any) {
-      setImportError(e?.message || 'Invalid JSON format')
+    } catch (error) {
+      if (revision === requestRevision.current) {
+        setImportPreview(null)
+        setImportError(error instanceof Error ? error.message : 'Invalid selector JSON')
+      }
+    } finally {
+      importPending.current = false
+      if (revision === requestRevision.current) setIsValidatingImport(false)
     }
   }
 
@@ -1029,7 +1022,7 @@ export const ProviderFeaturesSection: React.FC<Props> = ({
       {showImportModal && (
         <div
           className="fixed inset-0 z-[100000] flex items-center justify-center p-4 bg-black/75 backdrop-blur-md animate-in fade-in duration-150"
-          onClick={() => setShowImportModal(false)}
+          onClick={cancelImport}
         >
           <div
             className="w-full max-w-xl rounded-2xl border shadow-2xl overflow-hidden flex flex-col max-h-[85vh] animate-in zoom-in-95 duration-150"
@@ -1051,13 +1044,13 @@ export const ProviderFeaturesSection: React.FC<Props> = ({
                     Import AI Selectors: {modelLabel(selectedKey)}
                   </h2>
                   <p className="text-[11px] text-(--text2)">
-                    Paste the JSON returned by the AI to automatically configure all hooks.
+                    Validate the eight selector fields against the active tab, review, then apply matched fields.
                   </p>
                 </div>
               </div>
               <button
                 type="button"
-                onClick={() => setShowImportModal(false)}
+                onClick={cancelImport}
                 className="p-1.5 rounded-lg text-(--text2) hover:text-(--text) hover:bg-white/5 transition-colors cursor-pointer"
               >
                 <IconX size={16} />
@@ -1073,15 +1066,17 @@ export const ProviderFeaturesSection: React.FC<Props> = ({
               )}
 
               <p className="text-xs text-(--text2)">
-                Paste the full AI answer or JSON code block here. Any matching selectors (attachment, composer, send button, navigation, titles) will be applied instantly.
+                Only the eight selector string fields are allowed. Executable scripts and other settings are rejected. Empty or zero-match fields preserve existing values. A match is not proof of the correct action.
               </p>
 
               <textarea
                 value={importJsonText}
                 onChange={(e) => {
                   setImportJsonText(e.target.value)
+                  setImportPreview(null)
                   if (importError) setImportError(null)
                 }}
+                disabled={isValidatingImport}
                 rows={10}
                 placeholder={`{\n  "attachmentSelector": "input[type=\\"file\\"]",\n  "composerSelector": "#prompt-textarea",\n  "sendButtonSelector": "button[data-testid=\\"send-button\\"]"\n}`}
                 className="w-full p-3 rounded-xl font-mono text-xs bg-black/60 border border-white/10 text-gray-200 focus:border-emerald-400 focus:outline-none custom-scrollbar"
@@ -1089,11 +1084,22 @@ export const ProviderFeaturesSection: React.FC<Props> = ({
               />
             </div>
 
+            {importPreview && (
+              <div className="px-4 pb-4 text-xs" role="status">
+                <p className="mb-2">Live match preview — review the intended targets before applying. Zero matches are skipped, not cleared.</p>
+                <table className="w-full text-left"><thead><tr><th>Hook</th><th>Matches</th><th>Action</th></tr></thead>
+                  <tbody>{Object.entries(importPreview.measurements).map(([key, measurement]) => (
+                    <tr key={key}><td>{key}</td><td>{measurement.count ?? measurement.error}</td><td>{measurement.count ? 'Apply after recheck' : 'Keep existing'}</td></tr>
+                  ))}</tbody>
+                </table>
+              </div>
+            )}
+
             {/* Modal Footer */}
             <div className="p-3.5 border-t border-white/10 flex items-center justify-end gap-2 bg-black/20">
               <button
                 type="button"
-                onClick={() => setShowImportModal(false)}
+                onClick={cancelImport}
                 className="px-3 py-1.5 rounded-xl text-xs font-medium border border-white/10 text-gray-300 hover:bg-white/5 transition-colors cursor-pointer"
               >
                 Cancel
@@ -1101,11 +1107,11 @@ export const ProviderFeaturesSection: React.FC<Props> = ({
               <button
                 type="button"
                 onClick={handleApplyAiJson}
-                disabled={!importJsonText.trim()}
+                disabled={!importJsonText.trim() || isValidatingImport}
                 className="px-4 py-1.5 rounded-xl text-xs font-bold bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 disabled:cursor-not-allowed text-black transition-all cursor-pointer flex items-center gap-1.5 shadow-md"
               >
                 <IconCheck size={13} />
-                <span>Apply Selectors</span>
+                <span>{isValidatingImport ? 'Checking active tab…' : importPreview ? 'Recheck & apply matched' : 'Validate live selectors'}</span>
               </button>
             </div>
           </div>

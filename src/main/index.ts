@@ -17,7 +17,9 @@ import {
 import { join, basename, extname } from 'path'
 import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, copyFileSync } from 'fs'
 import { buildEngine } from './promptNav'
-import { buildFeatureHookEvidenceScript } from './featureHookEvidence'
+import { buildFeatureHookEvidenceScript, type collectFeatureHookEvidence } from './featureHookEvidence'
+import { executeHookCapture, hookContextId } from './featureHookCapture'
+import { parseFeatureHookImport } from '../shared/featureHookImport'
 import { getCustomThemeEntry, saveCustomThemeEntry, removeCustomThemeEntry } from './customThemesStore'
 import { PROVIDER_THEMES, mergeOverrides, getStructuralVars } from './providerThemes'
 import { type ProviderOverrides, getMergedProviderFeatures } from '../shared/providerConfig'
@@ -3081,30 +3083,43 @@ ipcMain.handle('reset_custom_theme_file', (_event, modelKey: string) => {
   return success
 })
 
-// Feature hooks require the current tab, never an arbitrary same-provider conversation.
-ipcMain.handle('capture_feature_hook_evidence', async (_event, modelKey: string, providerUrl?: string) => {
-  try {
-    if (!activeViewId) return { success: false, reason: 'no_active_tab' }
-    const view = aiViews.get(activeViewId)
-    if (!view || view.webContents.isDestroyed()) return { success: false, reason: 'no_active_tab' }
-    const actualUrl = view.webContents.getURL()
-    const actual = new URL(actualUrl)
-    if (!/^https?:$/.test(actual.protocol)) return { success: false, reason: 'unsupported_url' }
-    const sameKey = viewModelKeys.get(activeViewId) === modelKey
-    const sameHost = providerUrl ? new URL(providerUrl).hostname === actual.hostname : false
-    if (!sameKey && !sameHost) return { success: false, reason: 'active_provider_mismatch' }
-    const id = activeViewId
-    const features = getMergedProviderFeatures(modelKey, providerConfig[modelKey])
-    const evidence = await view.webContents.executeJavaScript(buildFeatureHookEvidenceScript(features as Record<string, unknown>))
-    if (activeViewId !== id || view.webContents.isDestroyed() || view.webContents.getURL() !== actualUrl) {
-      return { success: false, reason: 'tab_changed_during_capture' }
+// Only the trusted settings renderer may request read-only evidence or selector validation.
+for (const channel of ['capture_feature_hook_evidence', 'validate_feature_hook_selectors']) {
+  ipcMain.handle(channel, async (event, modelKey: string, providerUrl?: string, proposed?: unknown, expectedContext?: string) => {
+    try {
+      if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== event.sender.mainFrame) {
+        return { success: false, reason: 'untrusted_sender' }
+      }
+      if (typeof modelKey !== 'string' || typeof providerUrl !== 'string') return { success: false, reason: 'invalid_request' }
+      if (!activeViewId) return { success: false, reason: 'no_active_tab' }
+      const view = aiViews.get(activeViewId)
+      if (!view || view.webContents.isDestroyed()) return { success: false, reason: 'no_active_tab' }
+      const contents = view.webContents
+      const actualUrl = contents.getURL(), actual = new URL(actualUrl), requested = new URL(providerUrl)
+      if (!/^https?:$/.test(actual.protocol) || !/^https?:$/.test(requested.protocol)) return { success: false, reason: 'unsupported_url' }
+      // A stale provider key must not authorize an unrelated navigated hostname.
+      // Explicit provider redirect aliases can be added separately after verification.
+      if (actual.hostname.toLowerCase() !== requested.hostname.toLowerCase()) return { success: false, reason: 'active_provider_mismatch' }
+      const id = activeViewId, contextId = hookContextId(contents)
+      if (expectedContext && expectedContext !== contextId) return { success: false, reason: 'context_changed_revalidate' }
+      const features = channel === 'validate_feature_hook_selectors'
+        ? parseFeatureHookImport(JSON.stringify(proposed)).selectors
+        : getMergedProviderFeatures(modelKey, providerConfig[modelKey])
+      const evidence = await executeHookCapture(contents, buildFeatureHookEvidenceScript(features as Record<string, unknown>)) as ReturnType<typeof collectFeatureHookEvidence>
+      if (contents.isDestroyed() || activeViewId !== id || contents.getURL() !== actualUrl || hookContextId(contents) !== contextId) {
+        return { success: false, reason: 'tab_changed_during_capture' }
+      }
+      if (!evidence || evidence.version !== 2 || evidence.origin !== actual.origin || !evidence.validations || JSON.stringify(evidence).length > 64000) {
+        return { success: false, reason: 'invalid_evidence' }
+      }
+      return { success: true, evidence, contextId }
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : 'capture_failed'
+      console.warn('Feature hook request failed:', reason.slice(0, 180))
+      return { success: false, reason: reason.slice(0, 180) }
     }
-    return { success: true, evidence }
-  } catch (error) {
-    console.error('Feature hook evidence capture failed:', error)
-    return { success: false, reason: 'capture_failed' }
-  }
-})
+  })
+}
 
 ipcMain.handle('extract_provider_live_dom', async (_event, modelKey: string, providerUrl?: string) => {
   try {

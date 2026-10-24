@@ -14,6 +14,40 @@ function capture(html: string, selectors: Record<string, unknown> = {}) {
   }
 }
 
+describe('audit regressions', () => {
+  it('preserves author semantics while removing auth credential attributes', () => {
+    const result = capture('<div data-message-author-role="user" data-auth-token="PRIVATE_TOKEN"></div>')
+    expect(result.candidates.promptNavSelector[0].attributes['data-message-author-role']).toBe('user')
+    expect(JSON.stringify(result)).not.toContain('PRIVATE_TOKEN')
+  })
+  it('never reconstructs a redacted value in suggestedSelector or class attributes', () => {
+    const result = capture('<div data-user-message-layout="PRIVATE_LAYOUT_SECRET" class="account-user@example.test"></div>')
+    expect(JSON.stringify(result)).not.toContain('PRIVATE_LAYOUT_SECRET')
+    expect(JSON.stringify(result)).not.toContain('user@example.test')
+  })
+  it('caps the entire object including validation samples and pathological attributes', () => {
+    const attrs = Array.from({ length: 100 }, (_, i) => ` data-testid-${i}="${'x'.repeat(500)}"`).join('')
+    const dom = new JSDOM(`<div ${attrs}><button ${attrs}>Send</button></div>`.repeat(5), { url: 'https://arena.ai/', runScripts: 'outside-only' })
+    try {
+      dom.window.performance.now = () => 0 // deterministic: exercise size cap, not deadline
+      const selectors = Object.fromEntries(['attachmentSelector', 'promptNavSelector', 'composerSelector', 'sendButtonSelector', 'chatTitleSelector', 'newChatSelector', 'stopGenerationSelector', 'virtualizationSelector'].map(k => [k, '*']))
+      const result = dom.window.eval(buildFeatureHookEvidenceScript(selectors)) as any
+      expect(JSON.stringify(result).length).toBeLessThanOrEqual(64000)
+      expect(result.validations.composerSelector.count).toBeGreaterThan(0)
+    } finally { dom.window.close() }
+  })
+  it('reports overlong selectors without silently turning them into a different expression', () => {
+    const result = capture('<textarea></textarea>', { composerSelector: 'textarea' + ' '.repeat(2100) })
+    expect(result.validations.composerSelector.error).toBe('selector-too-long')
+  })
+  it('retains complete counts while sampling and identifies skipped frame scope', () => {
+    const result = capture('<textarea></textarea><iframe></iframe>')
+    expect(result.counts.composerSelector).toBe(1)
+    expect(result.framesDetected).toBe(1)
+    expect(result.version).toBe(2)
+  })
+})
+
 describe('read-only feature hook evidence', () => {
   it('emits executable JavaScript and retains empty icon buttons, hidden files, and href targets', () => {
     const result = capture(
