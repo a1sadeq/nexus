@@ -17,6 +17,7 @@ import {
 import { join, basename, extname } from 'path'
 import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, copyFileSync } from 'fs'
 import { buildEngine } from './promptNav'
+import { buildFeatureHookEvidenceScript } from './featureHookEvidence'
 import { getCustomThemeEntry, saveCustomThemeEntry, removeCustomThemeEntry } from './customThemesStore'
 import { PROVIDER_THEMES, mergeOverrides, getStructuralVars } from './providerThemes'
 import { type ProviderOverrides, getMergedProviderFeatures } from '../shared/providerConfig'
@@ -3080,6 +3081,31 @@ ipcMain.handle('reset_custom_theme_file', (_event, modelKey: string) => {
   return success
 })
 
+// Feature hooks require the current tab, never an arbitrary same-provider conversation.
+ipcMain.handle('capture_feature_hook_evidence', async (_event, modelKey: string, providerUrl?: string) => {
+  try {
+    if (!activeViewId) return { success: false, reason: 'no_active_tab' }
+    const view = aiViews.get(activeViewId)
+    if (!view || view.webContents.isDestroyed()) return { success: false, reason: 'no_active_tab' }
+    const actualUrl = view.webContents.getURL()
+    const actual = new URL(actualUrl)
+    if (!/^https?:$/.test(actual.protocol)) return { success: false, reason: 'unsupported_url' }
+    const sameKey = viewModelKeys.get(activeViewId) === modelKey
+    const sameHost = providerUrl ? new URL(providerUrl).hostname === actual.hostname : false
+    if (!sameKey && !sameHost) return { success: false, reason: 'active_provider_mismatch' }
+    const id = activeViewId
+    const features = getMergedProviderFeatures(modelKey, providerConfig[modelKey])
+    const evidence = await view.webContents.executeJavaScript(buildFeatureHookEvidenceScript(features as Record<string, unknown>))
+    if (activeViewId !== id || view.webContents.isDestroyed() || view.webContents.getURL() !== actualUrl) {
+      return { success: false, reason: 'tab_changed_during_capture' }
+    }
+    return { success: true, evidence }
+  } catch (error) {
+    console.error('Feature hook evidence capture failed:', error)
+    return { success: false, reason: 'capture_failed' }
+  }
+})
+
 ipcMain.handle('extract_provider_live_dom', async (_event, modelKey: string, providerUrl?: string) => {
   try {
     let targetView: Electron.WebContentsView | null = null
@@ -3203,7 +3229,7 @@ ipcMain.handle('extract_provider_live_dom', async (_event, modelKey: string, pro
           url: location.href,
           title: document.title
         };
-      } catch (e: any) {
+      } catch (e) {
         return { success: false, error: String(e) };
       }
     })();`

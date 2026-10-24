@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useState, useRef } from 'react'
 import {
   BrandIcon,
   IconSliders,
@@ -226,57 +226,47 @@ export const ProviderFeaturesSection: React.FC<Props> = ({
     }
   }
 
+  const currentSelection = useRef(selectedKey)
+  currentSelection.current = selectedKey
+
   const handleGenerateAiPrompt = async () => {
     setIsGeneratingPrompt(true)
     try {
-      let extractedHtml = ''
-      try {
-        // @ts-ignore
-        const res = await window.electron?.ipcRenderer?.invoke(
-          'extract_provider_live_dom',
-          selectedKey,
-          activeModel?.url
+      const captureKey = selectedKey
+      // Read-only live evidence from the active tab; fail closed rather than invent a DOM.
+      const res = await window.electron?.ipcRenderer?.invoke(
+        'capture_feature_hook_evidence',
+        captureKey,
+        activeModel?.url
+      )
+      if (currentSelection.current !== captureKey)
+        throw new Error('Provider selection changed during capture. Retry.')
+      if (!res?.success || !res.evidence) {
+        throw new Error(
+          `Live capture unavailable (${res?.reason || 'IPC unavailable'}). Open the selected provider's conversation, then retry.`
         )
-        if (res && res.success && res.html) {
-          extractedHtml = res.html
-        }
-      } catch (e) {
-        console.warn('Failed to extract live dom for prompt generation:', e)
       }
-
-      const activeUrl = activeModel?.url || ''
-      let host = ''
-      try {
-        if (activeUrl) host = new URL(activeUrl).host
-      } catch {}
-
       const generated = generateFeatureHooksPrompt({
-        providerName: activeModel?.label || modelLabel(selectedKey),
-        providerUrl: activeUrl,
-        providerHost: host,
+        providerName: activeModel?.label || modelLabel(captureKey),
+        providerUrl: `${res.evidence.origin}${res.evidence.path}`,
+        providerHost: new URL(res.evidence.origin).host,
         currentFeatures: mergedFeatures,
-        liveDomHtml: extractedHtml || undefined
+        hookEvidence: res.evidence
       })
 
       setPromptText(generated)
       setShowPromptModal(true)
 
-      // Auto-copy to clipboard
-      try {
-        await navigator.clipboard.writeText(generated)
-        setCopiedPrompt(true)
-        setTimeout(() => setCopiedPrompt(false), 2500)
-        if (setToast) {
-          setToast(`📋 Copied AI selector extraction prompt for ${modelLabel(selectedKey)} to clipboard!`)
-          setTimeout(() => setToast(null), 3500)
-        }
-      } catch {
-        // Clipboard write failed or blocked, modal is still open
-      }
+      // Review first: labels and structural attributes may still contain private information.
+      setCopiedPrompt(false)
+      if (setToast)
+        setToast(
+          'Live evidence captured. Review the prompt before copying; absent controls remain unverified.'
+        )
     } catch (err) {
       console.error('Error generating AI prompt:', err)
       if (setToast) {
-        setToast('Failed to generate AI prompt')
+        setToast(err instanceof Error ? err.message : 'Failed to generate AI prompt')
         setTimeout(() => setToast(null), 3000)
       }
     } finally {
@@ -960,7 +950,7 @@ export const ProviderFeaturesSection: React.FC<Props> = ({
                     AI Reverse-Engineering Prompt: {modelLabel(selectedKey)}
                   </h2>
                   <p className="text-[11px] text-(--text2)">
-                    Copy this prompt into ChatGPT, Claude, or Gemini to extract bulletproof DOM selectors.
+                    Review captured labels and attributes for private data before copying this prompt to an external AI.
                   </p>
                 </div>
               </div>
@@ -977,7 +967,7 @@ export const ProviderFeaturesSection: React.FC<Props> = ({
             <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-3 min-h-0 custom-scrollbar">
               <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-200 text-xs flex items-center justify-between">
                 <span>
-                  💡 This prompt includes your live extracted DOM from {modelLabel(selectedKey)} and requests an exact JSON response for all 8 automation hooks.
+                  💡 Read-only live evidence is sampled from the active tab. Missing controls require another state capture; no snapshot can guarantee all 8 hooks.
                 </span>
                 {copiedPrompt && (
                   <span className="flex items-center gap-1 font-semibold text-emerald-400 bg-emerald-500/15 px-2 py-0.5 rounded text-[11px]">

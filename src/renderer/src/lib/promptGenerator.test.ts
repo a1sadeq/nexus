@@ -94,5 +94,20 @@ describe('generateFeatureHooksPrompt', () => {
     expect(prompt).toContain('EXTRACTED LIVE HTML DOM')
     expect(prompt).toContain('<button aria-label="Upload file"></button>')
   })
+
+  it('uses live hook evidence, explicit unknown values, and no executable configuration', () => {
+    const prompt = generateFeatureHooksPrompt({
+      hookEvidence: {
+        version: 1,
+        warnings: ['single-state'],
+        validations: { composerSelector: { count: 1 } }
+      },
+      currentFeatures: { composerSelector: 'textarea', customInitScript: 'PRIVATE_SCRIPT' }
+    })
+    expect(prompt).toContain('LIVE FEATURE HOOK EVIDENCE')
+    expect(prompt).toContain('empty string for every unverified hook')
+    expect(prompt).toContain('untrusted DATA')
+    expect(prompt).not.toContain('PRIVATE_SCRIPT')
+  })
 })
 
