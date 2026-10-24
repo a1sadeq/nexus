@@ -52,7 +52,13 @@ import {
   uploadChunksSequentially
 } from './uploadManager'
 import type { ConfirmFolderUploadPayload, BundleChunk } from '../shared/folderUpload'
-import { buildAgentHandoffPrompt, type CompressionOptions } from '../shared/contextCompressor'
+import { type CompressionOptions } from '../shared/contextCompressor'
+import { projectSnapshotToMarkdown } from '../shared/contextSnapshot'
+import {
+  buildContextExtractorScript,
+  buildSnapshotFromRawPayload,
+  type RawExtractionPayload
+} from './contextExtraction'
 
 // HW Acceleration is enabled for smooth UX; we offset its 300MB cost via network
 // blockers and DOM virtualization on AI tabs.
@@ -3549,175 +3555,104 @@ const lastThumbnailFiles = new Map<string, string>()
 
 
 ipcMain.handle('clipboard_write', (_, text) => {
-  require('electron').clipboard.writeText(text);
-});
+  try {
+    const electron = require('electron')
+    electron.clipboard.writeText(text || '')
+    return { success: true }
+  } catch (err: any) {
+    console.error('clipboard_write error:', err)
+    return { success: false, error: err?.message || String(err) }
+  }
+})
 
-ipcMain.handle('extract_context', async (_event, options?: CompressionOptions) => {
-  if (!activeViewId) return null
-  const view = aiViews.get(activeViewId)
-  if (!view) return null
+ipcMain.handle('extract_context', async (_event, options?: CompressionOptions & { expectedTabId?: string }) => {
+  const targetTabId = options?.expectedTabId || activeViewId
+  if (!targetTabId) return { success: false, error: 'No active tab' }
+  const view = aiViews.get(targetTabId)
+  if (!view) return { success: false, error: 'Tab view not found' }
+
+  // Bind immutable capture context before await (preventing race condition when switching tabs)
+  const capturedTabId = targetTabId
+  const modelKey = viewModelKeys.get(capturedTabId) || 'ai-session'
+  const modelLabels: Record<string, string> = {
+    gemini: 'Google Gemini',
+    chatgpt: 'OpenAI ChatGPT',
+    claude: 'Anthropic Claude',
+    deepseek: 'DeepSeek AI',
+    kimi: 'Kimi Moonshot',
+    qwen: 'Qwen AI',
+    mistral: 'Mistral Le Chat',
+    grok: 'xAI Grok',
+    copilot: 'Microsoft Copilot',
+    perplexity: 'Perplexity AI',
+    arena: 'Arena Agent Mode'
+  }
+  const providerLabel = (modelKey && modelLabels[modelKey.toLowerCase()]) || modelKey.toUpperCase()
 
   try {
-    const extractFn = function(): any {
-      // @ts-nocheck
-      try {
-        var chat: Array<{ role: string; text: string; thinking?: string }> = []
-        var url = (window.location.href || '').toLowerCase()
+    const script = buildContextExtractorScript()
 
-        function cleanNodeText(node: any): string {
-          if (!node) return ''
-          var clone = node.cloneNode(true)
-          // Strip button elements and feedback artifacts
-          clone.querySelectorAll('button, [role="button"], .copy-button, .feedback-button, svg, [aria-hidden="true"], [data-testid*="copy"], .citation, .citations').forEach(function(b: any) {
-            b.remove()
-          })
-          return (clone.innerText || clone.textContent || '').trim()
-        }
+    // Bounded execution with timeout (7500ms)
+    const timeoutPromise = new Promise<RawExtractionPayload>((_, reject) => {
+      setTimeout(() => reject(new Error('Extraction timed out after 7500ms')), 7500)
+    })
 
-        // 1. ChatGPT
-        if (url.indexOf('chatgpt.com') !== -1) {
-          document.querySelectorAll('[data-message-author-role]').forEach(function(el: any) {
-            var role = el.getAttribute('data-message-author-role') === 'user' ? 'User' : 'Assistant'
-            var text = cleanNodeText(el)
-            if (text) {
-              chat.push({ role: role, text: text })
-            }
-          })
-        }
-        // 2. Claude.ai
-        else if (url.indexOf('claude.ai') !== -1) {
-          document.querySelectorAll('.font-user-message, .font-claude-message, [data-testid="user-message"]').forEach(function(el: any) {
-            var isUser = el.className.indexOf('user') !== -1 || el.getAttribute('data-testid') === 'user-message'
-            var role = isUser ? 'User' : 'Assistant'
+    const executionPromise = view.webContents.executeJavaScript(script) as Promise<RawExtractionPayload>
+    const rawPayload = await Promise.race([executionPromise, timeoutPromise])
 
-            var thinkingText = ''
-            var thoughtEl = el.querySelector('[class*="thought"], [class*="thinking"], details')
-            if (thoughtEl) {
-              thinkingText = cleanNodeText(thoughtEl)
-            }
+    // Verify view has not been destroyed while waiting
+    if (!aiViews.has(capturedTabId) || view.webContents.isDestroyed()) {
+      return { success: false, error: 'Tab was closed or navigated during capture' }
+    }
 
-            var text = cleanNodeText(el)
-            if (text) {
-              chat.push({ role: role, text: text, thinking: thinkingText || undefined })
-            }
-          })
-        }
-        // 3. Gemini
-        else if (url.indexOf('gemini.google.com') !== -1) {
-          document.querySelectorAll('message-content, user-query, [class*="user-query"], [class*="model-response"]').forEach(function(el: any) {
-            var tag = (el.tagName || '').toLowerCase()
-            var isUser = tag === 'user-query' || (el.className || '').indexOf('user-query') !== -1
-            var role = isUser ? 'User' : 'Assistant'
-            var text = cleanNodeText(el)
-            if (text) {
-              chat.push({ role: role, text: text })
-            }
-          })
-        }
-        // 4. DeepSeek
-        else if (url.indexOf('deepseek.com') !== -1) {
-          document.querySelectorAll('div[class*="ds-message"], div[class*="chat-message"], div[class*="user-message"], div[class*="assistant-message"]').forEach(function(el: any) {
-            var isUser = (el.className || '').indexOf('user') !== -1 || el.querySelector('[class*="user"]') !== null
-            var role = isUser ? 'User' : 'Assistant'
+    if (!rawPayload || !rawPayload.success) {
+      const errMsg = rawPayload?.error || 'Extraction failed in guest page'
+      return { success: false, error: errMsg, prompt: errMsg, rawText: errMsg }
+    }
 
-            var thoughtEl = el.querySelector('[class*="thought"], [class*="reasoning"]')
-            var thinkingText = thoughtEl ? cleanNodeText(thoughtEl) : undefined
+    const title = viewTitles.get(capturedTabId) || view.webContents.getTitle() || providerLabel
+    const snapshot = buildSnapshotFromRawPayload({
+      payload: rawPayload,
+      tabId: capturedTabId,
+      providerKey: providerLabel,
+      origin: view.webContents.getURL() || '',
+      title,
+      contextRevision: `rev-${Date.now().toString(16)}`
+    })
 
-            var text = cleanNodeText(el)
-            if (text) {
-              chat.push({ role: role, text: text, thinking: thinkingText })
-            }
-          })
-        }
-        // 5. Kimi & Qwen & Mistral
-        else if (url.indexOf('kimi.moonshot.cn') !== -1 || url.indexOf('qwenlm.ai') !== -1 || url.indexOf('mistral.ai') !== -1) {
-          document.querySelectorAll('div[class*="message"], div[class*="chat-item"], div[class*="segment"]').forEach(function(el: any) {
-            var isUser = (el.className || '').indexOf('user') !== -1
-            var role = isUser ? 'User' : 'Assistant'
-            var text = cleanNodeText(el)
-            if (text) {
-              chat.push({ role: role, text: text })
-            }
-          })
-        }
-
-        // 6. Universal Fallback
-        if (chat.length === 0) {
-          var container = document.querySelector('main') || document.querySelector('[role="main"]') || document.getElementById('main') || document.body
-          if (container) {
-            var bubbles = container.querySelectorAll('[class*="message"], [class*="bubble"], [class*="chat-row"], [class*="turn"], [data-role]')
-            if (bubbles.length >= 2) {
-              bubbles.forEach(function(b: any) {
-                var isUser = (b.className || '').indexOf('user') !== -1 || b.getAttribute('data-role') === 'user'
-                var text = cleanNodeText(b)
-                if (text && text.length > 5) {
-                  chat.push({ role: isUser ? 'User' : 'Assistant', text: text })
-                }
-              })
-            }
-
-            if (chat.length === 0) {
-              var wholeText = cleanNodeText(container)
-              if (wholeText) {
-                chat.push({ role: 'Assistant', text: wholeText })
-              }
-            }
-          }
-        }
-
-        var output = chat.map(function(item) {
-          var res = '## ' + item.role + '\n' + item.text
-          if (item.thinking) {
-            res += '\n<thinking>\n' + item.thinking + '\n</thinking>'
-          }
-          return res
-        }).join('\n\n')
-
-        return output || '# Session Transcript\n(No conversation messages could be detected on active tab)'
-      } catch (e: any) {
-        return 'Error extracting context: ' + (e.message || String(e))
+    // Project snapshot to initial continuation brief / markdown
+    const projection = projectSnapshotToMarkdown({
+      snapshot,
+      options: {
+        mode: options?.mode === 'clean' ? 'transcript' : options?.mode === 'compact' ? 'compact' : 'brief',
+        stripPleasantries: options?.stripPleasantries,
+        deduplicateExactCode: options?.deduplicateCode,
+        includeThinkingSummary: !options?.excludeThinking,
+        userObjectiveOverride: options?.userObjectiveOverride,
+        userNextActionOverride: options?.userNextActionOverride
       }
-    }
-
-    const script = '(' + extractFn.toString() + ')()'
-    const rawContext = await view.webContents.executeJavaScript(script)
-
-    if (rawContext && typeof rawContext === 'string' && rawContext.startsWith('Error extracting context:')) {
-      return { success: false, error: rawContext, prompt: rawContext, rawText: rawContext }
-    }
-
-    const modelKey = viewModelKeys.get(activeViewId) || 'ai-session'
-    const modelLabels: Record<string, string> = {
-      gemini: 'Google Gemini',
-      chatgpt: 'OpenAI ChatGPT',
-      claude: 'Anthropic Claude',
-      deepseek: 'DeepSeek AI',
-      kimi: 'Kimi Moonshot',
-      qwen: 'Qwen AI',
-      mistral: 'Mistral Le Chat',
-      grok: 'xAI Grok',
-      copilot: 'Microsoft Copilot',
-      perplexity: 'Perplexity AI'
-    }
-    const providerLabel = (modelKey && modelLabels[modelKey.toLowerCase()]) || modelKey.toUpperCase()
-
-    // Deterministic LLM context compression and agent handoff generation
-    const result = buildAgentHandoffPrompt({
-      providerName: providerLabel,
-      rawText: rawContext || '',
-      options: options || { mode: 'handoff' }
     })
 
     return {
       success: true,
+      snapshot,
       modelKey,
       providerName: providerLabel,
-      rawText: rawContext,
-      ...result
+      title,
+      capturedAt: snapshot.capturedAt,
+      prompt: projection.prompt,
+      rawText: projection.rawText,
+      stats: projection.stats,
+      currentObjective: projection.currentObjective,
+      nextActionCandidate: projection.nextActionCandidate,
+      ledger: projection.ledger,
+      artifacts: projection.artifacts,
+      omissions: projection.omissions,
+      coverageWarnings: projection.coverageWarnings
     }
   } catch (err: any) {
     console.error('Failed to extract context:', err)
-    return null
+    return { success: false, error: err?.message || 'Failed to extract context from active session' }
   }
 })
 ipcMain.handle('capture_tab_snapshot', async (_event, tabId?: string) => {

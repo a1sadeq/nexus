@@ -4,12 +4,26 @@
  * Deterministic client-side LLM context compression, sanitization,
  * and structured agent handoff prompt generation.
  *
- * Solves the critical edge-case where an AI conversation has passed its
- * message/context limit (so the user cannot ask that AI to summarize itself).
+ * Repaired for high fidelity:
+ * - Fence-aware parsing that prevents code headings from creating false turns
+ * - Safe UI noise removal that preserves array indexes and timestamps
+ * - Exact-match code deduplication that preserves whitespace and formatting
+ * - Full-content artifact matching that prevents distinct files with shared headers from collapsing
+ * - Honest metrics and truthful status labels
  */
 
+import {
+  computeContentHash,
+  getSafeMarkdownFence,
+  estimateTokens,
+  stripUiNoiseSafe,
+  stripConversationalFluffSafe
+} from './contextSnapshot'
+
+export { estimateTokens }
+
 export interface DialogueTurn {
-  role: 'user' | 'assistant' | 'system'
+  role: 'user' | 'assistant' | 'system' | 'tool' | 'unknown'
   text: string
   codeBlocks?: Array<{ lang: string; code: string }>
   thinkingBlock?: string
@@ -21,11 +35,15 @@ export interface CompressionOptions {
   deduplicateCode?: boolean
   excludeThinking?: boolean
   targetNextModel?: string
+  userObjectiveOverride?: string
+  userNextActionOverride?: string
 }
 
 export interface CompressionStats {
   rawChars: number
   compressedChars: number
+  signedDeltaChars: number
+  isExpanded: boolean
   rawTokensEstimate: number
   compressedTokensEstimate: number
   reductionPercent: number
@@ -44,88 +62,37 @@ export interface HandoffContextResult {
   latestCodeSnippets: Array<{ lang: string; code: string; preview: string }>
   detectedFiles: string[]
   nextImmediateAction: string
+  omissions?: string[]
 }
 
 /**
- * Estimate token count using the standard ~4 chars per token rule of thumb
- * for English prose and code.
- */
-export function estimateTokens(text: string): number {
-  if (!text) return 0
-  return Math.max(1, Math.ceil(text.length / 4))
-}
-
-/**
- * Strips UI artifacts, buttons, timestamps, copy prompts, and citations
- * that bleed into scraped chat DOM.
+ * Strips standalone UI button lines from scraped chat DOM without
+ * deleting bracketed citations/indexes (e.g. list[1]) or timestamps.
  */
 export function stripUiNoise(rawText: string): string {
-  if (!rawText) return ''
-
-  return rawText
-    // Strip copy button text that gets concatenated
-    .replace(/(?:^|\n)\s*(?:Copy code|Copy|Copied!?|Copy text|Code copied!?)\s*(?:\n|$)/gi, '\n')
-    // Strip feedback / action button artifacts
-    .replace(/(?:^|\n)\s*(?:Was this response better\?|Was this helpful\?|Thumbs up|Thumbs down|Good response|Bad response|Share|Retry|Regenerate response|Regenerate|Edit message|View other drafts|Show thinking|Hide thinking|Thought for \d+ seconds?)\s*(?:\n|$)/gi, '\n')
-    // Strip numeric citations like [1], [2], [citation:1]
-    .replace(/\[(?:citation:)?\d+\]/gi, '')
-    // Strip timestamps like "10:42 AM", "Yesterday at 3:15 PM"
-    .replace(/\b\d{1,2}:\d{2}\s*(?:AM|PM)\b/gi, '')
-    .replace(/\b(?:Today|Yesterday)\s+at\s+\d{1,2}:\d{2}(?:\s*(?:AM|PM))?\b/gi, '')
-    // Strip pagination controls like "1 / 4", "2 of 3"
-    .replace(/(?:^|\n)\s*\d+\s*(?:\/|of)\s*\d+\s*(?:\n|$)/g, '\n')
-    // Strip empty blockquotes or trailing line clutter
-    .replace(/^\s*>\s*$/gm, '')
-    // Normalize newlines (max 2 consecutive)
-    .replace(/\n{3,}/g, '\n\n')
-    .trim()
+  return stripUiNoiseSafe(rawText)
 }
 
 /**
  * Strips conversational opening pleasantries and closing boilerplate from AI responses.
  */
 export function stripConversationalFluff(text: string): string {
-  if (!text) return ''
-
-  let cleaned = text
-
-  // Opening pleasantries regexes (multiline aware)
-  const openingPatterns = [
-    /^(?:Certainly|Sure thing|Sure|Of course|Absolutely|Gladly|I'd be (?:happy|glad) to help(?: you with that)?)[!.,]?\s*(?:Here(?:'s| is) (?:the|an|your) (?:code|updated code|solution|implementation|response|explanation)[^.\n]*[.:!\n]+)?\s*/i,
-    /^(?:Hello!|Hi there!|Hi!|Hey!)\s*(?:Here(?:'s| is) (?:the|an|your)[^.\n]*[.:!\n]+)?\s*/i,
-    /^(?:Below is (?:the|an|your) (?:code|updated|revised|complete|modified|working) (?:code|solution|implementation|version)[^.\n]*[.:!\n]+)\s*/i,
-    /^(?:Based on your request|As requested|To solve this issue|In order to fix this)[,:]\s*/i
-  ]
-
-  for (const pat of openingPatterns) {
-    cleaned = cleaned.replace(pat, '')
-  }
-
-  // Closing boilerplate regexes
-  const closingPatterns = [
-    /(?:\n\s*)?(?:I hope this helps!|Let me know if you (?:have any (?:other )?questions|need (?:further|more) (?:help|adjustments|changes)|run into any issues)|Feel free to ask(?: if you need anything else)?|Happy coding!|Cheers!)[^.\n]*[.!]?\s*$/i,
-    /(?:\n\s*)?(?:This should (?:resolve|fix) the issue\. Let me know how it goes!)[^.\n]*[.!]?\s*$/i
-  ]
-
-  for (const pat of closingPatterns) {
-    cleaned = cleaned.replace(pat, '')
-  }
-
-  return cleaned.trim()
+  return stripConversationalFluffSafe(text)
 }
 
 /**
- * Extracts code blocks from markdown text.
+ * Extracts code blocks from markdown text while respecting fences.
  */
 export function extractCodeBlocks(text: string): Array<{ lang: string; code: string }> {
   const blocks: Array<{ lang: string; code: string }> = []
-  const regex = /```([a-zA-Z0-9_\-\.]*)\n([\s\S]*?)```/g
+  // Matches ```lang\n...``` or ````lang\n...````
+  const regex = /(`{3,})([a-zA-Z0-9_\-.]*)\n([\s\S]*?)\1/g
   let match: RegExpExecArray | null
 
   while ((match = regex.exec(text)) !== null) {
     blocks.push({
-      lang: match[1]?.trim() || 'text',
-      code: match[2]?.trim() || ''
+      lang: match[2]?.trim() || 'text',
+      code: match[3] || ''
     })
   }
 
@@ -134,98 +101,152 @@ export function extractCodeBlocks(text: string): Array<{ lang: string; code: str
 
 /**
  * Parses raw extracted transcript string into structured DialogueTurn objects.
+ * Markdown fence-aware: headings inside code blocks do not create false turns.
  */
 export function parseRawTranscript(rawText: string): DialogueTurn[] {
   if (!rawText || !rawText.trim()) return []
 
+  const lines = rawText.split('\n')
   const turns: DialogueTurn[] = []
 
-  // Check if text uses '## User' / '## Assistant' or similar headings
-  const sectionRegex = /(?:^|\n)##\s*(User|Assistant|Model|System|Human|Claude|ChatGPT|Gemini|DeepSeek)[^\n]*\n([\s\S]*?)(?=(?:\n##\s*(?:User|Assistant|Model|System|Human|Claude|ChatGPT|Gemini|DeepSeek)[^\n]*\n)|$)/gi
+  let currentRole: DialogueTurn['role'] | null = null
+  let currentLines: string[] = []
+  let inCodeBlock = false
+  let codeFenceLength = 0
 
-  let match: RegExpExecArray | null
-  let matchedAny = false
+  const headingRegex = /^##\s*(User|Assistant|Model|System|Tool|Human|Claude|ChatGPT|Gemini|DeepSeek)\b/i
 
-  while ((match = sectionRegex.exec(rawText)) !== null) {
-    matchedAny = true
-    const roleHeader = match[1].toLowerCase()
-    const content = match[2].trim()
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    const fenceMatch = line.match(/^(`{3,})/)
 
-    let role: DialogueTurn['role'] = 'assistant'
-    if (roleHeader === 'user' || roleHeader === 'human') {
-      role = 'user'
-    } else if (roleHeader === 'system') {
-      role = 'system'
-    }
-
-    // Check for thinking blocks inside assistant content
-    let thinkingBlock: string | undefined = undefined
-    let bodyText = content
-
-    const thinkMatch = content.match(/<(?:think|thinking)>([\s\S]*?)<\/(?:think|thinking)>/i)
-    if (thinkMatch) {
-      thinkingBlock = thinkMatch[1].trim()
-      bodyText = content.replace(/<(?:think|thinking)>[\s\S]*?<\/(?:think|thinking)>/gi, '').trim()
-    }
-
-    const codeBlocks = extractCodeBlocks(bodyText)
-
-    turns.push({
-      role,
-      text: bodyText,
-      codeBlocks: codeBlocks.length > 0 ? codeBlocks : undefined,
-      thinkingBlock
-    })
-  }
-
-  // Fallback if no ## headings were found
-  if (!matchedAny) {
-    const lines = rawText.split('\n')
-    let currentRole: DialogueTurn['role'] = 'user'
-    let currentBuffer: string[] = []
-
-    for (const line of lines) {
-      const lower = line.trim().toLowerCase()
-      if (lower.startsWith('user:') || lower.startsWith('human:')) {
-        if (currentBuffer.length > 0) {
-          turns.push({ role: currentRole, text: currentBuffer.join('\n').trim() })
-          currentBuffer = []
-        }
-        currentRole = 'user'
-        currentBuffer.push(line.replace(/^(?:user|human):\s*/i, ''))
-      } else if (lower.startsWith('assistant:') || lower.startsWith('claude:') || lower.startsWith('chatgpt:') || lower.startsWith('gemini:')) {
-        if (currentBuffer.length > 0) {
-          turns.push({ role: currentRole, text: currentBuffer.join('\n').trim() })
-          currentBuffer = []
-        }
-        currentRole = 'assistant'
-        currentBuffer.push(line.replace(/^(?:assistant|claude|chatgpt|gemini):\s*/i, ''))
-      } else {
-        currentBuffer.push(line)
+    if (fenceMatch) {
+      const len = fenceMatch[1].length
+      if (!inCodeBlock) {
+        inCodeBlock = true
+        codeFenceLength = len
+      } else if (len >= codeFenceLength) {
+        inCodeBlock = false
+        codeFenceLength = 0
       }
     }
 
-    if (currentBuffer.length > 0) {
-      turns.push({ role: currentRole, text: currentBuffer.join('\n').trim() })
+    // Only recognize headings when NOT inside a code block
+    if (!inCodeBlock) {
+      const match = line.match(headingRegex)
+      if (match) {
+        if (currentRole && currentLines.length > 0) {
+          finalizeTurn(turns, currentRole, currentLines.join('\n'))
+          currentLines = []
+        }
+
+        const roleStr = match[1].toLowerCase()
+        if (roleStr === 'user' || roleStr === 'human') {
+          currentRole = 'user'
+        } else if (roleStr === 'system') {
+          currentRole = 'system'
+        } else if (roleStr === 'tool') {
+          currentRole = 'tool'
+        } else {
+          currentRole = 'assistant'
+        }
+        continue
+      }
     }
+
+    if (currentRole) {
+      currentLines.push(line)
+    } else {
+      // Preamble before any role header
+      currentLines.push(line)
+    }
+  }
+
+  if (currentRole && currentLines.length > 0) {
+    finalizeTurn(turns, currentRole, currentLines.join('\n'))
+  } else if (!currentRole && currentLines.length > 0) {
+    // Fallback: parse user: / assistant: prefix if no ## headings were found
+    parsePrefixedLines(currentLines, turns)
   }
 
   return turns
 }
 
+function finalizeTurn(turns: DialogueTurn[], role: DialogueTurn['role'], fullText: string) {
+  let bodyText = fullText.trim()
+  let thinkingBlock: string | undefined = undefined
+
+  // Only extract <think> if not in a code block
+  const thinkMatch = bodyText.match(/<(?:think|thinking)>([\s\S]*?)<\/(?:think|thinking)>/i)
+  if (thinkMatch) {
+    // Check if the think match is inside a code block
+    const preText = bodyText.slice(0, thinkMatch.index)
+    const backticksBefore = (preText.match(/```/g) || []).length
+    if (backticksBefore % 2 === 0) {
+      thinkingBlock = thinkMatch[1].trim()
+      bodyText = bodyText.replace(/<(?:think|thinking)>[\s\S]*?<\/(?:think|thinking)>/gi, '').trim()
+    }
+  }
+
+  const codeBlocks = extractCodeBlocks(bodyText)
+
+  turns.push({
+    role,
+    text: bodyText,
+    codeBlocks: codeBlocks.length > 0 ? codeBlocks : undefined,
+    thinkingBlock
+  })
+}
+
+function parsePrefixedLines(lines: string[], turns: DialogueTurn[]) {
+  let currentRole: DialogueTurn['role'] = 'user'
+  let currentBuffer: string[] = []
+
+  for (const line of lines) {
+    const lower = line.trim().toLowerCase()
+    if (lower.startsWith('user:') || lower.startsWith('human:')) {
+      if (currentBuffer.length > 0) {
+        turns.push({ role: currentRole, text: currentBuffer.join('\n').trim() })
+        currentBuffer = []
+      }
+      currentRole = 'user'
+      currentBuffer.push(line.replace(/^(?:user|human):\s*/i, ''))
+    } else if (lower.startsWith('assistant:') || lower.startsWith('claude:') || lower.startsWith('chatgpt:') || lower.startsWith('gemini:')) {
+      if (currentBuffer.length > 0) {
+        turns.push({ role: currentRole, text: currentBuffer.join('\n').trim() })
+        currentBuffer = []
+      }
+      currentRole = 'assistant'
+      currentBuffer.push(line.replace(/^(?:assistant|claude|chatgpt|gemini):\s*/i, ''))
+    } else if (lower.startsWith('system:')) {
+      if (currentBuffer.length > 0) {
+        turns.push({ role: currentRole, text: currentBuffer.join('\n').trim() })
+        currentBuffer = []
+      }
+      currentRole = 'system'
+      currentBuffer.push(line.replace(/^system:\s*/i, ''))
+    } else {
+      currentBuffer.push(line)
+    }
+  }
+
+  if (currentBuffer.length > 0) {
+    turns.push({ role: currentRole, text: currentBuffer.join('\n').trim() })
+  }
+}
+
 /**
- * Deduplicates identical code blocks across turns, replacing earlier copies
- * with a compact pointer note to the definitive turn.
+ * Deduplicates exact identical code blocks across turns without normalizing whitespace.
  */
 export function deduplicateCodeAcrossTurns(turns: DialogueTurn[]): DialogueTurn[] {
-  // Find code blocks and their last occurrence turn index
   const lastSeenIndex = new Map<string, number>()
 
+  // Locate exact matches
   turns.forEach((turn, turnIdx) => {
     if (turn.codeBlocks && turn.codeBlocks.length > 0) {
       for (const block of turn.codeBlocks) {
-        if (block.code.length > 80) { // only deduplicate substantial blocks
-          const key = block.code.replace(/\s+/g, ' ').trim()
+        if (block.code.length > 80) {
+          const key = block.code // Exact content equality!
           lastSeenIndex.set(key, turnIdx)
         }
       }
@@ -237,14 +258,20 @@ export function deduplicateCodeAcrossTurns(turns: DialogueTurn[]): DialogueTurn[
 
     let newText = turn.text
     for (const block of turn.codeBlocks) {
-      const key = block.code.replace(/\s+/g, ' ').trim()
+      const key = block.code
       const finalTurn = lastSeenIndex.get(key)
-      // If this block appears again in a later turn, abbreviate earlier instance
       if (finalTurn !== undefined && finalTurn > turnIdx) {
-        const fullMarkdownBlock = `\`\`\`${block.lang}\n${block.code}\n\`\`\``
-        const replacement = `\`\`\`${block.lang}\n/* [Identical code block omitted — see final working version in Turn #${finalTurn + 1}] */\n\`\`\``
+        const fence = getSafeMarkdownFence(block.code)
+        const fullMarkdownBlock = `${fence}${block.lang}\n${block.code}\n${fence}`
+        const replacement = `${fence}${block.lang}\n/* [Identical code block omitted — see Turn #${finalTurn + 1}] */\n${fence}`
+
         if (newText.includes(fullMarkdownBlock)) {
           newText = newText.replace(fullMarkdownBlock, replacement)
+        } else if (newText.includes(`\`\`\`${block.lang}\n${block.code}\n\`\`\``)) {
+          newText = newText.replace(
+            `\`\`\`${block.lang}\n${block.code}\n\`\`\``,
+            replacement
+          )
         }
       }
     }
@@ -278,7 +305,6 @@ export function extractKeyDecisions(turns: DialogueTurn[]): string[] {
     }
   }
 
-  // If no explicit triggers matched, synthesize sensible summary from user prompts
   if (decisions.length === 0) {
     for (const turn of turns) {
       if (turn.role === 'user' && turn.text.length < 150) {
@@ -290,56 +316,55 @@ export function extractKeyDecisions(turns: DialogueTurn[]): string[] {
     }
   }
 
-  return decisions.slice(0, 6)
+  return decisions.slice(0, 8)
 }
 
 /**
- * Finds referenced file paths across turns (e.g. src/App.tsx, package.json).
+ * Finds referenced file paths across turns.
  */
 export function detectReferencedFiles(turns: DialogueTurn[]): string[] {
   const fileSet = new Set<string>()
-  const fileRegex = /(?:^|[\s"'`(/])([a-zA-Z0-9_\-./]+\.(?:ts|tsx|js|jsx|json|html|css|scss|md|py|go|rs|cpp|c|h|yaml|yml|toml|sql|sh|env))(?:[\s"'`):,]|$)/g
+  const fileRegex = /(?:^|[\s"'`(/])([a-zA-Z0-9_\-./]+?\.(?:ts|tsx|js|jsx|json|html|css|scss|md|txt|py|go|rs|cpp|c|h|yaml|yml|toml|sql|sh|env))\b/g
 
   for (const turn of turns) {
     let match: RegExpExecArray | null
     while ((match = fileRegex.exec(turn.text)) !== null) {
       const candidate = match[1].trim()
-      // Filter out common false positives
       if (!candidate.startsWith('http') && !candidate.startsWith('www.') && !candidate.includes('example.com') && candidate.length > 3) {
         fileSet.add(candidate)
       }
     }
   }
 
-  return Array.from(fileSet).slice(0, 10)
+  return Array.from(fileSet).slice(0, 16)
 }
 
 /**
- * Extracts latest code artifacts produced by the assistant.
+ * Extracts latest code artifacts produced by the assistant using full content hashing.
+ * Prevents collapsing distinct files that share common license/import headers.
  */
 export function extractLatestCodeArtifacts(turns: DialogueTurn[]): Array<{ lang: string; code: string; preview: string }> {
   const artifacts: Array<{ lang: string; code: string; preview: string }> = []
-  const seenCode = new Set<string>()
+  const seenHashes = new Set<string>()
 
-  // Traverse backwards to pick up the most recent snippets
   for (let i = turns.length - 1; i >= 0; i--) {
     const turn = turns[i]
     if (turn.role === 'assistant' && turn.codeBlocks) {
       for (const block of turn.codeBlocks) {
-        const signature = block.code.slice(0, 60)
-        if (!seenCode.has(signature) && block.code.length > 40) {
-          seenCode.add(signature)
+        const hash = computeContentHash(block.code)
+        if (!seenHashes.has(hash) && block.code.length > 30) {
+          seenHashes.add(hash)
           const firstLine = block.code.split('\n')[0].slice(0, 60)
           artifacts.push({
             lang: block.lang || 'code',
             code: block.code,
             preview: firstLine || `${block.lang} snippet`
           })
-          if (artifacts.length >= 4) break
+          if (artifacts.length >= 6) break
         }
       }
     }
-    if (artifacts.length >= 4) break
+    if (artifacts.length >= 6) break
   }
 
   return artifacts
@@ -351,26 +376,32 @@ export function extractLatestCodeArtifacts(turns: DialogueTurn[]): Array<{ lang:
 export function extractNextImmediateAction(turns: DialogueTurn[]): string {
   if (turns.length === 0) return 'Continue working on the ongoing task.'
 
-  // Check the last user query
   for (let i = turns.length - 1; i >= 0; i--) {
     if (turns[i].role === 'user') {
       const clean = turns[i].text.trim()
       if (clean) {
-        return clean.length > 250 ? clean.slice(0, 250) + '...' : clean
+        return clean.length > 300 ? clean.slice(0, 300) + '...' : clean
       }
     }
   }
 
-  // Fallback to the last assistant's trailing sentences
   const lastTurn = turns[turns.length - 1]
   const lines = lastTurn.text.split('\n').filter(Boolean)
   return lines[lines.length - 1] || 'Proceed with implementing the planned changes.'
 }
 
 /**
- * Derives a high-level goal from the first few user turns.
+ * Derives a high-level goal from user turns.
  */
 export function deriveGoal(turns: DialogueTurn[]): string {
+  for (let i = turns.length - 1; i >= 0; i--) {
+    if (turns[i].role === 'user') {
+      const lines = turns[i].text.split('\n').filter(Boolean)
+      if (lines.length > 0 && lines[0].length > 15) {
+        return lines[0].length > 250 ? lines[0].slice(0, 250) + '...' : lines[0]
+      }
+    }
+  }
   for (const turn of turns) {
     if (turn.role === 'user') {
       const firstLines = turn.text.split('\n').slice(0, 3).join(' ').trim()
@@ -400,16 +431,16 @@ export function buildAgentHandoffPrompt(params: {
   const rawChars = rawText.length
   const rawTokens = estimateTokens(rawText)
 
-  // 1. Parse into turns
+  // 1. Parse into turns without destroying code headings
   let turns = parseRawTranscript(stripUiNoise(rawText))
 
-  // 2. Clean each turn
+  // 2. Clean turns non-destructively
   turns = turns.map((t) => {
     let text = t.text
     if (stripPleasantries && t.role === 'assistant') {
       text = stripConversationalFluff(text)
     }
-    // Handle thinking process
+
     let thinkingBlock = t.thinkingBlock
     if (excludeThinking) {
       thinkingBlock = undefined
@@ -422,17 +453,17 @@ export function buildAgentHandoffPrompt(params: {
     }
   })
 
-  // 3. Deduplicate repetitive code blocks across turns
+  // 3. Exact code deduplication
   if (deduplicateCode) {
     turns = deduplicateCodeAcrossTurns(turns)
   }
 
-  // 4. Extract metadata & anchors
-  const goal = deriveGoal(turns)
+  // 4. Extract metadata
+  const goal = options.userObjectiveOverride || deriveGoal(turns)
   const keyDecisions = extractKeyDecisions(turns)
   const detectedFiles = detectReferencedFiles(turns)
   const latestCodeSnippets = extractLatestCodeArtifacts(turns)
-  const nextImmediateAction = extractNextImmediateAction(turns)
+  const nextImmediateAction = options.userNextActionOverride || extractNextImmediateAction(turns)
 
   const userTurnsCount = turns.filter((t) => t.role === 'user').length
   const assistantTurnsCount = turns.filter((t) => t.role === 'assistant').length
@@ -441,27 +472,32 @@ export function buildAgentHandoffPrompt(params: {
   // 5. Build transcript representation
   let dialogueBody = ''
   if (mode === 'compact') {
-    // Ultra-compact caveman style: high-signal bullets, no articles, exact code
+    // High-density pack: preserve exact code without stopword deletion
     dialogueBody = turns
       .map((t, i) => {
-        const prefix = t.role === 'user' ? `[Turn ${i + 1} - User]` : `[Turn ${i + 1} - Assistant]`
-        const compressedText = t.text
-          .replace(/\b(a|an|the|very|basically|actually|simply|essentially|please)\b\s*/gi, '')
-          .replace(/\n{2,}/g, '\n')
-        return `${prefix}:\n${compressedText}`
+        const roleLabel = t.role.toUpperCase()
+        let content = t.text
+        if (t.thinkingBlock && !excludeThinking) {
+          content = `> [!NOTE] Thinking Summary\n> ${t.thinkingBlock.replace(/\n/g, '\n> ')}\n\n${content}`
+        }
+        return `[Turn ${i + 1} - ${roleLabel}]:\n${content}`
       })
       .join('\n\n')
   } else {
     // Standard structured dialogue
     dialogueBody = turns
       .map((t, i) => {
-        const roleLabel = t.role === 'user' ? 'User' : 'Assistant'
-        return `### Turn ${i + 1} (${roleLabel})\n${t.text}`
+        const roleLabel = t.role.charAt(0).toUpperCase() + t.role.slice(1)
+        let content = t.text
+        if (t.thinkingBlock && !excludeThinking) {
+          content = `> [!NOTE] Thinking Summary\n> ${t.thinkingBlock.replace(/\n/g, '\n> ')}\n\n${content}`
+        }
+        return `### Turn ${i + 1} (${roleLabel})\n${content}`
       })
       .join('\n\n---\n\n')
   }
 
-  // 6. Build the final prompt markdown based on mode
+  // 6. Build final markdown
   let finalPrompt = ''
 
   if (mode === 'clean') {
@@ -470,11 +506,11 @@ export function buildAgentHandoffPrompt(params: {
     // Agent Handoff Mode
     finalPrompt = [
       `# 🚀 AI AGENT CONTINUATION & SESSION HANDOFF CONTEXT`,
-      `> **Handoff Protocol**: This context file was generated by Nexus because the previous session with **${providerName}** reached its conversation limit or was transferred. You are the incoming AI agent assigned to continue the task immediately with zero lost momentum.\n`,
+      `> **Handoff Notice**: Context captured from active session with **${providerName}**. Incoming agent is assigned to continue task execution with full awareness of conversation history.\n`,
       `## 🎯 1. Primary Objective & Goal`,
       `${goal}\n`,
       `## 🧠 2. Established Decisions & Technical Constraints`,
-      `The following architectural decisions have already been made and verified. **Do not modify or re-litigate these unless explicitly instructed by the user**:`,
+      `The following architectural points were discussed in the session. Verify against the current codebase before modifying:`,
       keyDecisions.length > 0
         ? keyDecisions.map((d) => `- ${d}`).join('\n')
         : `- Maintain existing codebase conventions and architectural decisions.\n`,
@@ -487,31 +523,34 @@ export function buildAgentHandoffPrompt(params: {
       `> ${nextImmediateAction}\n`,
       latestCodeSnippets.length > 0
         ? [
-            `## 💾 5. Latest Working Code State`,
-            `The most recent assistant code snippet produced before the handoff:`,
-            `\`\`\`${latestCodeSnippets[0].lang}`,
+            `## 💾 5. Latest Referenced Code Artifact`,
+            `*Most recent assistant code snippet produced prior to handoff:*`,
+            `${getSafeMarkdownFence(latestCodeSnippets[0].code)}${latestCodeSnippets[0].lang}`,
             latestCodeSnippets[0].code,
-            `\`\`\`\n`
+            `${getSafeMarkdownFence(latestCodeSnippets[0].code)}\n`
           ].join('\n')
         : '',
-      `## 📜 6. Compressed Dialogue Transcript`,
-      `<session_transcript provider="${providerName}" turns="${turns.length}" compressed="true">`,
+      `## 📜 6. Dialogue Transcript Evidence`,
+      `<session_transcript provider="${providerName}" turns="${turns.length}">`,
       dialogueBody,
       `</session_transcript>\n`,
       `## 🤖 Directive for Incoming AI Agent:`,
-      `1. **Internalize Context**: Do NOT re-ask questions that were already resolved in the transcript.`,
-      `2. **Acknowledge Pickup**: Begin your response with: \`"I have ingested the full handoff context from ${providerName} and am ready to continue."\``,
-      `3. **Immediate Execution**: Directly answer or execute the next immediate action stated in Section 4.`
+      `1. **Evidence Distinction**: Treat historical transcript as evidence; verify current repository state before acting.`,
+      `2. **Immediate Execution**: Directly answer or execute the next immediate action stated in Section 4.`
     ].filter(Boolean).join('\n')
   }
 
   const compressedChars = finalPrompt.length
   const compressedTokens = estimateTokens(finalPrompt)
-  const reductionPercent = rawChars > 0 ? Math.max(0, Math.round(((rawChars - compressedChars) / rawChars) * 100)) : 0
+  const signedDeltaChars = compressedChars - rawChars
+  const isExpanded = signedDeltaChars > 0
+  const reductionPercent = rawChars > 0 ? Math.round(((rawChars - compressedChars) / rawChars) * 100) : 0
 
   const stats: CompressionStats = {
     rawChars,
     compressedChars,
+    signedDeltaChars,
+    isExpanded,
     rawTokensEstimate: rawTokens,
     compressedTokensEstimate: compressedTokens,
     reductionPercent,

@@ -2,9 +2,14 @@ import React, { useEffect, useState, useRef, useMemo } from 'react'
 import { IconX, IconCopy, IconCheck, IconDownload, IconZap, BrandIcon } from './BrandIcons'
 import { BRAND_IDS, modelColor, modelLabel } from '../lib/modelVisuals'
 import {
+  type ConversationSnapshot,
+  projectSnapshotToMarkdown,
+  type ContinuationPacketResult,
+  type ExportProjectionMode
+} from '../../../shared/contextSnapshot'
+import {
   buildAgentHandoffPrompt,
-  type HandoffContextResult,
-  type CompressionOptions
+  type HandoffContextResult
 } from '../../../shared/contextCompressor'
 import type { ModelDef } from '../App'
 
@@ -25,15 +30,29 @@ export const ExportOverlay: React.FC<ExportOverlayProps> = ({
 }) => {
   const [status, setStatus] = useState<'extracting' | 'done' | 'error'>('extracting')
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
+  const [copyError, setCopyError] = useState<string | null>(null)
+  const [isActionPending, setIsActionPending] = useState(false)
+
+  // Immutable captured metadata
+  const [snapshot, setSnapshot] = useState<ConversationSnapshot | null>(null)
+  const [capturedProvider, setCapturedProvider] = useState<string>('')
+  const [capturedTitle, setCapturedTitle] = useState<string>('')
   const [rawTranscript, setRawTranscript] = useState<string>('')
+  const [coverageWarnings, setCoverageWarnings] = useState<string[]>([])
+
   const [copied, setCopied] = useState(false)
   const [downloaded, setDownloaded] = useState(false)
 
-  // Compression Controls
-  const [mode, setMode] = useState<CompressionOptions['mode']>('handoff')
+  // Projection Controls
+  const [mode, setMode] = useState<ExportProjectionMode>('brief')
   const [stripPleasantries, setStripPleasantries] = useState(true)
   const [deduplicateCode, setDeduplicateCode] = useState(true)
-  const [excludeThinking, setExcludeThinking] = useState(true)
+  const [includeThinking, setIncludeThinking] = useState(false)
+
+  // User-editable continuation fields
+  const [userObjective, setUserObjective] = useState<string>('')
+  const [userNextAction, setUserNextAction] = useState<string>('')
+  const [showEditorFields, setShowEditorFields] = useState<boolean>(false)
 
   const color = modelColor(activeModel)
   const rootRef = useRef<HTMLDivElement>(null)
@@ -48,7 +67,7 @@ export const ExportOverlay: React.FC<ExportOverlayProps> = ({
 
         // @ts-ignore
         const res = await window.electron.ipcRenderer.invoke('extract_context', {
-          mode: 'handoff',
+          mode: 'brief',
           stripPleasantries: true,
           deduplicateCode: true,
           excludeThinking: true
@@ -61,8 +80,17 @@ export const ExportOverlay: React.FC<ExportOverlayProps> = ({
           throw new Error(res.error)
         }
 
+        if (res.snapshot) {
+          setSnapshot(res.snapshot)
+          setCapturedProvider(res.providerName || modelLabel(activeModel))
+          setCapturedTitle(res.title || activeTabTitle || '')
+          setCoverageWarnings(res.coverageWarnings || res.snapshot.coverage?.warnings || [])
+          setUserObjective(res.currentObjective || '')
+          setUserNextAction(res.nextActionCandidate || '')
+        }
+
         const raw = typeof res === 'string' ? res : res.rawText || res.prompt || ''
-        if (!raw) throw new Error('Empty transcript extracted from active webview')
+        if (!raw && !res.snapshot) throw new Error('Empty transcript extracted from active webview')
 
         setRawTranscript(raw)
         setStatus('done')
@@ -98,69 +126,127 @@ export const ExportOverlay: React.FC<ExportOverlayProps> = ({
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [onClose])
 
-  // Instant re-computation when compression options or mode change
-  const handoffData: HandoffContextResult | null = useMemo(() => {
+  // Deterministic projection recalculation
+  const projectionData: ContinuationPacketResult | HandoffContextResult | null = useMemo(() => {
+    if (snapshot) {
+      return projectSnapshotToMarkdown({
+        snapshot,
+        options: {
+          mode,
+          stripPleasantries,
+          deduplicateExactCode: deduplicateCode,
+          includeThinkingSummary: includeThinking,
+          userObjectiveOverride: userObjective.trim() ? userObjective : undefined,
+          userNextActionOverride: userNextAction.trim() ? userNextAction : undefined
+        }
+      })
+    }
+
     if (!rawTranscript) return null
 
+    // Legacy fallback if snapshot is absent
     return buildAgentHandoffPrompt({
-      providerName: modelLabel(activeModel),
+      providerName: capturedProvider || modelLabel(activeModel),
       rawText: rawTranscript,
       options: {
-        mode,
+        mode: mode === 'transcript' ? 'clean' : mode === 'compact' ? 'compact' : 'handoff',
         stripPleasantries,
         deduplicateCode,
-        excludeThinking
+        excludeThinking: !includeThinking,
+        userObjectiveOverride: userObjective.trim() ? userObjective : undefined,
+        userNextActionOverride: userNextAction.trim() ? userNextAction : undefined
       }
     })
-  }, [rawTranscript, activeModel, mode, stripPleasantries, deduplicateCode, excludeThinking])
+  }, [
+    snapshot,
+    rawTranscript,
+    capturedProvider,
+    activeModel,
+    mode,
+    stripPleasantries,
+    deduplicateCode,
+    includeThinking,
+    userObjective,
+    userNextAction
+  ])
 
-  const activePromptText = handoffData?.prompt || rawTranscript || ''
-  const stats = handoffData?.stats
+  const activePromptText = projectionData?.prompt || rawTranscript || ''
+  const stats = projectionData?.stats
+  const outputTokensEstimate = stats
+    ? 'outputTokensEstimate' in stats
+      ? stats.outputTokensEstimate
+      : stats.compressedTokensEstimate
+    : 0
 
-  const handleCopy = async () => {
-    if (!activePromptText) return
+  const handleCopy = async (): Promise<boolean> => {
+    if (!activePromptText || isActionPending) return false
+    setIsActionPending(true)
+    setCopyError(null)
     try {
+      let ok = false
       // @ts-ignore
-      if (window.electron?.clipboard) {
+      if (window.electron?.ipcRenderer) {
         // @ts-ignore
-        await window.electron.clipboard.writeText(activePromptText)
-      } else {
+        const res = await window.electron.ipcRenderer.invoke('clipboard_write', activePromptText)
+        if (res && res.success === false) {
+          throw new Error(res.error || 'Failed to write to clipboard')
+        }
+        ok = true
+      } else if (navigator.clipboard) {
         await navigator.clipboard.writeText(activePromptText)
+        ok = true
       }
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2500)
-    } catch (e) {
+
+      if (ok) {
+        setCopied(true)
+        setTimeout(() => setCopied(false), 2500)
+        return true
+      }
+      throw new Error('Clipboard interface unavailable')
+    } catch (e: any) {
       console.error('Failed to copy to clipboard:', e)
+      setCopyError(e?.message || 'Failed to copy to clipboard')
+      return false
+    } finally {
+      setIsActionPending(false)
     }
   }
 
   const handleDownload = () => {
-    if (!activePromptText) return
+    if (!activePromptText || isActionPending) return
     try {
       const blob = new Blob([activePromptText], { type: 'text/markdown;charset=utf-8' })
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
-      const safeModel = activeModel.toLowerCase().replace(/[^a-z0-9]/g, '-')
-      const dateStr = new Date().toISOString().slice(0, 10)
+      const safeModel = (capturedProvider || activeModel).toLowerCase().replace(/[^a-z0-9]/g, '-')
+      const snapId = snapshot?.snapshotId?.slice(0, 8) || 'snap'
+      const dateStr = new Date().toLocaleDateString('en-CA') // YYYY-MM-DD
       a.href = url
-      a.download = `nexus-agent-handoff-${safeModel}-${dateStr}.md`
+      a.download = `nexus-agent-handoff-${safeModel}-${snapId}-${dateStr}.md`
       document.body.appendChild(a)
       a.click()
       document.body.removeChild(a)
-      URL.revokeObjectURL(url)
+      setTimeout(() => URL.revokeObjectURL(url), 1000)
 
       setDownloaded(true)
       setTimeout(() => setDownloaded(false), 2500)
-    } catch (e) {
+    } catch (e: any) {
       console.error('Failed to download markdown:', e)
+      setCopyError(e?.message || 'Failed to download context packet')
     }
   }
 
-  const handleHandoffToModel = (targetKey: string) => {
-    handleCopy()
+  const handleHandoffToModel = async (targetKey: string) => {
+    if (isActionPending) return
+    const success = await handleCopy()
+    if (!success) {
+      // Abort switch on clipboard write failure; leave overlay open with error alert
+      return
+    }
     if (onSwitchModel) {
       onSwitchModel(targetKey)
     }
+    onClose()
   }
 
   return (
@@ -209,8 +295,8 @@ export const ExportOverlay: React.FC<ExportOverlayProps> = ({
                 </span>
               </div>
               <p className="text-xs text-amber-200/70 font-medium">
-                Compresses session state from <span className="text-white font-bold">{modelLabel(activeModel)}</span>
-                {activeTabTitle ? <span className="text-white/80"> &bull; &ldquo;{activeTabTitle}&rdquo;</span> : ''} into a high-density context file for another AI to continue seamlessly
+                Captured state from <span className="text-white font-bold">{capturedProvider || modelLabel(activeModel)}</span>
+                {(capturedTitle || activeTabTitle) ? <span className="text-white/80"> &bull; &ldquo;{capturedTitle || activeTabTitle}&rdquo;</span> : ''} into a structured continuation packet
               </p>
             </div>
           </div>
@@ -226,6 +312,25 @@ export const ExportOverlay: React.FC<ExportOverlayProps> = ({
           </div>
         </div>
 
+        {/* Coverage or Error Banner */}
+        {copyError && (
+          <div className="px-6 py-2 bg-rose-500/20 border-b border-rose-500/30 flex items-center justify-between text-xs text-rose-200 shrink-0">
+            <span>⚠️ {copyError}</span>
+            <button
+              onClick={() => setCopyError(null)}
+              className="text-rose-400 hover:text-white font-bold cursor-pointer ml-3"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
+
+        {coverageWarnings.length > 0 && status === 'done' && (
+          <div className="px-6 py-2 bg-amber-500/15 border-b border-amber-500/25 flex items-center gap-2 text-xs text-amber-200 shrink-0">
+            <span>⚠️ <strong>Partial Capture Notice:</strong> {coverageWarnings.join('; ')}</span>
+          </div>
+        )}
+
         {/* Live Compression Metrics Bar */}
         {status === 'done' && stats && (
           <div className="px-6 py-2.5 bg-black/40 border-b border-white/5 flex flex-wrap items-center justify-between gap-3 text-xs shrink-0">
@@ -237,10 +342,20 @@ export const ExportOverlay: React.FC<ExportOverlayProps> = ({
                 </span>
                 <span className="text-white/40">➔</span>
                 <span className="font-mono font-bold text-amber-300">
-                  ~{stats.compressedTokensEstimate.toLocaleString()} tokens
+                  ~{outputTokensEstimate.toLocaleString()} tokens
                 </span>
-                <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-                  {stats.reductionPercent > 0 ? `🟢 -${stats.reductionPercent}% Compressed` : 'Optimized'}
+                <span className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded-full border ${
+                  stats.isExpanded
+                    ? 'bg-amber-500/20 text-amber-300 border-amber-500/30'
+                    : stats.reductionPercent > 0
+                    ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
+                    : 'bg-white/10 text-white/70 border-white/20'
+                }`}>
+                  {stats.isExpanded
+                    ? `+${(stats.signedDeltaChars || 0).toLocaleString()} chars (Expanded)`
+                    : stats.reductionPercent > 0
+                    ? `🟢 -${stats.reductionPercent}% Compressed`
+                    : 'Structured Output'}
                 </span>
               </div>
 
@@ -253,9 +368,11 @@ export const ExportOverlay: React.FC<ExportOverlayProps> = ({
                     Code Blocks: <strong className="text-amber-300">{stats.codeBlockCount}</strong>
                   </span>
                 )}
-                {handoffData?.detectedFiles && handoffData.detectedFiles.length > 0 && (
+                {((projectionData as any)?.artifacts?.length || (projectionData as any)?.detectedFiles?.length) > 0 && (
                   <span className="hidden sm:inline">
-                    Files: <strong className="text-cyan-300">{handoffData.detectedFiles.length}</strong>
+                    Artifacts: <strong className="text-cyan-300">
+                      {(projectionData as any)?.artifacts?.length || (projectionData as any)?.detectedFiles?.length}
+                    </strong>
                   </span>
                 )}
               </div>
@@ -263,30 +380,43 @@ export const ExportOverlay: React.FC<ExportOverlayProps> = ({
 
             <div className="flex items-center gap-1.5 text-[11px] text-amber-200/80">
               <IconZap size={13} className="text-amber-400" />
-              <span>Zero Context Loss</span>
+              <span>Captured Content Preserved</span>
             </div>
           </div>
         )}
 
         {/* Mode Selector & Compression Controls */}
         {status === 'done' && (
-          <div className="px-6 py-3 bg-black/20 border-b border-white/5 flex flex-wrap items-center justify-between gap-3 shrink-0">
+          <div className="px-6 py-2.5 bg-black/20 border-b border-white/5 flex flex-wrap items-center justify-between gap-3 shrink-0">
             {/* Mode Switcher Tabs */}
             <div className="flex items-center gap-1.5 p-1 rounded-xl bg-black/40 border border-white/10">
               <button
                 type="button"
-                onClick={() => setMode('handoff')}
+                onClick={() => setMode('brief')}
                 className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
-                  mode === 'handoff'
+                  mode === 'brief'
                     ? 'bg-amber-500/25 text-amber-300 border border-amber-500/40 shadow-sm'
                     : 'text-white/60 hover:text-white hover:bg-white/5 border border-transparent'
                 }`}
-                title="Generates complete prompt with Goal, Decisions, Architecture, Immediate Next Action, and Dialogue"
+                title="Structured continuation brief with provenance, artifacts, objective, and transcript"
               >
-                <span>🚀 Agent Handoff Prompt</span>
+                <span>🚀 Continuation Brief</span>
                 <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-300">
                   Recommended
                 </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setMode('transcript')}
+                className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                  mode === 'transcript'
+                    ? 'bg-purple-500/25 text-purple-300 border border-purple-500/40 shadow-sm'
+                    : 'text-white/60 hover:text-white hover:bg-white/5 border border-transparent'
+                }`}
+                title="Faithful raw captured transcript preserving exact turns, code, and links"
+              >
+                <span>📜 Faithful Transcript</span>
               </button>
 
               <button
@@ -297,27 +427,26 @@ export const ExportOverlay: React.FC<ExportOverlayProps> = ({
                     ? 'bg-cyan-500/25 text-cyan-300 border border-cyan-500/40 shadow-sm'
                     : 'text-white/60 hover:text-white hover:bg-white/5 border border-transparent'
                 }`}
-                title="Ultra-compact caveman style: high-signal bullets, no filler articles, exact code"
+                title="High-density evidence pack without prose fluff or stopword destruction"
               >
-                <span>⚡ High-Density Compact</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setMode('clean')}
-                className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
-                  mode === 'clean'
-                    ? 'bg-purple-500/25 text-purple-300 border border-purple-500/40 shadow-sm'
-                    : 'text-white/60 hover:text-white hover:bg-white/5 border border-transparent'
-                }`}
-                title="Clean dialogue transcript with UI noise stripped"
-              >
-                <span>📜 Clean Dialogue</span>
+                <span>⚡ High-Density Pack</span>
               </button>
             </div>
 
-            {/* Granular Toggles */}
+            {/* Granular Toggles & Objective Editor Button */}
             <div className="flex items-center gap-3 text-xs text-white/80 flex-wrap">
+              <button
+                type="button"
+                onClick={() => setShowEditorFields(!showEditorFields)}
+                className={`px-2.5 py-1 rounded-lg text-xs font-semibold border transition-all cursor-pointer ${
+                  showEditorFields
+                    ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                    : 'bg-white/5 text-white/70 hover:text-white border-white/10'
+                }`}
+              >
+                ✏️ Edit Objective / Next Action
+              </button>
+
               <label className="flex items-center gap-1.5 cursor-pointer hover:text-white transition-colors" title="Deduplicate identical code blocks across turns">
                 <input
                   type="checkbox"
@@ -325,10 +454,10 @@ export const ExportOverlay: React.FC<ExportOverlayProps> = ({
                   onChange={(e) => setDeduplicateCode(e.target.checked)}
                   className="accent-amber-500 cursor-pointer"
                 />
-                <span>Deduplicate Code</span>
+                <span>Deduplicate Exact Code</span>
               </label>
 
-              <label className="flex items-center gap-1.5 cursor-pointer hover:text-white transition-colors" title="Strip greetings, polite filler, and sign-offs">
+              <label className="flex items-center gap-1.5 cursor-pointer hover:text-white transition-colors" title="Strip greetings and pleasantries from assistant prose only">
                 <input
                   type="checkbox"
                   checked={stripPleasantries}
@@ -338,15 +467,45 @@ export const ExportOverlay: React.FC<ExportOverlayProps> = ({
                 <span>Strip Fluff</span>
               </label>
 
-              <label className="flex items-center gap-1.5 cursor-pointer hover:text-white transition-colors" title="Exclude massive internal chain-of-thought blocks">
+              <label className="flex items-center gap-1.5 cursor-pointer hover:text-white transition-colors" title="Include user-visible reasoning summary (does not strip code think tags)">
                 <input
                   type="checkbox"
-                  checked={excludeThinking}
-                  onChange={(e) => setExcludeThinking(e.target.checked)}
+                  checked={includeThinking}
+                  onChange={(e) => setIncludeThinking(e.target.checked)}
                   className="accent-amber-500 cursor-pointer"
                 />
-                <span>Exclude Thinking</span>
+                <span>Include Thinking</span>
               </label>
+            </div>
+          </div>
+        )}
+
+        {/* Optional Editable Continuation Fields Panel */}
+        {status === 'done' && showEditorFields && (
+          <div className="px-6 py-3 bg-black/40 border-b border-white/10 flex flex-col gap-2 shrink-0 animate-in fade-in duration-150">
+            <div className="flex flex-col gap-1">
+              <label className="text-[11px] font-bold text-amber-300 uppercase tracking-wide">
+                Current User Request / Objective:
+              </label>
+              <textarea
+                value={userObjective}
+                onChange={(e) => setUserObjective(e.target.value)}
+                placeholder="Describe current objective..."
+                rows={2}
+                className="w-full p-2 rounded-lg bg-black/50 border border-white/10 text-xs text-white focus:outline-none focus:border-amber-500 resize-none font-mono"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-[11px] font-bold text-cyan-300 uppercase tracking-wide">
+                Next Immediate Action Candidate:
+              </label>
+              <input
+                type="text"
+                value={userNextAction}
+                onChange={(e) => setUserNextAction(e.target.value)}
+                placeholder="Next action for incoming AI..."
+                className="w-full px-2.5 py-1.5 rounded-lg bg-black/50 border border-white/10 text-xs text-white focus:outline-none focus:border-amber-500 font-mono"
+              />
             </div>
           </div>
         )}
@@ -358,7 +517,7 @@ export const ExportOverlay: React.FC<ExportOverlayProps> = ({
               <div className="w-10 h-10 border-4 border-t-transparent rounded-full animate-spin border-amber-500" />
               <div className="flex flex-col items-center gap-1">
                 <p className="text-sm font-bold text-white animate-pulse">Extracting Deep Session Context...</p>
-                <p className="text-xs text-white/50">Reading conversation tree and sanitizing DOM artifacts across turns</p>
+                <p className="text-xs text-white/50">Reading conversation tree and isolating code and message blocks</p>
               </div>
             </div>
           )}
@@ -385,7 +544,7 @@ export const ExportOverlay: React.FC<ExportOverlayProps> = ({
             <div className="flex-1 flex flex-col min-h-0 relative rounded-xl border border-white/10 bg-black/60 overflow-hidden shadow-inner">
               <div className="flex items-center justify-between px-3.5 py-2 bg-black/40 border-b border-white/5 text-[11px] text-white/50 font-mono">
                 <span>
-                  Preview: {mode === 'handoff' ? 'Agent Handoff Specification' : mode === 'compact' ? 'High-Density Caveman Context' : 'Clean Dialogue'} ({activePromptText.split('\n').length} lines)
+                  Preview: {mode === 'brief' ? 'Continuation Brief' : mode === 'transcript' ? 'Faithful Transcript' : 'High-Density Pack'} ({activePromptText.split('\n').length} lines)
                 </span>
                 <span className="text-amber-300/80">Ready to paste into incoming AI</span>
               </div>
@@ -420,9 +579,10 @@ export const ExportOverlay: React.FC<ExportOverlayProps> = ({
                   <button
                     key={p.key}
                     type="button"
+                    disabled={isActionPending}
                     onClick={() => handleHandoffToModel(p.key)}
-                    className="px-2.5 py-1 rounded-lg text-xs font-semibold bg-white/5 hover:bg-white/10 border border-white/10 text-white/80 hover:text-white transition-all flex items-center gap-1.5 cursor-pointer"
-                    title={`Copy handoff prompt and switch to ${p.label}`}
+                    className="px-2.5 py-1 rounded-lg text-xs font-semibold bg-white/5 hover:bg-white/10 border border-white/10 text-white/80 hover:text-white transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                    title={`Copy continuation packet and switch to ${p.label}`}
                   >
                     <span>➔ {p.label}</span>
                   </button>
@@ -433,8 +593,9 @@ export const ExportOverlay: React.FC<ExportOverlayProps> = ({
             <div className="flex items-center gap-2.5 ml-auto flex-wrap">
               <button
                 type="button"
+                disabled={isActionPending}
                 onClick={handleDownload}
-                className="px-3.5 py-2 rounded-xl text-xs font-bold border border-white/10 bg-white/5 hover:bg-white/10 text-white transition-all flex items-center gap-1.5 cursor-pointer shadow-sm active:scale-95"
+                className="px-3.5 py-2 rounded-xl text-xs font-bold border border-white/10 bg-white/5 hover:bg-white/10 text-white transition-all flex items-center gap-1.5 cursor-pointer shadow-sm active:scale-95 disabled:opacity-50"
                 title="Download this full context packet as a .md file"
               >
                 {downloaded ? <IconCheck size={14} className="text-emerald-400" /> : <IconDownload size={14} />}
@@ -443,8 +604,9 @@ export const ExportOverlay: React.FC<ExportOverlayProps> = ({
 
               <button
                 type="button"
-                onClick={handleCopy}
-                className="px-5 py-2 rounded-xl text-xs font-bold text-black transition-all flex items-center gap-2 shadow-lg active:scale-95 cursor-pointer"
+                disabled={isActionPending}
+                onClick={() => handleCopy()}
+                className="px-5 py-2 rounded-xl text-xs font-bold text-black transition-all flex items-center gap-2 shadow-lg active:scale-95 cursor-pointer disabled:opacity-50"
                 style={{
                   background: copied
                     ? 'linear-gradient(135deg, #10b981, #059669)'
@@ -456,7 +618,7 @@ export const ExportOverlay: React.FC<ExportOverlayProps> = ({
                 }}
               >
                 {copied ? <IconCheck size={15} /> : <IconCopy size={15} />}
-                <span>{copied ? '✓ Copied Handoff Prompt!' : 'Copy Agent Handoff Prompt'}</span>
+                <span>{copied ? '✓ Copied Continuation Prompt!' : 'Copy Continuation Prompt'}</span>
               </button>
             </div>
           </div>
