@@ -230,4 +230,59 @@ console.log(items[0]);</code></pre>
     expect(codeBlock?.text).toBe('const answer = 42;')
     expect(codeBlock?.language).toBe('javascript')
   })
+
+  it('Blocker 3, 5, 6: Extracts code language from headers and content sniffing, separates tool execution results, and preserves link destinations', () => {
+    const html = `
+      <main>
+        <div data-agent-transcript-message="true" data-chat-message-id="arena-tool-1">
+          <p>Here is the initial response prose.</p>
+          <div class="tool-execution" data-tool-result="true">
+            <div class="header">
+              <span>Write nexus-export-validation/reproduce-export.cjs</span>
+              <button class="open-btn">open</button>
+              <span class="badge">PLAIN</span>
+              <span class="lines">49 lines</span>
+            </div>
+            <pre><code>const fs = require('fs');\nfs.writeFileSync('out.txt', 'hello');</code></pre>
+          </div>
+          <p>Continuing response after tool.</p>
+          <div class="code-block">
+            <div class="code-header"><span>json</span></div>
+            <pre><code>{ "key": "value" }</code></pre>
+          </div>
+          <p>Also see the review: <a download="NEXUS_EXPORT_AFTER_EDITS_REVIEW.md" href="blob:https://arena.ai/abc-123">Open the after-edits review</a></p>
+        </div>
+      </main>
+    `
+    const payload = runExtractorInDOM(html, 'https://arena.ai/agent/task-tool')
+    expect(payload.success).toBe(true)
+    expect(payload.turns.length).toBe(1)
+    const turn = payload.turns[0]
+
+    // 1. Tool result cleanly separated as typed block without UI buttons leaking into prose
+    const toolBlock = turn.blocks.find((b: any) => b.type === 'tool-result')
+    expect(toolBlock).toBeDefined()
+    expect(toolBlock?.text).toContain('reproduce-export.cjs')
+    expect(toolBlock?.text).toContain('fs.writeFileSync')
+
+    // Prose blocks must NOT contain button text 'open', 'PLAIN', or '49 lines'
+    const proseTexts = turn.blocks.filter((b: any) => b.type === 'text').map((b: any) => b.text).join(' ')
+    expect(proseTexts).not.toContain('49 linesopen')
+    expect(proseTexts).not.toContain('reproduce-export.cjsPLAIN')
+
+    // 2. Code language detected from header span
+    const codeBlock = turn.blocks.find((b: any) => b.type === 'code' && b.text.includes('"key": "value"'))
+    expect(codeBlock).toBeDefined()
+    expect(codeBlock?.language).toBe('json')
+
+    // 3. Link destination preserved with download attribute / local session reference
+    const linkBlock = turn.blocks.find((b: any) => b.type === 'link')
+    expect(linkBlock).toBeDefined()
+    expect(linkBlock?.destination).toBe('NEXUS_EXPORT_AFTER_EDITS_REVIEW.md')
+    expect(linkBlock?.label).toBe('Open the after-edits review')
+
+    const attBlock = turn.blocks.find((b: any) => b.type === 'attachment' && b.name.includes('NEXUS_EXPORT'))
+    expect(attBlock).toBeDefined()
+    expect(attBlock?.name).toBe('NEXUS_EXPORT_AFTER_EDITS_REVIEW.md')
+  })
 })

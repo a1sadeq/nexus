@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   type ConversationSnapshot,
+  type ConversationTurn,
   computeContentHash,
   getSafeMarkdownFence,
   stripUiNoiseSafe,
@@ -8,7 +9,9 @@ import {
   deduplicateExactCodeAcrossTurns,
   detectArtifactsFromTurns,
   buildProvenanceLedger,
-  projectSnapshotToMarkdown
+  projectSnapshotToMarkdown,
+  extractFullLatestUserRequest,
+  deriveContinuationObjectiveContext
 } from './contextSnapshot'
 
 describe('contextSnapshot - Core primitives', () => {
@@ -315,5 +318,247 @@ describe('contextSnapshot - Provenance Ledger & Projections', () => {
     expect(result.prompt).toContain('Coverage Notice')
     expect(result.prompt).toContain('mounted turns')
     expect(result.prompt).toContain('Full history completeness is unverified')
+  })
+
+  it('Blocker 1: Provenance Ledger ignores warnings, adjective uses of fixed, and criticisms', () => {
+    const turns: ConversationTurn[] = [
+      {
+        id: 't-warning',
+        sourceRole: 'assistant',
+        roleEvidence: 'assistant',
+        status: 'complete',
+        blocks: [
+          {
+            type: 'text',
+            text: 'Do not wrap arbitrary code or transcript content with a fixed triple-backtick fence that its contents can terminate.'
+          }
+        ]
+      },
+      {
+        id: 't-criticism',
+        sourceRole: 'assistant',
+        roleEvidence: 'assistant',
+        status: 'complete',
+        blocks: [
+          {
+            type: 'text',
+            text: 'A ledger entry says resolved selector changes and lacks a useful source reference or explanation.'
+          }
+        ]
+      },
+      {
+        id: 't-not-implemented',
+        sourceRole: 'assistant',
+        roleEvidence: 'assistant',
+        status: 'complete',
+        blocks: [
+          {
+            type: 'text',
+            text: 'No discard repair was applied.'
+          }
+        ]
+      },
+      {
+        id: 't-impl-and-test',
+        sourceRole: 'assistant',
+        roleEvidence: 'assistant',
+        status: 'complete',
+        blocks: [
+          {
+            type: 'text',
+            text: 'I implemented the prompt navigation engine and tests passed.'
+          }
+        ]
+      }
+    ]
+
+    const ledger = buildProvenanceLedger(turns)
+
+    // 1. "Do not wrap with a fixed triple-backtick fence" must NOT be reported implementation
+    expect(ledger.some((i) => i.claim.includes('fixed triple-backtick fence'))).toBe(false)
+
+    // 2. "A ledger entry says resolved selector changes" must NOT be reported implementation
+    expect(ledger.some((i) => i.claim.includes('resolved selector changes'))).toBe(false)
+
+    // 3. "No discard repair was applied" must be categorized as not_implemented
+    const notImpl = ledger.find((i) => i.category === 'not_implemented')
+    expect(notImpl).toBeDefined()
+    expect(notImpl?.claim).toContain('No discard repair was applied')
+    expect(notImpl?.sourceTurnId).toBe('Turn #3 (t-not-implemented)')
+
+    // 4. "I implemented the prompt navigation engine and tests passed" must have reported implementation and test_observed
+    const impl = ledger.find((i) => i.category === 'reported_implementation')
+    expect(impl).toBeDefined()
+    expect(impl?.claim).toContain('prompt navigation engine')
+
+    const testObs = ledger.find((i) => i.category === 'test_observed')
+    expect(testObs).toBeDefined()
+    expect(testObs?.claim).toContain('tests passed')
+  })
+
+  it('Blocker 2: separates attached filenames from user prompt text and updates capture status when answered', () => {
+    const turns: ConversationTurn[] = [
+      {
+        id: 't-prev-user',
+        sourceRole: 'user',
+        roleEvidence: 'user',
+        status: 'complete',
+        blocks: [
+          { type: 'text', text: 'Please evaluate the export.' }
+        ]
+      },
+      {
+        id: 't-prompt-with-attachment',
+        sourceRole: 'user',
+        roleEvidence: 'user',
+        status: 'complete',
+        blocks: [
+          {
+            type: 'text',
+            text: 'nexus-agent-handoff-arena-ai-snap-1a1-2026-10-25.md.txt\nthe export of this chat after the edits'
+          }
+        ]
+      },
+      {
+        id: 't-asst-reply',
+        sourceRole: 'assistant',
+        roleEvidence: 'assistant',
+        status: 'complete',
+        blocks: [
+          { type: 'text', text: 'I have reviewed the export after the edits.' }
+        ]
+      }
+    ]
+
+    const latestUser = extractFullLatestUserRequest(turns)
+    expect(latestUser).toBe('the export of this chat after the edits')
+    expect(latestUser).not.toContain('nexus-agent-handoff-arena-ai-snap')
+
+    const ctx = deriveContinuationObjectiveContext(turns, 'Nexus Export')
+    expect(ctx.literalUserRequest).toBe('the export of this chat after the edits')
+    expect(ctx.statusAtCapture).toBe('Assessment and response supplied in dialogue prior to capture.')
+    expect(ctx.nextImmediateAction).toContain('Incoming agent to review dialogue assessment')
+  })
+
+  it('Blocker 4 & 5: Prioritizes recent deliverables, classifies codebase as source, maps visible turn numbers, and distinguishes instructions', () => {
+    const turns: ConversationTurn[] = [
+      {
+        id: 't1',
+        sourceRole: 'user',
+        roleEvidence: 'user',
+        status: 'complete',
+        blocks: [
+          { type: 'attachment', name: 'nexus_electron_part1_of_1_codebase.txt', availability: 'reference-only' }
+        ]
+      },
+      {
+        id: 't2',
+        sourceRole: 'assistant',
+        roleEvidence: 'assistant',
+        status: 'complete',
+        blocks: [
+          { type: 'text', text: 'Inspecting src/main/contextExtraction.ts and contextExtraction.ts.' },
+          { type: 'link', label: 'NEXUS_EXPORT_AFTER_EDITS_REVIEW.md', destination: 'NEXUS_EXPORT_AFTER_EDITS_REVIEW.md' },
+          {
+            type: 'code',
+            language: 'markdown',
+            text: '# Instructions for Incoming AI\nImplement the Nexus Export Context improvements.\nOBJECTIVE: Make Export Context produce faithful output.',
+            contentHash: computeContentHash('instructions')
+          }
+        ]
+      }
+    ]
+
+    const artifacts = detectArtifactsFromTurns(turns)
+
+    // 1. Recent deliverable prioritized
+    expect(artifacts[0].label).toBe('NEXUS_EXPORT_AFTER_EDITS_REVIEW.md')
+    expect(artifacts[0].kind).toBe('report')
+    expect(artifacts[0].sourceTurnId).toBe('2 (t2)')
+
+    // 2. Codebase bundle classified as source, NOT report
+    const codebaseArt = artifacts.find((a) => a.label.includes('codebase.txt'))
+    expect(codebaseArt).toBeDefined()
+    expect(codebaseArt?.kind).toBe('source')
+    expect(codebaseArt?.sourceTurnId).toBe('1 (t1)')
+
+    // 3. Basename/path alias deduplicated (contextExtraction.ts not duplicated)
+    const extractionArts = artifacts.filter((a) => a.label.includes('contextExtraction.ts'))
+    expect(extractionArts.length).toBe(1)
+    expect(extractionArts[0].label).toBe('src/main/contextExtraction.ts')
+
+    // 4. Instructions in Section 5 labeled as Technical Brief
+    const snapshot: ConversationSnapshot = {
+      schemaVersion: 1,
+      snapshotId: 'snap-test',
+      capturedAt: '2026-10-25T01:00:00Z',
+      source: {
+        tabId: 'tab-1',
+        providerKey: 'Arena',
+        origin: 'https://arena.ai',
+        title: 'Nexus Work',
+        contextRevision: 'r1',
+        adapterId: 'arena',
+        adapterVersion: 1
+      },
+      coverage: { scope: 'mounted-transcript', completeness: 'confirmed-for-source', streaming: 'no', warnings: [] },
+      turns,
+      artifacts,
+      stats: { rawChars: 100, turnCount: 2, userTurns: 1, assistantTurns: 1, toolTurns: 0, systemTurns: 0, unknownTurns: 0, codeBlockCount: 1, artifactCount: 3 }
+    }
+
+    const brief = projectSnapshotToMarkdown({ snapshot, options: { mode: 'brief' } })
+    expect(brief.prompt).toContain('## 5. Latest Referenced Instructions / Technical Brief')
+    expect(brief.prompt).not.toContain('## 5. Latest Referenced Code Artifact')
+    expect(brief.prompt).toContain('Turn #2 (t2)')
+  })
+
+  it('Blocker 7: Preserves repeated code 100% faithfully in transcript mode without omission strings', () => {
+    const codeSnippet = 'export const testSnippet = () => { return 42; };\nconsole.log("running");'
+    const turns: ConversationTurn[] = [
+      {
+        id: 'turn-1',
+        sourceRole: 'assistant',
+        roleEvidence: 'assistant',
+        status: 'complete',
+        blocks: [{ type: 'code', language: 'ts', text: codeSnippet, contentHash: computeContentHash(codeSnippet) }]
+      },
+      {
+        id: 'turn-2',
+        sourceRole: 'assistant',
+        roleEvidence: 'assistant',
+        status: 'complete',
+        blocks: [{ type: 'code', language: 'ts', text: codeSnippet, contentHash: computeContentHash(codeSnippet) }]
+      }
+    ]
+
+    const snapshot: ConversationSnapshot = {
+      schemaVersion: 1,
+      snapshotId: 'snap-transcript',
+      capturedAt: '2026-10-25T01:00:00Z',
+      source: {
+        tabId: 'tab-1',
+        providerKey: 'Arena',
+        origin: 'https://arena.ai',
+        contextRevision: 'r1',
+        adapterId: 'arena',
+        adapterVersion: 1
+      },
+      coverage: { scope: 'mounted-transcript', completeness: 'confirmed-for-source', streaming: 'no', warnings: [] },
+      turns,
+      artifacts: [],
+      stats: { rawChars: 200, turnCount: 2, userTurns: 0, assistantTurns: 2, toolTurns: 0, systemTurns: 0, unknownTurns: 0, codeBlockCount: 2, artifactCount: 0 }
+    }
+
+    const transcriptResult = projectSnapshotToMarkdown({
+      snapshot,
+      options: { mode: 'transcript', deduplicateExactCode: true }
+    })
+
+    // Must NOT have omission string in faithful transcript mode!
+    expect(transcriptResult.prompt).not.toContain('Identical code block omitted')
+    // Both turns must contain the full code
+    const matches = transcriptResult.prompt.match(/export const testSnippet/g)
+    expect(matches?.length).toBe(2)
   })
 })

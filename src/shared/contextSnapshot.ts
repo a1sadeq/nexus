@@ -320,89 +320,168 @@ function cleanFileCandidate(cand: string): string[] {
 }
 
 /**
+ * Separates attached filenames and chip markers from user prompt prose.
+ */
+export function separateAttachmentsFromUserPrompt(rawText: string): {
+  promptText: string
+  detectedAttachments: string[]
+} {
+  if (!rawText) return { promptText: '', detectedAttachments: [] }
+
+  const lines = rawText.split('\n')
+  const detectedAttachments: string[] = []
+  const promptLines: string[] = []
+
+  const filenameLineRegex = /^[a-zA-Z0-9_\-./]+?\.(?:md|txt|ts|tsx|js|jsx|json|py|csv|zip|tar|gz|pdf|html|css|png|jpg)(?:\.txt)?(?:\s*\(.*?\))?$/i
+  const attachLineRegex = /^(?:\[(?:Attached|Attachment):?\s*|📎\s*|Attached\s+file:\s*)([a-zA-Z0-9_\-./]+?\.[a-zA-Z0-9]+)(?:\])?/i
+
+  for (const line of lines) {
+    const trimmed = line.trim()
+    if (!trimmed) {
+      promptLines.push(line)
+      continue
+    }
+
+    const attachMatch = trimmed.match(attachLineRegex)
+    if (attachMatch) {
+      detectedAttachments.push(attachMatch[1])
+      continue
+    }
+
+    if (filenameLineRegex.test(trimmed)) {
+      detectedAttachments.push(trimmed)
+      continue
+    }
+
+    promptLines.push(line)
+  }
+
+  const promptText = promptLines.join('\n').trim()
+  return { promptText, detectedAttachments }
+}
+
+/**
  * Extracts referenced artifacts and attachments with their provenance.
+ * Prioritizes explicit attachments and recent deliverables, de-duplicates aliases,
+ * classifies codebase bundles as source, and maps turn IDs to visible turn numbers.
  */
 export function detectArtifactsFromTurns(turns: ConversationTurn[]): ArtifactReference[] {
   const artifacts: ArtifactReference[] = []
   const seenPaths = new Set<string>()
+  const seenBasenames = new Set<string>()
 
-  // Common file pattern with extension (word boundary aware to handle trailing sentence punctuation)
-  const fileRegex = /(?:^|[\s"'`(/])([a-zA-Z0-9_\-./]+?\.(?:ts|tsx|js|jsx|json|html|css|scss|md|txt|py|go|rs|cpp|c|h|yaml|yml|toml|sql|sh|env))\b/g
+  function addArtifact(
+    rawPath: string,
+    sourceTurn: ConversationTurn,
+    explicitKind?: ArtifactReference['kind'],
+    availability: ArtifactReference['availability'] = 'reference-only',
+    hash?: string
+  ) {
+    const trimmed = rawPath.trim()
+    if (!trimmed || trimmed.length <= 3) return
+    if (trimmed.startsWith('http') || trimmed.startsWith('www.') || trimmed.includes('example.com')) return
 
-  turns.forEach((turn) => {
+    const key = trimmed.toLowerCase()
+    const basename = (trimmed.split('/').pop() || trimmed).toLowerCase()
+
+    if (seenPaths.has(key)) return
+    if (!trimmed.includes('/') && seenBasenames.has(basename)) return
+
+    seenPaths.add(key)
+    seenBasenames.add(basename)
+
+    let kind: ArtifactReference['kind'] = explicitKind || 'unknown'
+    if (!explicitKind || explicitKind === 'unknown') {
+      const lower = trimmed.toLowerCase()
+      if (lower.includes('codebase') || lower.includes('part1_of_1') || lower.endsWith('.bundle')) {
+        kind = 'source'
+      } else if (lower.endsWith('.patch') || lower.includes('diff')) {
+        kind = 'patch'
+      } else if (
+        lower.includes('review') ||
+        lower.includes('validation') ||
+        lower.includes('audit') ||
+        lower.includes('handoff') ||
+        lower.includes('plan') ||
+        lower.includes('guide') ||
+        lower.includes('spec')
+      ) {
+        kind = 'report'
+      } else if (/\.(?:ts|tsx|js|jsx|py|go|rs|cpp|c|h|sql|css|html|json)$/i.test(trimmed)) {
+        kind = 'source'
+      } else if (trimmed.endsWith('.md')) {
+        kind = 'report'
+      } else if (trimmed.endsWith('.txt')) {
+        kind = 'unknown'
+      }
+    }
+
+    const turnIndex = turns.findIndex((t) => t.id === sourceTurn.id)
+    const turnNumberLabel = turnIndex >= 0 ? `${turnIndex + 1} (${sourceTurn.id})` : sourceTurn.id
+
+    artifacts.push({
+      id: `art-${computeContentHash(trimmed)}`,
+      label: trimmed,
+      kind,
+      sourceTurnId: turnNumberLabel,
+      availability,
+      pathOrLink: trimmed,
+      hash
+    })
+  }
+
+  // 1. Explicit attachments, tool results, and links in REVERSE order (newest turns first)
+  for (let i = turns.length - 1; i >= 0; i--) {
+    const turn = turns[i]
     for (const b of turn.blocks) {
       if (b.type === 'attachment') {
         const splitNames = cleanFileCandidate(b.name)
         for (const name of splitNames) {
-          const trimmed = name.trim()
-          if (!trimmed) continue
-          const key = trimmed.toLowerCase()
-          if (!seenPaths.has(key)) {
-            seenPaths.add(key)
-            let kind: ArtifactReference['kind'] = 'attachment'
-            if (trimmed.endsWith('.patch') || trimmed.includes('diff')) kind = 'patch'
-            else if (trimmed.endsWith('.md') || trimmed.endsWith('.txt')) kind = 'report'
-            artifacts.push({
-              id: `art-${computeContentHash(trimmed)}`,
-              label: trimmed,
-              kind,
-              sourceTurnId: turn.id,
-              availability: b.availability,
-              pathOrLink: b.path
-            })
-          }
+          addArtifact(name, turn, undefined, b.availability || 'reference-only')
         }
-      } else if (b.type === 'text') {
-        let match: RegExpExecArray | null
-        while ((match = fileRegex.exec(b.text)) !== null) {
-          const rawCand = match[1].trim()
-          if (!rawCand.startsWith('http') && !rawCand.startsWith('www.') && !rawCand.includes('example.com') && rawCand.length > 3) {
-            const splitCands = cleanFileCandidate(rawCand)
-            for (const candidate of splitCands) {
-              const trimmed = candidate.trim()
-              if (!trimmed || trimmed.length <= 3) continue
-              const key = trimmed.toLowerCase()
-              if (!seenPaths.has(key)) {
-                seenPaths.add(key)
-                let kind: ArtifactReference['kind'] = 'source'
-                if (trimmed.endsWith('.patch') || trimmed.includes('diff')) kind = 'patch'
-                else if (trimmed.endsWith('.md') || trimmed.endsWith('.txt')) kind = 'report'
+      } else if (b.type === 'link') {
+        if (b.destination && /\.(?:md|txt|ts|tsx|js|jsx|json|patch|diff|zip)\b/i.test(b.destination)) {
+          addArtifact(b.destination, turn, undefined, 'reference-only')
+        }
+        if (b.label && /\.(?:md|txt|ts|tsx|js|jsx|json|patch|diff|zip)\b/i.test(b.label)) {
+          addArtifact(b.label, turn, undefined, 'reference-only')
+        }
+      }
+    }
+  }
 
-                artifacts.push({
-                  id: `art-${computeContentHash(trimmed)}`,
-                  label: trimmed,
-                  kind,
-                  sourceTurnId: turn.id,
-                  availability: 'reference-only',
-                  pathOrLink: trimmed
-                })
-              }
-            }
-          }
-        }
-      } else if (b.type === 'code') {
-        // Inspect first line comment for file path (e.g. // src/main/index.ts)
+  // 2. Code block file comments in REVERSE order
+  for (let i = turns.length - 1; i >= 0; i--) {
+    const turn = turns[i]
+    for (const b of turn.blocks) {
+      if (b.type === 'code') {
         const firstLine = b.text.split('\n')[0].trim()
         const commentMatch = firstLine.match(/^(?:\/\/|#|\/\*)\s*([a-zA-Z0-9_\-./]+\.[a-zA-Z0-9]+)/)
         if (commentMatch) {
           const path = commentMatch[1].trim()
-          const key = path.toLowerCase()
-          if (!seenPaths.has(key)) {
-            seenPaths.add(key)
-            artifacts.push({
-              id: `art-${b.contentHash}`,
-              label: path,
-              kind: 'source',
-              sourceTurnId: turn.id,
-              availability: 'included',
-              pathOrLink: path,
-              hash: b.contentHash
-            })
+          addArtifact(path, turn, 'source', 'included', b.contentHash)
+        }
+      }
+    }
+  }
+
+  // 3. File paths mentioned in text in REVERSE order
+  const fileRegex = /(?:^|[\s"'`(/])([a-zA-Z0-9_\-./]+?\.(?:ts|tsx|js|jsx|json|html|css|scss|md|txt|py|go|rs|cpp|c|h|yaml|yml|toml|sql|sh|env))\b/g
+  for (let i = turns.length - 1; i >= 0; i--) {
+    const turn = turns[i]
+    for (const b of turn.blocks) {
+      if (b.type === 'text') {
+        let match: RegExpExecArray | null
+        while ((match = fileRegex.exec(b.text)) !== null) {
+          const rawCand = match[1].trim()
+          const splitCands = cleanFileCandidate(rawCand)
+          for (const cand of splitCands) {
+            addArtifact(cand, turn, undefined, 'reference-only')
           }
         }
       }
     }
-  })
+  }
 
   return artifacts.slice(0, 16)
 }
@@ -421,13 +500,15 @@ export function buildProvenanceLedger(turns: ConversationTurn[]): TaskStatusLedg
   const items: TaskStatusLedgerItem[] = []
   const seenClaims = new Set<string>()
 
-  turns.forEach((turn) => {
+  turns.forEach((turn, turnIdx) => {
+    const visibleTurnLabel = `Turn #${turnIdx + 1} (${turn.id})`
+
     for (const b of turn.blocks) {
       if (b.type !== 'text') continue
       const text = b.text
 
       if (turn.sourceRole === 'user') {
-        // Look for user confirmations first (must NOT fall through to user request)
+        // Look for user confirmations first
         const confirmMatch = text.match(
           /(?:it worked|it works|that worked|that works|verified|fixed now|looks good|confirmed|test passed|all tests pass)/i
         )
@@ -439,7 +520,7 @@ export function buildProvenanceLedger(turns: ConversationTurn[]): TaskStatusLedg
               id: `ledger-${computeContentHash(sentence)}`,
               category: 'user_confirmed',
               claim: sentence,
-              sourceTurnId: turn.id,
+              sourceTurnId: visibleTurnLabel,
               confidence: 'confirmed'
             })
           }
@@ -447,69 +528,147 @@ export function buildProvenanceLedger(turns: ConversationTurn[]): TaskStatusLedg
         }
 
         // Look for user request / constraints
-        const lines = text.split('\n').filter((l) => l.trim().length > 10)
+        const { promptText } = separateAttachmentsFromUserPrompt(text)
+        const lines = promptText.split('\n').filter((l) => l.trim().length > 10)
         if (lines.length > 0) {
           const candidate = lines[0].replace(/^(?:please|can you|let's|we need to)\s+/i, '').trim().slice(0, 160)
-          if (!seenClaims.has(candidate)) {
+          if (candidate && !seenClaims.has(candidate)) {
             seenClaims.add(candidate)
             items.push({
               id: `ledger-${computeContentHash(candidate)}`,
               category: 'user_request',
               claim: candidate,
-              sourceTurnId: turn.id,
+              sourceTurnId: visibleTurnLabel,
               confidence: 'confirmed'
             })
           }
         }
       } else if (turn.sourceRole === 'assistant') {
-        // Check for reported implementation
-        const reportMatch = text.match(/(?:(?:implemented|fixed|updated|patched|resolved|created)\s+([^.\n]+))/i)
-        if (reportMatch) {
-          const claim = reportMatch[0].trim().slice(0, 160)
-          if (!seenClaims.has(claim)) {
-            seenClaims.add(claim)
-            items.push({
-              id: `ledger-${computeContentHash(claim)}`,
-              category: 'reported_implementation',
-              claim,
-              sourceTurnId: turn.id,
-              confidence: 'reported',
-              referenceNote: 'Reported in assistant dialogue'
-            })
-          }
-        }
+        const sentences = text
+          .split(/(?<=[.!?\n])\s+/)
+          .map((s) => s.trim())
+          .filter((s) => s.length > 5)
 
-        // Check for proposals
-        const proposalMatch = text.match(/(?:we should|i propose|i recommend|next step is to|suggest using)\s+([^.\n]+)/i)
-        if (proposalMatch) {
-          const claim = proposalMatch[0].trim().slice(0, 160)
-          if (!seenClaims.has(claim)) {
-            seenClaims.add(claim)
-            items.push({
-              id: `ledger-${computeContentHash(claim)}`,
-              category: 'assistant_proposal',
-              claim,
-              sourceTurnId: turn.id,
-              confidence: 'inferred'
-            })
+        for (const sentence of sentences) {
+          // 1. Quotation, attribution, meta-critique filter
+          if (
+            /(?:ledger entry says|review(?:'s)? criticism|says [a-z]+|criticism of|claims? that|example of bad|poor ledger entry|instead of claiming)/i.test(
+              sentence
+            ) ||
+            /["'][^"']*(?:implemented|fixed|updated|patched|resolved|created)[^"']*["']/i.test(sentence)
+          ) {
+            continue
+          }
+
+          // 2. Prohibition / Warning filter
+          if (
+            /(?:^|[.!?]\s*)(?:do not|don't|never|cannot|can't|should not|shouldn't|must not|avoid|stop)\s+/i.test(
+              sentence
+            )
+          ) {
+            continue
+          }
+
+          // 3. Adjective / non-verb "fixed" check
+          const hasAdjectiveFixed = /\bfixed\s+(?:triple-backtick|fence|width|size|height|delay|interval|timeout|delimiter|string|buffer|position|value|length|window|rate)\b/i.test(
+            sentence
+          )
+
+          // 4. Check for explicitly NOT implemented
+          if (
+            /(?:no|not)\s+(?:[a-z0-9_-]+\s+)*(?:repair|fix|change|implementation|modification)\s+was\s+applied|not\s+implemented|unimplemented|has\s+not\s+been\s+implemented/i.test(
+              sentence
+            )
+          ) {
+            const claim = sentence.slice(0, 160)
+            if (!seenClaims.has(claim)) {
+              seenClaims.add(claim)
+              items.push({
+                id: `ledger-${computeContentHash(claim)}`,
+                category: 'not_implemented',
+                claim,
+                sourceTurnId: visibleTurnLabel,
+                confidence: 'reported',
+                referenceNote: 'Explicitly reported as not implemented'
+              })
+            }
+            continue
+          }
+
+          // 5. Test observed / test claims
+          const hasTestsPassed = /(?:tests?\s+(?:[a-z0-9_,-]+\s+)?passed|passed\s+\d+\s+tests?|test\s+suite\s+passed|all\s+tests\s+pass)/i.test(
+            sentence
+          )
+
+          // 6. Active implementation verbs
+          const hasActiveImplementation =
+            /(?:^|\b)(?:i\s+(?:have\s+)?(?:implemented|fixed|updated|patched|resolved|created)|(?:implemented|fixed|updated|patched|resolved|created)\s+(?:the|a|support|handling|logic|engine|system|behavior|bug|issue|crash|race))/i.test(
+              sentence
+            ) && !hasAdjectiveFixed
+
+          if (hasActiveImplementation) {
+            const claim = sentence.slice(0, 160)
+            if (!seenClaims.has(claim)) {
+              seenClaims.add(claim)
+              items.push({
+                id: `ledger-${computeContentHash(claim)}`,
+                category: 'reported_implementation',
+                claim,
+                sourceTurnId: visibleTurnLabel,
+                confidence: 'reported',
+                referenceNote: 'Reported in assistant dialogue (claim; unverified)'
+              })
+            }
+          }
+
+          if (hasTestsPassed) {
+            const claim = sentence.slice(0, 160)
+            const testKey = `test-${claim}`
+            if (!seenClaims.has(testKey)) {
+              seenClaims.add(testKey)
+              items.push({
+                id: `ledger-${computeContentHash(testKey)}`,
+                category: 'test_observed',
+                claim,
+                sourceTurnId: visibleTurnLabel,
+                confidence: 'reported',
+                referenceNote: 'Reported test result in dialogue (claim; unverified)'
+              })
+            }
+          }
+
+          // 7. Proposals
+          const proposalMatch = sentence.match(/(?:we should|i propose|i recommend|next step is to|suggest using)\s+([^.\n]+)/i)
+          if (proposalMatch && !hasActiveImplementation) {
+            const claim = proposalMatch[0].trim().slice(0, 160)
+            if (!seenClaims.has(claim)) {
+              seenClaims.add(claim)
+              items.push({
+                id: `ledger-${computeContentHash(claim)}`,
+                category: 'assistant_proposal',
+                claim,
+                sourceTurnId: visibleTurnLabel,
+                confidence: 'inferred'
+              })
+            }
           }
         }
       }
     }
   })
 
-  // Return prioritized recent items (up to 12)
-  return items.slice(-12)
+  return items.slice(0, 12)
 }
 
 /**
- * Extracts the latest referenced code artifact from the conversation without claiming it is working.
+ * Extracts the latest referenced code artifact or technical brief from the conversation without claiming it is working.
  */
 export function extractLatestReferencedCodeArtifact(turns: ConversationTurn[]): {
   lang: string
   code: string
   preview: string
   sourceTurnId: string
+  isInstructionBrief?: boolean
 } | null {
   for (let i = turns.length - 1; i >= 0; i--) {
     const turn = turns[i]
@@ -518,11 +677,17 @@ export function extractLatestReferencedCodeArtifact(turns: ConversationTurn[]): 
         const b = turn.blocks[j]
         if (b.type === 'code' && b.text.length > 30) {
           const firstLine = b.text.split('\n')[0].slice(0, 60)
+          const isInstruction =
+            b.language === 'markdown' ||
+            b.language === 'text' ||
+            /^(?:Implement\s+|#\s+|OBJECTIVE|INSTRUCTIONS)/i.test(b.text.trim())
+
           return {
             lang: b.language || 'code',
             code: b.text,
             preview: firstLine || `${b.language || 'code'} snippet`,
-            sourceTurnId: turn.id
+            sourceTurnId: `${i + 1} (${turn.id})`,
+            isInstructionBrief: isInstruction
           }
         }
       }
@@ -539,7 +704,10 @@ export function extractFullLatestUserRequest(turns: ConversationTurn[]): string 
     if (turns[i].sourceRole === 'user') {
       const texts = turns[i].blocks.filter((b) => b.type === 'text').map((b) => (b as ContentBlockText).text)
       const full = texts.join('\n').trim()
-      if (full) return full
+      if (full) {
+        const { promptText } = separateAttachmentsFromUserPrompt(full)
+        return promptText || full
+      }
     }
   }
   return ''
@@ -574,6 +742,16 @@ export function deriveContinuationObjectiveContext(
 ): ContinuationObjectiveContext {
   const literalUserRequest = extractFullLatestUserRequest(turns)
 
+  let latestUserIdx = -1
+  for (let i = turns.length - 1; i >= 0; i--) {
+    if (turns[i].sourceRole === 'user') {
+      latestUserIdx = i
+      break
+    }
+  }
+
+  const hasSubsequentAssistantResponse = latestUserIdx >= 0 && latestUserIdx < turns.length - 1
+
   const isMeta =
     !literalUserRequest ||
     (literalUserRequest.length < 80 &&
@@ -586,8 +764,10 @@ export function deriveContinuationObjectiveContext(
     if (turns[i].sourceRole === 'user') {
       const texts = turns[i].blocks.filter((b) => b.type === 'text').map((b) => (b as ContentBlockText).text)
       const joined = texts.join('\n').trim()
-      if (joined.length > 30 && !/(?:what to tell|continue|next|proceed|what should)/i.test(joined)) {
-        substantiveGoal = joined
+      const { promptText } = separateAttachmentsFromUserPrompt(joined)
+      const cand = promptText || joined
+      if (cand.length > 30 && !/(?:what to tell|continue|next|proceed|what should)/i.test(cand)) {
+        substantiveGoal = cand
         break
       }
     }
@@ -597,6 +777,9 @@ export function deriveContinuationObjectiveContext(
   if (!topic && substantiveGoal) {
     topic = substantiveGoal.split('\n')[0].slice(0, 100).trim()
   }
+  if (!topic && literalUserRequest) {
+    topic = literalUserRequest.split('\n')[0].slice(0, 100).trim()
+  }
   if (!topic) {
     topic = 'Nexus AI Continuation & Engineering Task'
   }
@@ -605,7 +788,10 @@ export function deriveContinuationObjectiveContext(
   let statusAtCapture = 'Active user directive pending execution.'
   let nextImmediateAction = extractNextActionCandidate(turns)
 
-  if (isMeta) {
+  if (hasSubsequentAssistantResponse) {
+    statusAtCapture = 'Assessment and response supplied in dialogue prior to capture.'
+    nextImmediateAction = 'Incoming agent to review dialogue assessment, check unverified claims, and await user feedback or revised input.'
+  } else if (isMeta) {
     contextualMeaning = substantiveGoal
       ? `The user requested instructions for an incoming AI to continue: "${substantiveGoal.split('\n')[0].slice(0, 160)}"`
       : 'The user requested continuation instructions for the ongoing engineering task.'
@@ -655,9 +841,9 @@ export function projectSnapshotToMarkdown(params: {
     })
   }
 
-  // Exact code deduplication across turns if enabled (only in brief and compact modes)
+  // Exact code deduplication across turns if enabled (only in compact mode)
   let omissions: string[] = []
-  if (deduplicateExactCode && mode !== 'transcript') {
+  if (deduplicateExactCode && mode === 'compact') {
     const dedupRes = deduplicateExactCodeAcrossTurns(activeTurns)
     activeTurns = dedupRes.turns
     omissions = dedupRes.omissions
@@ -793,7 +979,8 @@ export function projectSnapshotToMarkdown(params: {
 
     const isInstructions =
       latestCodeArtifact &&
-      (latestCodeArtifact.lang === 'markdown' ||
+      (latestCodeArtifact.isInstructionBrief ||
+        latestCodeArtifact.lang === 'markdown' ||
         latestCodeArtifact.lang === 'text' ||
         /^(?:Implement\s+|#\s+|OBJECTIVE|INSTRUCTIONS)/i.test(latestCodeArtifact.code))
 
@@ -802,10 +989,8 @@ export function projectSnapshotToMarkdown(params: {
           isInstructions
             ? `## 5. Latest Referenced Instructions / Technical Brief`
             : `## 5. Latest Referenced Code Artifact`,
-          `*Most recent assistant ${isInstructions ? 'instructions' : 'code snippet'} produced prior to handoff (source: Turn #${latestCodeArtifact.sourceTurnId}):*`,
-          `${getSafeMarkdownFence(latestCodeArtifact.code)}${latestCodeArtifact.lang}`,
-          latestCodeArtifact.code,
-          `${getSafeMarkdownFence(latestCodeArtifact.code)}\n`
+          `*Most recent assistant ${isInstructions ? 'technical brief' : 'code snippet'} produced prior to handoff (source: Turn #${latestCodeArtifact.sourceTurnId}):*`,
+          `${getSafeMarkdownFence(latestCodeArtifact.code)}${latestCodeArtifact.lang || ''}\n${latestCodeArtifact.code}\n${getSafeMarkdownFence(latestCodeArtifact.code)}\n`
         ].join('\n')
       : ''
 

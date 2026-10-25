@@ -164,6 +164,59 @@ export function buildContextExtractorScript(): string {
             return
           }
 
+          // Tool results, tool executions, document viewers, file viewers
+          if (
+            elem.matches &&
+            elem.matches(
+              '[data-tool-result], [data-is-tool="true"], [data-tool-call], [class*="tool-result"], [class*="tool-output"], [class*="tool-execution"], [class*="document-viewer"], [class*="file-viewer"], [class*="artifact-viewer"], [class*="file-editor"], [class*="command-execution"], [class*="terminal"]'
+            )
+          ) {
+            flushTextBuffer()
+            // 1. Extract provenance / title (e.g. "Ran commands", "Write filename.ext")
+            let title = ''
+            const headerEl = elem.querySelector('[class*="header"], [class*="title"], [class*="name"], summary')
+            if (headerEl) {
+              const hClone = headerEl.cloneNode(true) as HTMLElement
+              hClone.querySelectorAll('button, [role="button"], .copy-button, [class*="badge"], [class*="pill"]').forEach((b) => b.remove())
+              title = (hClone.textContent || '').trim().replace(/\s+/g, ' ')
+            }
+            if (!title) {
+              const firstLine = (elem.innerText || elem.textContent || '').split('\n')[0].trim()
+              if (/^(?:Ran commands|Write|Read|Execute|Bash|Terminal)/i.test(firstLine)) {
+                title = firstLine.replace(/\s+/g, ' ').slice(0, 100)
+              }
+            }
+
+            // 2. Extract content (from pre, code, textarea, or content container)
+            const contentEl = elem.querySelector('pre, code, textarea, [class*="content"], [class*="output"], [class*="body"]')
+            let toolContent = ''
+            if (contentEl) {
+              toolContent = (contentEl.textContent || '').trim()
+            } else {
+              const eClone = elem.cloneNode(true) as HTMLElement
+              eClone.querySelectorAll('button, [role="button"], .copy-button, [class*="header"], [class*="title"], [class*="badge"]').forEach((x) => x.remove())
+              toolContent = (eClone.textContent || '').trim()
+            }
+
+            if (toolContent) {
+              const fileMatch = title.match(/(?:Write|Read|File:?)\s+([a-zA-Z0-9_\-./]+\.[a-zA-Z0-9]+)/i)
+              if (fileMatch) {
+                const fname = fileMatch[1].trim()
+                blocks.push({
+                  type: 'attachment',
+                  name: fname,
+                  availability: 'included'
+                })
+              }
+
+              blocks.push({
+                type: 'tool-result',
+                text: title ? `### ${title}\n\n${toolContent}` : toolContent
+              })
+            }
+            return // Do NOT recurse into tool children to prevent button noise leakage
+          }
+
           // Code blocks (<pre>)
           if (tag === 'pre') {
             flushTextBuffer()
@@ -180,11 +233,42 @@ export function buildContextExtractorScript(): string {
               (codeEl.getAttribute('data-lang') || elem.getAttribute('data-lang') || (langContainer ? (langContainer as HTMLElement).getAttribute('data-lang') : '') || '').match(/^([a-zA-Z0-9_-]+)$/)
             let lang = langMatch ? langMatch[1].toLowerCase() : undefined
 
+            if (!lang && elem.parentElement) {
+              const headerEl = elem.parentElement.querySelector('.code-header, [class*="header"], [class*="title"], [class*="toolbar"]')
+              if (headerEl) {
+                const headerText = (headerEl.textContent || '').trim().toLowerCase()
+                const knownLangMatch = headerText.match(/\b(json|javascript|typescript|bash|sh|shell|python|py|html|css|sql|diff|markdown|rust|go|c|cpp|yaml|yml)\b/i)
+                if (knownLangMatch) {
+                  lang = knownLangMatch[1].toLowerCase()
+                  if (lang === 'sh' || lang === 'shell') lang = 'bash'
+                  if (lang === 'js') lang = 'javascript'
+                  if (lang === 'ts') lang = 'typescript'
+                  if (lang === 'py') lang = 'python'
+                }
+              }
+            }
+
             const rawCode = (codeEl.textContent || elem.textContent || '').replace(/\r\n/g, '\n').replace(/^\n+|\n+$/g, '')
             if (rawCode) {
-              // Heuristic: if lang is missing or plain code, and text is instruction prompt (e.g. Turn 45)
-              if (!lang && /^(?:Implement\s+|#\s+|OBJECTIVE|INSTRUCTIONS)/i.test(rawCode) && !/[{};=><]/.test(rawCode.slice(0, 100))) {
-                lang = 'markdown'
+              if (!lang) {
+                const trimmed = rawCode.trim()
+                if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
+                  try {
+                    JSON.parse(trimmed)
+                    lang = 'json'
+                  } catch {
+                    // Not valid JSON
+                  }
+                }
+                if (!lang) {
+                  if (/(?:console\.(?:log|error|warn)|document\.querySelector|window\.|copy\(|localStorage|JSON\.stringify)/.test(rawCode)) {
+                    lang = 'javascript'
+                  } else if (/^(?:\$|npm|pnpm|yarn|git|cd|cat|ls|mkdir|node|python3?|vitest)\s+/m.test(rawCode)) {
+                    lang = 'bash'
+                  } else if (/^(?:Implement\s+|#\s+|OBJECTIVE|INSTRUCTIONS)/i.test(trimmed) && !/[{};=><]/.test(trimmed.slice(0, 100))) {
+                    lang = 'markdown'
+                  }
+                }
               }
 
               // Deduplicate immediate identical sibling within same widget
@@ -204,8 +288,9 @@ export function buildContextExtractorScript(): string {
           if (
             elem.matches &&
             elem.matches(
-              '[data-testid*="attachment"], [class*="attachment"], [class*="file-chip"], [class*="file-badge"], a[download]'
-            )
+              '[data-testid*="attachment"], [class*="attachment"], [class*="file-chip"], [class*="file-badge"]'
+            ) &&
+            tag !== 'a'
           ) {
             const chipText = (elem.innerText || elem.textContent || '').trim()
             if (chipText && chipText.length > 1) {
@@ -302,18 +387,71 @@ export function buildContextExtractorScript(): string {
           // Links (<a>)
           if (tag === 'a') {
             const href = elem.getAttribute('href') || ''
+            const downloadAttr = elem.getAttribute('download') || elem.getAttribute('data-download') || ''
+            const filePathAttr = elem.getAttribute('data-filepath') || elem.getAttribute('data-path') || elem.getAttribute('data-url') || elem.getAttribute('data-artifact-name') || ''
             const text = (elem.textContent || '').trim()
-            if (href && !href.startsWith('#') && !href.startsWith('javascript:')) {
-              appendText(' [' + (text || href) + '](' + href + ') ')
+
+            const dest = filePathAttr || downloadAttr || href
+
+            if (downloadAttr || /\.(?:md|txt|ts|tsx|js|jsx|json|py|zip|patch|diff)\b/i.test(text)) {
+              const fileName = downloadAttr || text
               blocks.push({
-                type: 'link',
-                label: text || href,
-                destination: href
+                type: 'attachment',
+                name: fileName,
+                availability: 'included',
+                path: dest
               })
+            }
+
+            if (dest && !dest.startsWith('#') && !dest.startsWith('javascript:')) {
+              if (dest.startsWith('blob:') || dest.startsWith('data:')) {
+                const label = text || downloadAttr || filePathAttr || 'Download'
+                const display = downloadAttr || filePathAttr ? `${label} (${downloadAttr || filePathAttr})` : label
+                appendText(` [${display} (local session-scoped; requires separate attachment)](${dest.slice(0, 50)}) `)
+                blocks.push({
+                  type: 'link',
+                  label: display,
+                  destination: dest
+                })
+              } else {
+                appendText(` [${text || dest}](${dest}) `)
+                blocks.push({
+                  type: 'link',
+                  label: text || dest,
+                  destination: dest
+                })
+              }
             } else if (text) {
-              appendText(' ' + text + ' ')
+              if (/^(?:Open|Download|View)\s+/i.test(text) || /\.(?:md|txt|ts|js|json|zip)\b/i.test(text)) {
+                appendText(` [${text} (session-only reference; separate attachment required)] `)
+                blocks.push({
+                  type: 'link',
+                  label: text,
+                  destination: 'session-only reference (separate attachment required)'
+                })
+              } else {
+                appendText(' ' + text + ' ')
+              }
             }
             return
+          }
+
+          // Artifact / Download Buttons
+          if (tag === 'button' || elem.getAttribute('role') === 'button') {
+            const downloadAttr = elem.getAttribute('download') || elem.getAttribute('data-download') || ''
+            const filePathAttr = elem.getAttribute('data-filepath') || elem.getAttribute('data-path') || elem.getAttribute('data-url') || elem.getAttribute('data-artifact-name') || ''
+            const text = (elem.textContent || '').trim()
+            if (downloadAttr || filePathAttr || /^(?:Open|Download)\s+(?:the\s+)?(?:[a-zA-Z0-9_\-\s]+review|[a-zA-Z0-9_\-./]+\.[a-zA-Z0-9]+)/i.test(text)) {
+              const dest = filePathAttr || downloadAttr || 'session-download'
+              const label = text || downloadAttr || filePathAttr || 'Download'
+              appendText(` [${label} (session reference)](${dest}) `)
+              blocks.push({
+                type: 'link',
+                label,
+                destination: dest
+              })
+              return
+            }
           }
 
           // Inline formatting tags

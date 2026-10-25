@@ -17,7 +17,8 @@ import {
   getSafeMarkdownFence,
   estimateTokens,
   stripUiNoiseSafe,
-  stripConversationalFluffSafe
+  stripConversationalFluffSafe,
+  separateAttachmentsFromUserPrompt
 } from './contextSnapshot'
 
 export { estimateTokens }
@@ -396,7 +397,9 @@ export function extractNextImmediateAction(turns: DialogueTurn[]): string {
     if (turns[i].role === 'user') {
       const clean = turns[i].text.trim()
       if (clean) {
-        return clean.length > 300 ? clean.slice(0, 300) + '...' : clean
+        const { promptText } = separateAttachmentsFromUserPrompt(clean)
+        const target = promptText || clean
+        return target.length > 300 ? target.slice(0, 300) + '...' : target
       }
     }
   }
@@ -469,8 +472,8 @@ export function buildAgentHandoffPrompt(params: {
     }
   })
 
-  // 3. Exact code deduplication
-  if (deduplicateCode) {
+  // 3. Exact code deduplication (only when enabled and not in full clean archive mode)
+  if (deduplicateCode && mode !== 'clean') {
     turns = deduplicateCodeAcrossTurns(turns)
   }
 
