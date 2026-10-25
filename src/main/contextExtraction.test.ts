@@ -122,4 +122,112 @@ console.log(items[0]);</code></pre>
       expect(payload.turns[0].sourceRole).toBe('unknown')
     }
   })
+
+  it('R01 & R02: Nested pre or code wrapper emits exactly one code block and preserves in-place order', () => {
+    const html = `
+      <main>
+        <div data-agent-transcript-message="true" data-chat-message-id="arena-order-1">
+          <div data-user-message-layout="true">
+            <p>Step 1: Inspect environment</p>
+            <pre class="outer-wrapper"><pre class="language-bash"><code>uname -a</code></pre></pre>
+            <p>Step 2: Run test</p>
+            <pre class="code-container"><code>npm test</code></pre>
+            <p>Step 3: Review table results</p>
+            <table>
+              <tr><th>Test</th><th>Status</th></tr>
+              <tr><td>R01</td><td>PASS</td></tr>
+            </table>
+            <p>Step 4: Attach <button class="file-chip">results.txt</button> and report.</p>
+          </div>
+        </div>
+      </main>
+    `
+    const payload = runExtractorInDOM(html, 'https://arena.ai/agent/task-order')
+    expect(payload.success).toBe(true)
+    expect(payload.turns.length).toBe(1)
+    const blocks = payload.turns[0].blocks
+
+    // Assert exact in-place sequence:
+    // Text (Step 1) -> Code (uname -a) -> Text (Step 2) -> Code (npm test) -> Text (Step 3 + table) -> Attachment (results.txt) -> Text (Step 4)
+    expect(blocks[0].type).toBe('text')
+    expect(blocks[0].text).toContain('Step 1: Inspect environment')
+
+    expect(blocks[1].type).toBe('code')
+    expect(blocks[1].text).toBe('uname -a')
+    expect(blocks[1].language).toBe('bash')
+
+    expect(blocks[2].type).toBe('text')
+    expect(blocks[2].text).toContain('Step 2: Run test')
+
+    expect(blocks[3].type).toBe('code')
+    expect(blocks[3].text).toBe('npm test')
+
+    // Table must be serialized as a Markdown table
+    const tableBlock = blocks.find((b) => b.type === 'text' && b.text?.includes('| Test | Status |'))
+    expect(tableBlock).toBeDefined()
+    expect(tableBlock?.text).toContain('| R01 | PASS |')
+
+    // Filename chip inside button must not vanish
+    const chipText = blocks.find((b) => b.type === 'text' && b.text?.includes('`results.txt`'))
+    expect(chipText).toBeDefined()
+    expect(chipText?.text).toContain('Attach  `results.txt` and report.')
+
+    // Attachment must be extracted as attachment block
+    const attachBlock = blocks.find((b) => b.type === 'attachment')
+    expect(attachBlock).toBeDefined()
+    expect(attachBlock?.name).toBe('results.txt')
+
+    // Code block count: exactly 2 (no duplicate pairs!)
+    const codeBlocks = blocks.filter((b) => b.type === 'code')
+    expect(codeBlocks.length).toBe(2)
+  })
+
+  it('R01 Fixture 2: Two distinct source pre elements with identical code preserve intentional repetitions in order', () => {
+    const html = `
+      <main>
+        <div data-agent-transcript-message="true" data-chat-message-id="arena-repeat-1">
+          <p>First invocation:</p>
+          <pre><code class="language-typescript">console.log("identical block");</code></pre>
+          <p>Second invocation:</p>
+          <pre><code class="language-typescript">console.log("identical block");</code></pre>
+          <p>Done.</p>
+        </div>
+      </main>
+    `
+    const payload = runExtractorInDOM(html, 'https://arena.ai/agent/task-repeat')
+    expect(payload.success).toBe(true)
+    const blocks = payload.turns[0].blocks
+
+    // Distinct separated source blocks must both be preserved
+    const codeBlocks = blocks.filter((b) => b.type === 'code')
+    expect(codeBlocks.length).toBe(2)
+    expect(codeBlocks[0].text).toBe('console.log("identical block");')
+    expect(codeBlocks[1].text).toBe('console.log("identical block");')
+
+    // Ordering: text -> code -> text -> code -> text
+    expect(blocks[0].type).toBe('text')
+    expect(blocks[0].text).toContain('First invocation:')
+    expect(blocks[1].type).toBe('code')
+    expect(blocks[2].type).toBe('text')
+    expect(blocks[2].text).toContain('Second invocation:')
+    expect(blocks[3].type).toBe('code')
+    expect(blocks[4].type).toBe('text')
+    expect(blocks[4].text).toContain('Done.')
+  })
+
+  it('R01 Fixture 3: Highlight spans inside code do not cause duplicate text', () => {
+    const html = `
+      <main>
+        <div data-agent-transcript-message="true" data-chat-message-id="arena-hl-1">
+          <pre><code class="language-javascript"><span class="token keyword">const</span> <span class="token variable">answer</span> = <span class="token number">42</span>;</code></pre>
+        </div>
+      </main>
+    `
+    const payload = runExtractorInDOM(html, 'https://arena.ai/agent/task-hl')
+    expect(payload.success).toBe(true)
+    const codeBlock = payload.turns[0].blocks.find((b) => b.type === 'code')
+    expect(codeBlock).toBeDefined()
+    expect(codeBlock?.text).toBe('const answer = 42;')
+    expect(codeBlock?.language).toBe('javascript')
+  })
 })

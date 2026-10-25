@@ -104,6 +104,38 @@ describe('contextSnapshot - Deduplication & Artifacts', () => {
     expect(labels).toContain('src/main/index.ts')
     expect(labels).toContain('bug-report.txt')
   })
+
+  it('R04: splits concatenated filenames and strips attached action verbs without corrupting README', () => {
+    const turns = [
+      {
+        id: 't-artifacts',
+        sourceRole: 'user' as const,
+        roleEvidence: 'user',
+        status: 'complete' as const,
+        blocks: [
+          {
+            type: 'text' as const,
+            text: 'I ran Readaaaaaaaa.txt and inspected README.md and attached nexus_electron_part1_of_1_codebase.txtnexus-agent-handoff-arena-ai-2026-10-24.md for review.'
+          }
+        ]
+      }
+    ]
+
+    const artifacts = detectArtifactsFromTurns(turns)
+    const labels = artifacts.map((a) => a.label)
+
+    // Attached action verb 'Read' stripped from aaaaaaaa.txt
+    expect(labels).toContain('aaaaaaaa.txt')
+    expect(labels).not.toContain('Readaaaaaaaa.txt')
+
+    // Standard README.md must NOT be stripped to ME.md
+    expect(labels).toContain('README.md')
+
+    // Concatenated filenames must be split into two distinct artifacts
+    expect(labels).toContain('nexus_electron_part1_of_1_codebase.txt')
+    expect(labels).toContain('nexus-agent-handoff-arena-ai-2026-10-24.md')
+    expect(labels).not.toContain('nexus_electron_part1_of_1_codebase.txtnexus-agent-handoff-arena-ai-2026-10-24.md')
+  })
 })
 
 describe('contextSnapshot - Provenance Ledger & Projections', () => {
@@ -211,5 +243,77 @@ describe('contextSnapshot - Provenance Ledger & Projections', () => {
     expect(result.prompt).toContain('### Turn 2 (ASSISTANT)')
     expect(result.prompt).toContain('### Turn 3 (USER)')
     expect(result.prompt).toContain('scrollIntoView()')
+  })
+
+  it('R06: "it worked ." is categorized as user_confirmed, NOT user_request', () => {
+    const turns = [
+      {
+        id: 'turn-confirm',
+        sourceRole: 'user' as const,
+        roleEvidence: 'user',
+        status: 'complete' as const,
+        blocks: [{ type: 'text' as const, text: 'it worked .' }]
+      }
+    ]
+    const ledger = buildProvenanceLedger(turns)
+    const confirmed = ledger.find((l) => l.category === 'user_confirmed')
+    const userReq = ledger.find((l) => l.category === 'user_request')
+
+    expect(confirmed).toBeDefined()
+    expect(confirmed?.claim).toContain('it worked')
+    expect(userReq).toBeUndefined()
+  })
+
+  it('R05: meta follow-up "what to tell the ai ?" generates contextual meaning while preserving literal request', () => {
+    const metaSnapshot: ConversationSnapshot = {
+      ...sampleSnapshot,
+      turns: [
+        {
+          id: 'turn-user-initial',
+          sourceRole: 'user',
+          roleEvidence: 'user',
+          status: 'complete',
+          blocks: [
+            { type: 'text', text: 'Please implement the prompt navigation and tab discard repairs.' }
+          ]
+        },
+        {
+          id: 'turn-asst-instructions',
+          sourceRole: 'assistant',
+          roleEvidence: 'assistant',
+          status: 'complete',
+          blocks: [
+            { type: 'text', text: 'Here are the instructions to give the incoming AI.' },
+            { type: 'code', language: 'markdown', text: 'Implement the Nexus Export Context improvements.\nOBJECTIVE: Make Export Context produce faithful output.', contentHash: 'hash-inst-1' }
+          ]
+        },
+        {
+          id: 'turn-user-meta',
+          sourceRole: 'user',
+          roleEvidence: 'user',
+          status: 'complete',
+          blocks: [
+            { type: 'text', text: 'what to tell the ai ?' }
+          ]
+        }
+      ]
+    }
+
+    const result = projectSnapshotToMarkdown({
+      snapshot: metaSnapshot,
+      options: { mode: 'brief' }
+    })
+
+    // Preserves literal user request
+    expect(result.prompt).toContain('what to tell the ai ?')
+
+    // Derives contextual meaning and status
+    expect(result.prompt).toContain('Contextual Meaning (inferred; review before use)')
+    expect(result.prompt).toContain('Implementation Status at Capture')
+
+    // Coverage notice is explicit
+    expect(result.prompt).toContain('Coverage Notice')
+    expect(result.prompt).toContain('mounted turns')
+    expect(result.prompt).toContain('Full history completeness is unverified')
   })
 })

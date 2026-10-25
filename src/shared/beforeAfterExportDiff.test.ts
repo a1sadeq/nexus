@@ -85,6 +85,17 @@ describe('Before & After Export Comparison on Realistic Transcript', () => {
     expect(repairedBrief.prompt).toContain('padding[1]')
     expect(repairedBrief.prompt).toContain('10:45 AM')
     expect(repairedBrief.prompt).toContain('calculateAlignment')
+    // Exactly 1 code block emitted: NO within-turn duplicate pairs!
+    expect(repairedBrief.stats.codeBlockCount).toBe(1)
+
+    // 2b. In-place block ordering verified: inside dialogue transcript, prose before code -> code -> prose after code
+    const transcriptPart = repairedBrief.prompt.slice(repairedBrief.prompt.indexOf('<historical_transcript'))
+    const prose1Idx = transcriptPart.indexOf('I propose updating the prompt navigation engine')
+    const codeIdx = transcriptPart.indexOf('export function calculateAlignment')
+    const prose2Idx = transcriptPart.indexOf('Implemented bounded eviction with 30-second delay')
+    expect(prose1Idx).toBeGreaterThan(0)
+    expect(codeIdx).toBeGreaterThan(prose1Idx)
+    expect(prose2Idx).toBeGreaterThan(codeIdx)
 
     // 3. Workspace UI and draft completely isolated
     expect(repairedBrief.prompt).not.toContain('Workspace11.4MB')

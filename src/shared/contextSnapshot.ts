@@ -291,7 +291,7 @@ export function deduplicateExactCodeAcrossTurns(turns: ConversationTurn[]): {
         )
         return {
           type: 'text' as const,
-          text: `/* [Identical code block omitted — identical to Turn #${finalTurn + 1}] */`
+          text: `/* [Identical code block omitted — identical to Turn #${finalTurn + 1} (${b.language || 'code'}, hash ${b.contentHash.slice(0, 8)})] */`
         }
       }
       return b
@@ -307,6 +307,19 @@ export function deduplicateExactCodeAcrossTurns(turns: ConversationTurn[]): {
 }
 
 /**
+ * Splits concatenated filenames or attached verbs safely without corrupting README.
+ */
+function cleanFileCandidate(cand: string): string[] {
+  let base = cand
+  if (!base.toUpperCase().startsWith('README')) {
+    const verbMatch = base.match(/^(?:Read|Open|Attach|View|Load|In|The)([a-zA-Z0-9_\-./]+\.[a-zA-Z0-9]+)$/i)
+    if (verbMatch) base = verbMatch[1]
+  }
+  const extRegex = /(?<=\.(?:ts|tsx|js|jsx|json|html|css|scss|md|txt|py|go|rs|cpp|c|h|yaml|yml|toml|sql|sh|env))(?=[a-zA-Z0-9_\-])/g
+  return base.split(extRegex)
+}
+
+/**
  * Extracts referenced artifacts and attachments with their provenance.
  */
 export function detectArtifactsFromTurns(turns: ConversationTurn[]): ArtifactReference[] {
@@ -319,38 +332,51 @@ export function detectArtifactsFromTurns(turns: ConversationTurn[]): ArtifactRef
   turns.forEach((turn) => {
     for (const b of turn.blocks) {
       if (b.type === 'attachment') {
-        const key = b.name.toLowerCase()
-        if (!seenPaths.has(key)) {
-          seenPaths.add(key)
-          artifacts.push({
-            id: `art-${computeContentHash(b.name)}`,
-            label: b.name,
-            kind: 'attachment',
-            sourceTurnId: turn.id,
-            availability: b.availability,
-            pathOrLink: b.path
-          })
+        const splitNames = cleanFileCandidate(b.name)
+        for (const name of splitNames) {
+          const trimmed = name.trim()
+          if (!trimmed) continue
+          const key = trimmed.toLowerCase()
+          if (!seenPaths.has(key)) {
+            seenPaths.add(key)
+            let kind: ArtifactReference['kind'] = 'attachment'
+            if (trimmed.endsWith('.patch') || trimmed.includes('diff')) kind = 'patch'
+            else if (trimmed.endsWith('.md') || trimmed.endsWith('.txt')) kind = 'report'
+            artifacts.push({
+              id: `art-${computeContentHash(trimmed)}`,
+              label: trimmed,
+              kind,
+              sourceTurnId: turn.id,
+              availability: b.availability,
+              pathOrLink: b.path
+            })
+          }
         }
       } else if (b.type === 'text') {
         let match: RegExpExecArray | null
         while ((match = fileRegex.exec(b.text)) !== null) {
-          const candidate = match[1].trim()
-          if (!candidate.startsWith('http') && !candidate.startsWith('www.') && !candidate.includes('example.com') && candidate.length > 3) {
-            const key = candidate.toLowerCase()
-            if (!seenPaths.has(key)) {
-              seenPaths.add(key)
-              let kind: ArtifactReference['kind'] = 'source'
-              if (candidate.endsWith('.patch') || candidate.includes('diff')) kind = 'patch'
-              else if (candidate.endsWith('.md') || candidate.endsWith('.txt')) kind = 'report'
+          const rawCand = match[1].trim()
+          if (!rawCand.startsWith('http') && !rawCand.startsWith('www.') && !rawCand.includes('example.com') && rawCand.length > 3) {
+            const splitCands = cleanFileCandidate(rawCand)
+            for (const candidate of splitCands) {
+              const trimmed = candidate.trim()
+              if (!trimmed || trimmed.length <= 3) continue
+              const key = trimmed.toLowerCase()
+              if (!seenPaths.has(key)) {
+                seenPaths.add(key)
+                let kind: ArtifactReference['kind'] = 'source'
+                if (trimmed.endsWith('.patch') || trimmed.includes('diff')) kind = 'patch'
+                else if (trimmed.endsWith('.md') || trimmed.endsWith('.txt')) kind = 'report'
 
-              artifacts.push({
-                id: `art-${computeContentHash(candidate)}`,
-                label: candidate,
-                kind,
-                sourceTurnId: turn.id,
-                availability: 'reference-only',
-                pathOrLink: candidate
-              })
+                artifacts.push({
+                  id: `art-${computeContentHash(trimmed)}`,
+                  label: trimmed,
+                  kind,
+                  sourceTurnId: turn.id,
+                  availability: 'reference-only',
+                  pathOrLink: trimmed
+                })
+              }
             }
           }
         }
@@ -401,8 +427,10 @@ export function buildProvenanceLedger(turns: ConversationTurn[]): TaskStatusLedg
       const text = b.text
 
       if (turn.sourceRole === 'user') {
-        // Look for user confirmations
-        const confirmMatch = text.match(/(?:it works|that worked|verified|fixed now|looks good|confirmed|test passed)/i)
+        // Look for user confirmations first (must NOT fall through to user request)
+        const confirmMatch = text.match(
+          /(?:it worked|it works|that worked|that works|verified|fixed now|looks good|confirmed|test passed|all tests pass)/i
+        )
         if (confirmMatch) {
           const sentence = text.split('\n')[0].slice(0, 140).trim()
           if (!seenClaims.has(sentence)) {
@@ -415,6 +443,7 @@ export function buildProvenanceLedger(turns: ConversationTurn[]): TaskStatusLedg
               confidence: 'confirmed'
             })
           }
+          continue
         }
 
         // Look for user request / constraints
@@ -469,7 +498,8 @@ export function buildProvenanceLedger(turns: ConversationTurn[]): TaskStatusLedg
     }
   })
 
-  return items.slice(0, 10)
+  // Return prioritized recent items (up to 12)
+  return items.slice(-12)
 }
 
 /**
@@ -527,6 +557,75 @@ export function extractNextActionCandidate(turns: ConversationTurn[]): string {
   return 'Continue working on the ongoing engineering task.'
 }
 
+export interface ContinuationObjectiveContext {
+  topic: string
+  literalUserRequest: string
+  contextualMeaning: string
+  statusAtCapture: string
+  nextImmediateAction: string
+}
+
+/**
+ * Derives contextual meaning and active task goals when the latest user request is brief or a meta follow-up.
+ */
+export function deriveContinuationObjectiveContext(
+  turns: ConversationTurn[],
+  tabTitle?: string
+): ContinuationObjectiveContext {
+  const literalUserRequest = extractFullLatestUserRequest(turns)
+
+  const isMeta =
+    !literalUserRequest ||
+    (literalUserRequest.length < 80 &&
+      /(?:what to tell|continue|next|proceed|what should|what next|what do i do|what's next|how to proceed|tell the ai|how to start)/i.test(
+        literalUserRequest
+      ))
+
+  let substantiveGoal = ''
+  for (let i = turns.length - 1; i >= 0; i--) {
+    if (turns[i].sourceRole === 'user') {
+      const texts = turns[i].blocks.filter((b) => b.type === 'text').map((b) => (b as ContentBlockText).text)
+      const joined = texts.join('\n').trim()
+      if (joined.length > 30 && !/(?:what to tell|continue|next|proceed|what should)/i.test(joined)) {
+        substantiveGoal = joined
+        break
+      }
+    }
+  }
+
+  let topic = tabTitle && tabTitle !== 'AI Chat' && tabTitle !== 'New Chat' ? tabTitle : ''
+  if (!topic && substantiveGoal) {
+    topic = substantiveGoal.split('\n')[0].slice(0, 100).trim()
+  }
+  if (!topic) {
+    topic = 'Nexus AI Continuation & Engineering Task'
+  }
+
+  let contextualMeaning = literalUserRequest || 'Continue working on the ongoing engineering task.'
+  let statusAtCapture = 'Active user directive pending execution.'
+  let nextImmediateAction = extractNextActionCandidate(turns)
+
+  if (isMeta) {
+    contextualMeaning = substantiveGoal
+      ? `The user requested instructions for an incoming AI to continue: "${substantiveGoal.split('\n')[0].slice(0, 160)}"`
+      : 'The user requested continuation instructions for the ongoing engineering task.'
+
+    statusAtCapture = 'Implementation specification supplied in dialogue; incoming agent assigned to execute changes and verify.'
+
+    if (substantiveGoal) {
+      nextImmediateAction = `Continue implementing the ongoing task: ${substantiveGoal.split('\n')[0].slice(0, 200)}`
+    }
+  }
+
+  return {
+    topic,
+    literalUserRequest,
+    contextualMeaning,
+    statusAtCapture,
+    nextImmediateAction
+  }
+}
+
 /**
  * Primary Snapshot to Markdown projection engine.
  */
@@ -556,9 +655,9 @@ export function projectSnapshotToMarkdown(params: {
     })
   }
 
-  // Exact code deduplication if enabled
+  // Exact code deduplication across turns if enabled (only in brief and compact modes)
   let omissions: string[] = []
-  if (deduplicateExactCode) {
+  if (deduplicateExactCode && mode !== 'transcript') {
     const dedupRes = deduplicateExactCodeAcrossTurns(activeTurns)
     activeTurns = dedupRes.turns
     omissions = dedupRes.omissions
@@ -566,12 +665,12 @@ export function projectSnapshotToMarkdown(params: {
 
   const artifacts = snapshot.artifacts && snapshot.artifacts.length > 0 ? snapshot.artifacts : detectArtifactsFromTurns(activeTurns)
   const ledger = buildProvenanceLedger(activeTurns)
-  const fullLatestUser = extractFullLatestUserRequest(activeTurns)
-  const currentObjective = options.userObjectiveOverride || fullLatestUser || 'Collaborative engineering and development task.'
-  const nextActionCandidate = options.userNextActionOverride || extractNextActionCandidate(activeTurns)
+  const ctx = deriveContinuationObjectiveContext(activeTurns, snapshot.source.title)
+  const currentObjective = options.userObjectiveOverride || ctx.contextualMeaning
+  const nextActionCandidate = options.userNextActionOverride || ctx.nextImmediateAction
   const latestCodeArtifact = extractLatestReferencedCodeArtifact(activeTurns)
 
-  // Serializer function for turn blocks to markdown
+  // Serializer function for turn blocks to markdown in exact DOM order
   function renderTurnBlocks(turn: ConversationTurn, isCompact: boolean): string {
     const lines: string[] = []
     for (const b of turn.blocks) {
@@ -640,13 +739,27 @@ export function projectSnapshotToMarkdown(params: {
   } else {
     // 3. Continuation Brief (Default)
     const providerLabel = snapshot.source.providerKey
+    const userTurnsCount = activeTurns.filter((t) => t.sourceRole === 'user').length
+    const assistantTurnsCount = activeTurns.filter((t) => t.sourceRole === 'assistant').length
+
+    const headerNotice = [
+      `# 🚀 AI AGENT CONTINUATION & SESSION HANDOFF CONTEXT`,
+      `> **Handoff Notice**: Context captured from active session with **${providerLabel}** at ${snapshot.capturedAt}. Incoming agent is assigned to continue with full awareness of task provenance.`,
+      `> **Coverage Notice**: Scope is \`${snapshot.coverage.scope}\` (${activeTurns.length} mounted turns: ${userTurnsCount} user / ${assistantTurnsCount} assistant). Full history completeness is unverified (only DOM-mounted turns captured; earlier conversation history may require scrolling in the provider webview to mount).`,
+      snapshot.coverage.warnings.length > 0
+        ? `> **Warnings**: ${snapshot.coverage.warnings.join('; ')}`
+        : ''
+    ].filter(Boolean).join('\n')
 
     const section1Objective = [
       `## 1. Current User Request & Objective`,
-      currentObjective,
-      fullLatestUser && fullLatestUser !== currentObjective
-        ? `\n### Full Latest User Request:\n> ${fullLatestUser.replace(/\n/g, '\n> ')}`
-        : ''
+      `**Current Topic:**`,
+      ctx.topic,
+      `\n**Latest Literal User Request:**`,
+      `> ${ctx.literalUserRequest || 'Continue working on the ongoing engineering task.'}`,
+      ctx.literalUserRequest && ctx.literalUserRequest !== currentObjective
+        ? `\n**Contextual Meaning (inferred; review before use):**\n${currentObjective}\n\n**Implementation Status at Capture:**\n${ctx.statusAtCapture}`
+        : `\n**Implementation Status at Capture:**\n${ctx.statusAtCapture}`
     ].filter(Boolean).join('\n')
 
     const section2Inputs = [
@@ -678,10 +791,18 @@ export function projectSnapshotToMarkdown(params: {
       `> ${nextActionCandidate}`
     ].join('\n')
 
+    const isInstructions =
+      latestCodeArtifact &&
+      (latestCodeArtifact.lang === 'markdown' ||
+        latestCodeArtifact.lang === 'text' ||
+        /^(?:Implement\s+|#\s+|OBJECTIVE|INSTRUCTIONS)/i.test(latestCodeArtifact.code))
+
     const section5LatestCode = latestCodeArtifact
       ? [
-          `## 5. Latest Referenced Code Artifact`,
-          `*Most recent assistant code snippet produced prior to handoff (source: Turn #${latestCodeArtifact.sourceTurnId}):*`,
+          isInstructions
+            ? `## 5. Latest Referenced Instructions / Technical Brief`
+            : `## 5. Latest Referenced Code Artifact`,
+          `*Most recent assistant ${isInstructions ? 'instructions' : 'code snippet'} produced prior to handoff (source: Turn #${latestCodeArtifact.sourceTurnId}):*`,
           `${getSafeMarkdownFence(latestCodeArtifact.code)}${latestCodeArtifact.lang}`,
           latestCodeArtifact.code,
           `${getSafeMarkdownFence(latestCodeArtifact.code)}\n`
@@ -709,9 +830,8 @@ export function projectSnapshotToMarkdown(params: {
     ].join('\n')
 
     finalPrompt = [
-      `# 🚀 AI AGENT CONTINUATION & SESSION HANDOFF CONTEXT`,
-      `> **Handoff Notice**: Context captured from active session with **${providerLabel}** at ${snapshot.capturedAt}. Incoming agent is assigned to continue with full awareness of task provenance.\n`,
-      section1Objective,
+      headerNotice,
+      `\n${section1Objective}`,
       `\n${section2Inputs}`,
       `\n${section3Ledger}`,
       `\n${section4Next}`,

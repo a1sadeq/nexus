@@ -64,9 +64,9 @@ export function buildContextExtractorScript(): string {
       function cleanProseNode(node: HTMLElement): string {
         if (!node) return ''
         const clone = node.cloneNode(true) as HTMLElement
-        // Strip interactive buttons, copy buttons, feedback icons, svgs, and pagination controls
+        // Strip copy buttons, feedback icons, svgs, and pagination controls
         clone.querySelectorAll(
-          'button, [role="button"], .copy-button, .feedback-button, svg, [aria-hidden="true"], [data-testid*="copy"], .citation-bubble, .citations, aside, [data-workspace], .composer, [contenteditable="true"]'
+          '.copy-button, .feedback-button, svg, [aria-hidden="true"], [data-testid*="copy"], .citation-bubble, .citations, aside, [data-workspace], .composer, [contenteditable="true"]'
         ).forEach((el) => el.remove())
 
         return (clone.innerText || clone.textContent || '').trim()
@@ -74,75 +74,281 @@ export function buildContextExtractorScript(): string {
 
       function extractBlocksFromElement(el: HTMLElement): RawExtractionBlock[] {
         const blocks: RawExtractionBlock[] = []
+        let currentTextBuffer: string[] = []
 
-        // Extract user-visible thinking / reasoning details first
-        const thoughtElements = el.querySelectorAll('[class*="thought"], [class*="thinking"], [class*="reasoning"], details')
-        const thoughtTexts: string[] = []
-        thoughtElements.forEach((thoughtEl) => {
-          const thoughtText = cleanProseNode(thoughtEl as HTMLElement)
-          if (thoughtText && thoughtText.length > 5) {
-            thoughtTexts.push(thoughtText)
+        function flushTextBuffer() {
+          const raw = currentTextBuffer.join('').replace(/\n{3,}/g, '\n\n').trim()
+          currentTextBuffer = []
+          if (raw) {
             blocks.push({
-              type: 'thought',
-              text: thoughtText
+              type: 'text',
+              text: raw
             })
           }
-        })
+        }
 
-        // Clone element to extract prose and code separately
-        const clone = el.cloneNode(true) as HTMLElement
+        function appendText(str: string) {
+          if (str) currentTextBuffer.push(str)
+        }
 
-        // Remove thought elements from clone so their text is not duplicated in prose
-        clone.querySelectorAll('[class*="thought"], [class*="thinking"], [class*="reasoning"], details').forEach((t) => t.remove())
+        function walk(node: Node) {
+          if (!node) return
 
-        // Remove interactive UI buttons
-        clone.querySelectorAll(
-          'button, [role="button"], .copy-button, .feedback-button, svg, [aria-hidden="true"], [data-testid*="copy"]'
-        ).forEach((b) => b.remove())
+          // 1. TEXT NODES
+          if (node.nodeType === 3 /* Node.TEXT_NODE */) {
+            const text = node.textContent || ''
+            if (!text) return
+            const collapsed = text.replace(/[\r\n\t]+/g, ' ')
+            if (collapsed.trim().length === 0) {
+              if (
+                currentTextBuffer.length > 0 &&
+                !currentTextBuffer[currentTextBuffer.length - 1].endsWith(' ') &&
+                !currentTextBuffer[currentTextBuffer.length - 1].endsWith('\n')
+              ) {
+                currentTextBuffer.push(' ')
+              }
+            } else {
+              if (
+                collapsed.startsWith(' ') &&
+                currentTextBuffer.length > 0 &&
+                !currentTextBuffer[currentTextBuffer.length - 1].endsWith(' ') &&
+                !currentTextBuffer[currentTextBuffer.length - 1].endsWith('\n')
+              ) {
+                currentTextBuffer.push(' ')
+              }
+              currentTextBuffer.push(collapsed.trim())
+              if (collapsed.endsWith(' ')) {
+                currentTextBuffer.push(' ')
+              }
+            }
+            return
+          }
 
-        // Extract code blocks (<pre><code>)
-        const codeNodes = clone.querySelectorAll('pre')
-        if (codeNodes.length > 0) {
-          codeNodes.forEach((pre) => {
-            const codeEl = pre.querySelector('code') || pre
-            const langClass = (codeEl.className || pre.className || '').match(/language-([a-zA-Z0-9_-]+)/)
-            const lang = langClass ? langClass[1] : ''
-            const codeText = codeEl.textContent || pre.textContent || ''
+          if (node.nodeType !== 1 /* Node.ELEMENT_NODE */) return
+          const elem = node as HTMLElement
+          const tag = (elem.tagName || '').toLowerCase()
 
-            if (codeText.trim()) {
+          // Exclusions: Scripts, styles, empty noscript
+          if (tag === 'script' || tag === 'style' || tag === 'noscript') return
+
+          // Action buttons: copy, feedback, share, retry
+          if (
+            elem.matches &&
+            elem.matches(
+              '.copy-button, [data-testid*="copy"], .feedback-button, [aria-label*="copy" i], [aria-label*="feedback" i], [aria-label*="thumbs" i], [aria-label*="share" i], [aria-label*="retry" i], [aria-label*="regenerate" i]'
+            )
+          ) {
+            return
+          }
+
+          // Workspace, composer, sidebars
+          if (elem.matches && elem.matches('aside, [data-workspace], .composer, [contenteditable="true"]')) {
+            return
+          }
+
+          // Hidden decoration elements
+          if (elem.getAttribute('aria-hidden') === 'true' && (!elem.textContent || !elem.textContent.trim())) {
+            return
+          }
+
+          // User-visible thinking / reasoning details
+          if (elem.matches && elem.matches('details, [class*="thought"], [class*="thinking"], [class*="reasoning"]')) {
+            flushTextBuffer()
+            const thoughtText = (elem.textContent || elem.innerText || '').trim()
+            if (thoughtText && thoughtText.length > 5) {
               blocks.push({
-                type: 'code',
-                language: lang || undefined,
-                text: codeText
+                type: 'thought',
+                text: thoughtText
               })
             }
-            pre.remove() // Remove pre from clone so remaining is prose
-          })
-        }
-
-        // Extract links
-        const linkNodes = clone.querySelectorAll('a[href]')
-        linkNodes.forEach((a) => {
-          const href = a.getAttribute('href') || ''
-          const label = (a.textContent || '').trim()
-          if (href && !href.startsWith('#') && !href.startsWith('javascript:')) {
-            blocks.push({
-              type: 'link',
-              label: label || href,
-              destination: href
-            })
+            return
           }
-        })
 
-        // Remaining prose
-        const remainingText = (clone.innerText || clone.textContent || '').trim()
-        if (remainingText) {
-          blocks.unshift({
-            type: 'text',
-            text: remainingText
-          })
+          // Code blocks (<pre>)
+          if (tag === 'pre') {
+            flushTextBuffer()
+            const codeEl = elem.querySelector('code') || elem
+            const langContainer =
+              (codeEl.closest && codeEl.closest('[class*="language-"], [class*="lang-"], [data-language], [data-lang]')) ||
+              (elem.querySelector && elem.querySelector('[class*="language-"], [class*="lang-"], [data-language], [data-lang]')) ||
+              codeEl
+            const combinedClasses = `${codeEl.className || ''} ${elem.className || ''} ${langContainer ? (langContainer as HTMLElement).className || '' : ''}`
+            const langMatch =
+              combinedClasses.match(/(?:language|lang)-([a-zA-Z0-9_-]+)/i) ||
+              combinedClasses.match(/\bhljs\s+([a-zA-Z0-9_-]+)\b/i) ||
+              (codeEl.getAttribute('data-language') || elem.getAttribute('data-language') || (langContainer ? (langContainer as HTMLElement).getAttribute('data-language') : '') || '').match(/^([a-zA-Z0-9_-]+)$/) ||
+              (codeEl.getAttribute('data-lang') || elem.getAttribute('data-lang') || (langContainer ? (langContainer as HTMLElement).getAttribute('data-lang') : '') || '').match(/^([a-zA-Z0-9_-]+)$/)
+            let lang = langMatch ? langMatch[1].toLowerCase() : undefined
+
+            const rawCode = (codeEl.textContent || elem.textContent || '').replace(/\r\n/g, '\n').replace(/^\n+|\n+$/g, '')
+            if (rawCode) {
+              // Heuristic: if lang is missing or plain code, and text is instruction prompt (e.g. Turn 45)
+              if (!lang && /^(?:Implement\s+|#\s+|OBJECTIVE|INSTRUCTIONS)/i.test(rawCode) && !/[{};=><]/.test(rawCode.slice(0, 100))) {
+                lang = 'markdown'
+              }
+
+              // Deduplicate immediate identical sibling within same widget
+              const last = blocks[blocks.length - 1]
+              if (!(last && last.type === 'code' && last.text === rawCode)) {
+                blocks.push({
+                  type: 'code',
+                  language: lang,
+                  text: rawCode
+                })
+              }
+            }
+            return // Do NOT recurse into pre children
+          }
+
+          // Attachment / File chips
+          if (
+            elem.matches &&
+            elem.matches(
+              '[data-testid*="attachment"], [class*="attachment"], [class*="file-chip"], [class*="file-badge"], a[download]'
+            )
+          ) {
+            const chipText = (elem.innerText || elem.textContent || '').trim()
+            if (chipText && chipText.length > 1) {
+              appendText(' `' + chipText + '` ')
+              blocks.push({
+                type: 'attachment',
+                name: chipText,
+                availability: 'reference-only'
+              })
+            }
+            return
+          }
+
+          // Tables (<table>)
+          if (tag === 'table') {
+            flushTextBuffer()
+            const rows = Array.from(elem.querySelectorAll('tr'))
+            if (rows.length > 0) {
+              const lines: string[] = []
+              rows.forEach((tr, rIdx) => {
+                const cells = Array.from(tr.querySelectorAll('th, td')).map((c) =>
+                  (c.textContent || '').trim().replace(/\|/g, '\\|')
+                )
+                if (cells.length > 0) {
+                  lines.push('| ' + cells.join(' | ') + ' |')
+                  if (rIdx === 0) {
+                    lines.push('| ' + cells.map(() => '---').join(' | ') + ' |')
+                  }
+                }
+              })
+              if (lines.length > 0) {
+                blocks.push({
+                  type: 'text',
+                  text: lines.join('\n')
+                })
+              }
+            }
+            return
+          }
+
+          // Headings (<h1> - <h6>)
+          if (/^h[1-6]$/.test(tag)) {
+            appendText('\n\n' + '#'.repeat(parseInt(tag[1])) + ' ')
+            for (let i = 0; i < elem.childNodes.length; i++) {
+              walk(elem.childNodes[i])
+            }
+            appendText('\n\n')
+            return
+          }
+
+          // Paragraphs (<p>)
+          if (tag === 'p') {
+            appendText('\n\n')
+            for (let i = 0; i < elem.childNodes.length; i++) {
+              walk(elem.childNodes[i])
+            }
+            appendText('\n\n')
+            return
+          }
+
+          // Blockquotes (<blockquote>)
+          if (tag === 'blockquote') {
+            appendText('\n\n> ')
+            for (let i = 0; i < elem.childNodes.length; i++) {
+              walk(elem.childNodes[i])
+            }
+            appendText('\n\n')
+            return
+          }
+
+          // Lists (<ul>, <ol>)
+          if (tag === 'ul' || tag === 'ol') {
+            appendText('\n')
+            const items = Array.from(elem.children).filter((c) => c.tagName.toLowerCase() === 'li')
+            items.forEach((li, idx) => {
+              appendText(tag === 'ul' ? '\n- ' : `\n${idx + 1}. `)
+              for (let i = 0; i < li.childNodes.length; i++) {
+                walk(li.childNodes[i])
+              }
+            })
+            appendText('\n\n')
+            return
+          }
+
+          // Inline Code (<code> outside <pre>)
+          if (tag === 'code') {
+            const inlineCode = (elem.textContent || '').trim()
+            if (inlineCode) {
+              appendText(' `' + inlineCode + '` ')
+            }
+            return
+          }
+
+          // Links (<a>)
+          if (tag === 'a') {
+            const href = elem.getAttribute('href') || ''
+            const text = (elem.textContent || '').trim()
+            if (href && !href.startsWith('#') && !href.startsWith('javascript:')) {
+              appendText(' [' + (text || href) + '](' + href + ') ')
+              blocks.push({
+                type: 'link',
+                label: text || href,
+                destination: href
+              })
+            } else if (text) {
+              appendText(' ' + text + ' ')
+            }
+            return
+          }
+
+          // Inline formatting tags
+          if (tag === 'strong' || tag === 'b') {
+            appendText(' **')
+            for (let i = 0; i < elem.childNodes.length; i++) walk(elem.childNodes[i])
+            appendText('** ')
+            return
+          }
+          if (tag === 'em' || tag === 'i') {
+            appendText(' *')
+            for (let i = 0; i < elem.childNodes.length; i++) walk(elem.childNodes[i])
+            appendText('* ')
+            return
+          }
+          if (tag === 'br') {
+            appendText('\n')
+            return
+          }
+          if (tag === 'hr') {
+            appendText('\n\n---\n\n')
+            return
+          }
+
+          // Generic containers (div, section, article, header, footer, etc.)
+          const isBlockContainer = ['div', 'section', 'article', 'header', 'footer'].includes(tag)
+          if (isBlockContainer) appendText('\n')
+          for (let i = 0; i < elem.childNodes.length; i++) {
+            walk(elem.childNodes[i])
+          }
+          if (isBlockContainer) appendText('\n')
         }
 
+        walk(el)
+        flushTextBuffer()
         return blocks
       }
 

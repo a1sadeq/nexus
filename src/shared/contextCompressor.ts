@@ -319,6 +319,16 @@ export function extractKeyDecisions(turns: DialogueTurn[]): string[] {
   return decisions.slice(0, 8)
 }
 
+function cleanFileCandidate(cand: string): string[] {
+  let base = cand
+  if (!base.toUpperCase().startsWith('README')) {
+    const verbMatch = base.match(/^(?:Read|Open|Attach|View|Load|In|The)([a-zA-Z0-9_\-./]+\.[a-zA-Z0-9]+)$/i)
+    if (verbMatch) base = verbMatch[1]
+  }
+  const extRegex = /(?<=\.(?:ts|tsx|js|jsx|json|html|css|scss|md|txt|py|go|rs|cpp|c|h|yaml|yml|toml|sql|sh|env))(?=[a-zA-Z0-9_\-])/g
+  return base.split(extRegex)
+}
+
 /**
  * Finds referenced file paths across turns.
  */
@@ -329,9 +339,15 @@ export function detectReferencedFiles(turns: DialogueTurn[]): string[] {
   for (const turn of turns) {
     let match: RegExpExecArray | null
     while ((match = fileRegex.exec(turn.text)) !== null) {
-      const candidate = match[1].trim()
-      if (!candidate.startsWith('http') && !candidate.startsWith('www.') && !candidate.includes('example.com') && candidate.length > 3) {
-        fileSet.add(candidate)
+      const rawCand = match[1].trim()
+      if (!rawCand.startsWith('http') && !rawCand.startsWith('www.') && !rawCand.includes('example.com') && rawCand.length > 3) {
+        const splitCands = cleanFileCandidate(rawCand)
+        for (const candidate of splitCands) {
+          const trimmed = candidate.trim()
+          if (trimmed && trimmed.length > 3) {
+            fileSet.add(trimmed)
+          }
+        }
       }
     }
   }
