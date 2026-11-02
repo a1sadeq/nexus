@@ -56,6 +56,8 @@ Expected for v1.0.2:
 ce152c15fa6d33ff6131251299102eff1c08e2d57209c4276a5cf274455d1d20
 ```
 
+The release also includes `SHA256SUMS-v1.0.2.txt` if you prefer to compare both files at once.
+
 ### Where Windows puts things
 
 | What | Path |
