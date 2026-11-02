@@ -1,3 +1,5 @@
+import { EventEmitter } from 'node:events'
+
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { join } from 'path'
 import { mkdtempSync, rmSync, existsSync, readFileSync } from 'fs'
@@ -16,7 +18,10 @@ function createMockView(id: string, options: {
   onSnapshotReject?: (reject: (err: Error) => void) => void
 } = {}): { view: DiscardableView; destroyed: boolean } {
   let destroyed = false
+  const events = new EventEmitter()
   const webContents: DiscardableWebContents = {
+    once: (name, fn) => events.once(name, fn),
+    removeListener: (name, fn) => events.removeListener(name, fn),
     getURL: () => options.url || `https://arena.ai/agent/${id}`,
     isLoading: () => !!options.isLoading,
     executeJavaScript: () => {
@@ -28,8 +33,9 @@ function createMockView(id: string, options: {
       }
       return Promise.resolve(120)
     },
-    destroy: () => {
+    close: () => {
       destroyed = true
+      events.emit('destroyed')
     },
     isDestroyed: () => destroyed
   }
@@ -115,7 +121,7 @@ describe('TabDiscardManager', () => {
     const manager = new TabDiscardManager({
       getUserDataDir: () => tempDir,
       clock: () => simulatedTime,
-      onTeardown: (_id, v) => v.webContents.destroy()
+      onTeardown: (_id, v) => v.webContents.close()
     })
     manager.init()
 
@@ -156,7 +162,7 @@ describe('TabDiscardManager', () => {
       getUserDataDir: () => tempDir,
       snapshotTimeoutMs: 50, // Short timeout for test
       clock: () => simulatedTime,
-      onTeardown: (_id, v) => v.webContents.destroy()
+      onTeardown: (_id, v) => v.webContents.close()
     })
     manager.init()
     manager.setPolicy({ maxActiveTabs: 1 })
@@ -185,7 +191,7 @@ describe('TabDiscardManager', () => {
     const manager = new TabDiscardManager({
       getUserDataDir: () => tempDir,
       clock: () => simulatedTime,
-      onTeardown: (_id, v) => v.webContents.destroy()
+      onTeardown: (_id, v) => v.webContents.close()
     })
     manager.init()
     manager.setPolicy({ tabDiscardMinutes: 60 }) // 1 hour
@@ -231,7 +237,7 @@ describe('TabDiscardManager', () => {
       getUserDataDir: () => tempDir,
       clock: () => simulatedTime,
       isPinned: (id) => pinnedSet.has(id),
-      onTeardown: (_id, v) => v.webContents.destroy()
+      onTeardown: (_id, v) => v.webContents.close()
     })
     manager.init()
     manager.setPolicy({ maxActiveTabs: 3 }) // 4 tabs resident, needs 1 evicted
@@ -257,7 +263,7 @@ describe('TabDiscardManager', () => {
     const manager = new TabDiscardManager({
       getUserDataDir: () => tempDir,
       clock: () => simulatedTime,
-      onTeardown: (_id, v) => v.webContents.destroy()
+      onTeardown: (_id, v) => v.webContents.close()
     })
     manager.init()
     manager.setPolicy({ maxActiveTabs: 1 })
@@ -278,3 +284,4 @@ describe('TabDiscardManager', () => {
     expect(manager.getEvictedTabState('tabA')).toBeUndefined()
   })
 })
+

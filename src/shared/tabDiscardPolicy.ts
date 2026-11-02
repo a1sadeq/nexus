@@ -5,6 +5,9 @@ export interface TabDiscardPolicy {
 }
 
 export interface TabDiscardStatus {
+  unavailableCount?: number
+  closingCount?: number
+  lastTeardownError?: string | null
   residentCount: number
   discardedCount: number
   pendingCount: number
@@ -98,3 +101,20 @@ export function validatePartialTabDiscardPolicy(
 
   return { updates, valid: true }
 }
+
+export function isUsableRestoreUrl(url: string | undefined | null): boolean {
+  if (!url || typeof url !== 'string') return false
+  const trimmed = url.trim()
+  if (!trimmed || trimmed === 'about:blank' || trimmed === 'about:srcdoc') return false
+  try {
+    const parsed = new URL(trimmed)
+    return (
+      parsed.protocol !== 'about:' &&
+      parsed.protocol !== 'javascript:' &&
+      Boolean(parsed.protocol)
+    )
+  } catch {
+    return false
+  }
+}
+

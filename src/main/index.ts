@@ -9,6 +9,7 @@ import {
   session,
   WebContentsView,
   protocol,
+  webContents as electronWebContents,
   Tray,
   Menu,
   globalShortcut,
@@ -20,7 +21,9 @@ import { buildEngine } from './promptNav'
 import { buildFeatureHookEvidenceScript, type collectFeatureHookEvidence } from './featureHookEvidence'
 import { executeHookCapture, hookContextId } from './featureHookCapture'
 import { parseFeatureHookImport } from '../shared/featureHookImport'
-import { TabDiscardManager, type DiscardableView } from './tabDiscardManager'
+import { TabDiscardManager, type DiscardableView, isUsableRestoreUrl } from './tabDiscardManager'
+import { closeWebContents } from './webContentsLifecycle'
+import { PreviewCaptureLoop } from './previewCaptureLoop'
 import { getCustomThemeEntry, saveCustomThemeEntry, removeCustomThemeEntry } from './customThemesStore'
 import { PROVIDER_THEMES, mergeOverrides, getStructuralVars } from './providerThemes'
 import { type ProviderOverrides, getMergedProviderFeatures } from '../shared/providerConfig'
@@ -113,24 +116,20 @@ export const tabDiscardManager = new TabDiscardManager({
     } catch {}
     return false
   },
-  onTeardown: (tabId: string, view: DiscardableView) => {
+  onTeardown: async (tabId, view, contents) => {
+    await closeWebContents(contents)
     if (mainWindow && !mainWindow.isDestroyed()) {
       try {
         mainWindow.contentView.removeChildView(view as unknown as Electron.WebContentsView)
       } catch {}
     }
-    try {
-      const wc = view.webContents as unknown as Electron.WebContents & { destroy: () => void }
-      if (!wc.isDestroyed?.()) {
-        wc.destroy()
-      }
-    } catch {}
 
     aiViews.delete(tabId)
     viewModelKeys.delete(tabId)
     lastRealBounds.delete(tabId)
     viewTitles.delete(tabId)
 
+    // Cleanup orphaned thumbnails
     const safeId = tabId.replace(/[^a-zA-Z0-9._-]/g, '')
     const thumbFilename = lastThumbnailFiles.get(safeId)
     if (thumbFilename) {
@@ -166,6 +165,34 @@ ipcMain.handle('get_tab_discard_status', (event) => {
     return { success: false, reason: 'untrusted_sender' }
   }
   return { success: true, status: tabDiscardManager.getStatus() }
+})
+
+// Opt-in diagnostics; no polling timer, URLs, prompts, cookies, or page text.
+ipcMain.handle('get_resource_diagnostics', (event) => {
+  if (!mainWindow || event.sender !== mainWindow.webContents) {
+    return { success: false, reason: 'untrusted_sender' }
+  }
+  const owned = new Map<number, { kind: string; tabId?: string; provider?: string }>([
+    [mainWindow.webContents.id, { kind: 'shell' }]
+  ])
+  for (const [tabId, view] of aiViews) {
+    try {
+      const contents = view?.webContents
+      if (contents && !contents.isDestroyed()) {
+        owned.set(contents.id, { kind: 'ai-view', tabId, provider: viewModelKeys.get(tabId) })
+      }
+    } catch { /* stale native wrapper: manager status retains ownership */ }
+  }
+  const contents = electronWebContents.getAllWebContents().flatMap((wc) => {
+    try {
+      if (wc.isDestroyed()) return []
+      return [{ id: wc.id, pid: wc.getOSProcessId(), type: wc.getType(),
+        owner: owned.get(wc.id) || { kind: 'popup-or-other' } }]
+    } catch { return [] }
+  })
+  return { success: true, capturedAt: new Date().toISOString(),
+    electron: process.versions.electron, discard: tabDiscardManager.getStatus(),
+    preview: previewLoop.getStatus(), contents, processes: app.getAppMetrics() }
 })
 
 ipcMain.on('set_tab_discard_time', (_event, minutes) => {
@@ -1437,10 +1464,7 @@ function createWindow() {
       e.preventDefault()
       mainWindow?.hide()
     } else {
-      if (previewTimer) {
-        clearInterval(previewTimer)
-        previewTimer = null
-      }
+      previewLoop.stop()
     }
   })
 
@@ -1448,15 +1472,18 @@ function createWindow() {
     routeGlobalShortcut(event, input, 'window')
   })
 
-  // Fix #2: Stop 3fps screenshot capture when window is hidden to tray
+  // Stop screenshot capture when hidden to tray; resume the requested preview on show.
   mainWindow.on('hide', () => {
-    if (previewTimer) {
-      clearInterval(previewTimer)
-      previewTimer = null
-    }
+    previewLoop.stop()
   })
 
+  mainWindow.on('minimize', () => previewLoop.stop())
+  const resumePreview = () => { if (previewViewId) previewLoop.start(previewViewId) }
+  mainWindow.on('show', resumePreview)
+  mainWindow.on('restore', resumePreview)
+
   mainWindow.on('closed', () => {
+    previewLoop.stop()
     mainWindow = null
     currentUiZoom = 1.0; // reset on destroy if needed
   })
@@ -1810,7 +1837,10 @@ function buildWebviewRuntimeJs(modelKey?: string): string {
 
   const customComp = feats.composerSelector ? JSON.stringify(feats.composerSelector) : 'null'
   const customTitleSel = feats.chatTitleSelector ? JSON.stringify(feats.chatTitleSelector) : 'null'
-  const pollInterval = typeof feats.chatTitlePollingIntervalMs === 'number' ? feats.chatTitlePollingIntervalMs : 1500
+  const requestedInterval = feats.chatTitlePollingIntervalMs
+  const pollInterval = requestedInterval === 0 ? 0
+    : typeof requestedInterval === 'number' && Number.isFinite(requestedInterval)
+      ? Math.max(500, Math.min(60000, requestedInterval)) : 1500
   const enableSlash = feats.enableSlashFocus !== false
   const enableRetention = feats.enableFocusRetention !== false
   const virtSelector = feats.virtualizationSelector
@@ -1904,10 +1934,15 @@ if (!window.__slashFocusInjected && ${enableSlash}) {
     clearInterval(window.__nexusTitleInterval);
     window.__nexusTitleInterval = null;
   }
+  if (window.__nexusTitleVisibilityHandler) {
+    document.removeEventListener('visibilitychange', window.__nexusTitleVisibilityHandler);
+    window.__nexusTitleVisibilityHandler = null;
+  }
   const titleSel = ${customTitleSel};
   if (titleSel && ${pollInterval > 0}) {
     const updateTitle = () => {
       try {
+        if (document.visibilityState === 'hidden') return;
         let txt = '';
         for (const s of splitList(titleSel)) {
           const el = document.querySelector(s);
@@ -1923,6 +1958,8 @@ if (!window.__slashFocusInjected && ${enableSlash}) {
     };
     updateTitle();
     window.__nexusTitleInterval = setInterval(updateTitle, ${pollInterval});
+    window.__nexusTitleVisibilityHandler = updateTitle;
+    document.addEventListener('visibilitychange', updateTitle);
   }
   window.__titleExtractionInjected = true;
 })();
@@ -1985,7 +2022,14 @@ try {
 
 function ensureAiView(tabId: string): Electron.WebContentsView {
   let view = aiViews.get(tabId)
-  if (view) return view
+  if (view && !view.webContents.isDestroyed()) return view
+  if (view) {
+    // A close may finish natively after our timeout, or another owner may close
+    // the contents. Never hand a destroyed wrapper back to activation/navigation.
+    aiViews.delete(tabId)
+    viewTitles.delete(tabId)
+    console.warn('[lifecycle] Recreating destroyed view:', tabId)
+  }
 
   view = new WebContentsView({
     webPreferences: {
@@ -2198,6 +2242,7 @@ function ensureAiView(tabId: string): Electron.WebContentsView {
     sendToMainWindow('ai-loading', tabId, true)
   })
   view.webContents.on('did-stop-loading', () => {
+    tabDiscardManager.reconcileCapacity()
     sendToMainWindow('ai-loading', tabId, false)
     // Never steal focus from an open renderer overlay (popups/modals): a
     // background load finishing a few seconds later would otherwise yank
@@ -2242,7 +2287,10 @@ function ensureAiView(tabId: string): Electron.WebContentsView {
   return view
 }
 
-ipcMain.on('navigate_to_url', (_event, tabId, url, bounds, modelKey) => {
+ipcMain.on('navigate_to_url', async (_event, tabId, url, bounds, modelKey) => {
+  await tabDiscardManager.waitForClose(tabId)
+  wakeTokens.set(tabId, (wakeTokens.get(tabId) || 0) + 1)
+  inFlightWakes.delete(tabId)
   console.log('[navigate_to_url]', tabId, url)
   tabDiscardManager.onExplicitNavigation(tabId)
   resolveModelKey(tabId, url, modelKey)
@@ -2260,7 +2308,9 @@ ipcMain.on('navigate_to_url', (_event, tabId, url, bounds, modelKey) => {
   applyWebviewTheme(view, viewModelKeys.get(tabId))
   view.setBounds(bounds)
   if (bounds.width > 0) lastRealBounds.set(tabId, bounds)
-  view.webContents.loadURL(url)
+  void view.webContents.loadURL(url).catch((err) => {
+    console.warn(`[navigate_to_url] Failed to load URL for ${tabId}:`, err)
+  })
 })
 
 // Webview theming: inject the active app theme's own colors into AI pages.
@@ -2304,7 +2354,21 @@ function setViewBackground(view) {
 
 // Live-preview capture stream (Settings → Webview tab). Captures the REAL
 // view (no duplicate page), streams ~3fps to the renderer panel.
-let previewTimer: NodeJS.Timeout | null = null
+const previewLoop = new PreviewCaptureLoop<string>({
+  intervalMs: 1000,
+  canCapture: () => !!mainWindow && !mainWindow.isDestroyed() &&
+    mainWindow.isVisible() && !mainWindow.isMinimized(),
+  capture: async (tabId) => {
+    const view = aiViews.get(tabId)
+    if (!view || view.webContents.isDestroyed()) return null
+    const img = await view.webContents.capturePage()
+    if (aiViews.get(tabId) !== view || view.webContents.isDestroyed() || img.isEmpty()) return null
+    const size = img.getSize()
+    const resized = size.width > 960 ? img.resize({ width: 960, quality: 'good' }) : img
+    return 'data:image/jpeg;base64,' + resized.toJPEG(78).toString('base64')
+  },
+  publish: (frame) => sendToMainWindow('webview_preview_frame', frame)
+})
 let previewViewId: string | null = null
 let previewRestoreBounds: Electron.Rectangle | null = null
 // Last non-zero view bounds per tab — used to un-hide a view for capture while
@@ -2348,18 +2412,26 @@ function updateWebviewTitlePoller(view: Electron.WebContentsView, modelKey: stri
   if (view.webContents.isDestroyed()) return
   const feats = getMergedProviderFeatures(modelKey, providerConfig[modelKey])
   const customTitleSel = feats.chatTitleSelector ? JSON.stringify(feats.chatTitleSelector) : 'null'
-  const pollInterval = typeof feats.chatTitlePollingIntervalMs === 'number' ? feats.chatTitlePollingIntervalMs : 1500
+  const requestedInterval = feats.chatTitlePollingIntervalMs
+  const pollInterval = requestedInterval === 0 ? 0
+    : typeof requestedInterval === 'number' && Number.isFinite(requestedInterval)
+      ? Math.max(500, Math.min(60000, requestedInterval)) : 1500
   const script = `(() => {
     ${PAGE_HELPERS}
     if (window.__nexusTitleInterval) {
       clearInterval(window.__nexusTitleInterval);
       window.__nexusTitleInterval = null;
     }
+    if (window.__nexusTitleVisibilityHandler) {
+      document.removeEventListener('visibilitychange', window.__nexusTitleVisibilityHandler);
+      window.__nexusTitleVisibilityHandler = null;
+    }
     const titleSel = ${customTitleSel};
     if (titleSel && ${pollInterval > 0}) {
       const updateTitle = () => {
         try {
-          let txt = '';
+          if (document.visibilityState === 'hidden') return;
+        let txt = '';
           for (const s of splitList(titleSel)) {
             const el = document.querySelector(s);
             if (el) {
@@ -2374,6 +2446,8 @@ function updateWebviewTitlePoller(view: Electron.WebContentsView, modelKey: stri
       };
       updateTitle();
       window.__nexusTitleInterval = setInterval(updateTitle, ${pollInterval});
+    window.__nexusTitleVisibilityHandler = updateTitle;
+    document.addEventListener('visibilitychange', updateTitle);
     }
   })()`
   view.webContents.executeJavaScript(script).catch(() => {})
@@ -2946,7 +3020,7 @@ ipcMain.on('set_webview_theme', (_event, payload) => {
   for (const [tabId, view] of aiViews) {
     applyWebviewTheme(view, resolveModelKey(tabId, view.webContents.getURL()))
   }
-  if (previewTimer) capturePreviewFrame()
+  if (previewViewId) capturePreviewFrame()
 })
 
 ipcMain.handle('get_provider_config', () => providerConfig)
@@ -3285,14 +3359,18 @@ ipcMain.on('set_provider_config', (_event, map) => {
     updateWebviewTitlePoller(view, modelKey)
     injectVirtualizationCss(view, modelKey)
   }
-  if (previewTimer) {
-    capturePreviewFrame()
-    setTimeout(capturePreviewFrame, 150) // Force a second capture after CSS lands
-  }
+  if (previewViewId) capturePreviewFrame()
 })
 
 // Switch tabs: show target view, hide the rest. Loads URL only on first visit.
-ipcMain.on('activate_tab', (_event, tabId, url, bounds, modelKey) => {
+let activationRevision = 0
+const wakeTokens = new Map<string, number>()
+const inFlightWakes = new Set<string>()
+
+ipcMain.on('activate_tab', async (_event, tabId, url, bounds, modelKey) => {
+  const revision = ++activationRevision
+  await tabDiscardManager.waitForClose(tabId)
+  if (revision !== activationRevision) return
   if (currentUiZoom !== 1.0 && bounds) {
     bounds = {
       x: Math.round(bounds.x * currentUiZoom),
@@ -3302,46 +3380,160 @@ ipcMain.on('activate_tab', (_event, tabId, url, bounds, modelKey) => {
     }
   }
 
-  const wasEvicted = tabDiscardManager.isTabEvicted(tabId)
-  const evicted = tabDiscardManager.consumeEvictedTabState(tabId)
-  const view = ensureAiView(tabId)
-  console.log('[activate_tab]', tabId, 'url=', url, 'current=', view.webContents.getURL())
-  resolveModelKey(tabId, url, modelKey)
-  applyWebviewTheme(view, viewModelKeys.get(tabId))
-  const isHidden = bounds.width === 0 && bounds.height === 0
-  for (const [id, v] of aiViews) v.setVisible(!isHidden && id === tabId)
-  activeViewId = tabId
-  activeViewVisible = !isHidden
-  view.setBounds(bounds)
-  if (!isHidden) lastRealBounds.set(tabId, bounds)
-  const current = view.webContents.getURL()
-  if (wasEvicted && evicted) {
-    // Tab was evicted from memory: recreate with its saved URL and restore scroll.
-    console.log('[activate_tab] RESTORING evicted tab:', tabId, evicted.url)
-    view.webContents.once('did-finish-load', () => {
-      view.webContents.executeJavaScript(`window.scrollTo(0, ${evicted.scrollY})`).catch(() => {})
-    })
-    view.webContents.loadURL(evicted.url)
-  } else if (url && !current) {
-    console.log('[activate_tab] LOADING empty view:', url)
-    view.webContents.loadURL(url)
+  // 1. Ensure view exists safely; if creation fails, leave evicted state intact so user can retry
+  let view: Electron.WebContentsView
+  try {
+    view = ensureAiView(tabId)
+  } catch (err) {
+    console.error(`[activate_tab] Failed to create or ensure view for ${tabId}:`, err)
+    return
   }
 
-  if (mainWindow && !mainWindow.isDestroyed() && !view.webContents.isDestroyed() && activeViewVisible && !overlaysOpen) {
+  console.log('[activate_tab]', tabId, 'url=', url, 'current=', view.webContents?.getURL?.())
+  resolveModelKey(tabId, url, modelKey)
+
+  try {
+    tabDiscardManager.activateTab(tabId)
+  } catch (err) {
+    console.warn(`[activate_tab] tabDiscardManager.activateTab warning for ${tabId}:`, err)
+  }
+
+  // 2. Safe theme application and title polling — failures here MUST NOT abort visibility or leave view hidden
+  try {
+    applyWebviewTheme(view, viewModelKeys.get(tabId))
+  } catch (err) {
+    console.warn(`[activate_tab] applyWebviewTheme error for ${tabId}:`, err)
+  }
+
+  try {
+    updateWebviewTitlePoller(view, viewModelKeys.get(tabId) || '')
+  } catch (err) {
+    console.warn(`[activate_tab] updateWebviewTitlePoller error for ${tabId}:`, err)
+  }
+
+  // 3. Set visibility and bounds: hide background views safely, then ALWAYS set bounds/visibility for selected view
+  const isHidden = Boolean(bounds && bounds.width === 0 && bounds.height === 0)
+  for (const [id, v] of aiViews) {
+    if (id !== tabId) {
+      try {
+        if (!v.webContents?.isDestroyed?.()) {
+          v.setVisible(false)
+        }
+      } catch (err) {
+        console.warn(`[activate_tab] Failed to set background view visibility for ${id}:`, err)
+      }
+    }
+  }
+
+  activeViewId = tabId
+  activeViewVisible = !isHidden
+  try {
+    if (bounds) {
+      view.setBounds(bounds)
+      if (!isHidden) lastRealBounds.set(tabId, bounds)
+    }
+    view.setVisible(!isHidden)
+  } catch (err) {
+    console.error(`[activate_tab] Failed to set active view bounds/visibility for ${tabId}:`, err)
+  }
+
+  // 4. Handle Wake / Restoration vs Initial Load
+  const wasEvicted = tabDiscardManager.isTabEvicted(tabId)
+  const savedState = tabDiscardManager.getEvictedTabState(tabId)
+  const currentUrl = view.webContents?.getURL?.() || ''
+
+  // Determine restore target URL: use valid saved URL, falling back to tab's supplied URL
+  let targetRestoreUrl: string | null = null
+  if (wasEvicted && savedState) {
+    if (isUsableRestoreUrl(savedState.url)) {
+      targetRestoreUrl = savedState.url
+    } else if (isUsableRestoreUrl(url)) {
+      targetRestoreUrl = url
+    }
+  }
+
+  if (wasEvicted && targetRestoreUrl) {
+    // If a wake is already actively loading this view, let it continue without double-loading
+    if (!inFlightWakes.has(tabId)) {
+      const myWakeToken = (wakeTokens.get(tabId) || 0) + 1
+      wakeTokens.set(tabId, myWakeToken)
+      inFlightWakes.add(tabId)
+      console.log('[activate_tab] RESTORING evicted tab:', tabId, targetRestoreUrl)
+
+      void (async () => {
+        try {
+          await view.webContents.loadURL(targetRestoreUrl!)
+
+          // Verify this wake is still the current navigation attempt and view wasn't destroyed
+          if (wakeTokens.get(tabId) !== myWakeToken || !view.webContents || view.webContents.isDestroyed()) {
+            return
+          }
+
+          // Restore scroll only for this matching successful load
+          if (savedState && typeof savedState.scrollY === 'number' && savedState.scrollY > 0) {
+            await view.webContents
+              .executeJavaScript(`window.scrollTo(0, ${savedState.scrollY})`)
+              .catch(() => {})
+          }
+
+          // Consume evicted tab state only after restoration succeeded
+          tabDiscardManager.consumeEvictedTabState(tabId)
+
+          // Only focus if tab is still active and visible
+          if (
+            mainWindow &&
+            !mainWindow.isDestroyed() &&
+            !view.webContents.isDestroyed() &&
+            activeViewId === tabId &&
+            activeViewVisible &&
+            !overlaysOpen
+          ) {
+            view.webContents.focus()
+            focusPromptInView(view)
+          }
+        } catch (err) {
+          console.warn(`[activate_tab] Failed to restore evicted tab ${tabId}:`, err)
+          // Do NOT consume evicted tab state on error so user can retry
+        } finally {
+          inFlightWakes.delete(tabId)
+        }
+      })()
+    }
+  } else if (url && !currentUrl && isUsableRestoreUrl(url)) {
+    console.log('[activate_tab] LOADING empty view:', url)
+    const myWakeToken = (wakeTokens.get(tabId) || 0) + 1
+    wakeTokens.set(tabId, myWakeToken)
+    void view.webContents.loadURL(url).catch((err) => {
+      console.warn(`[activate_tab] Failed to load empty view for ${tabId}:`, err)
+    })
+  }
+
+  // Immediate focus for tabs that are already resident/loaded
+  if (
+    mainWindow &&
+    !mainWindow.isDestroyed() &&
+    view.webContents &&
+    !view.webContents.isDestroyed() &&
+    activeViewVisible &&
+    !overlaysOpen
+  ) {
     view.webContents.focus()
     focusPromptInView(view)
   }
-
-  tabDiscardManager.activateTab(tabId)
 })
 
-ipcMain.on('navigate_tab', (_event, tabId: string, url: string, modelKey?: string) => {
+ipcMain.on('navigate_tab', async (_event, tabId: string, url: string, modelKey?: string) => {
+  await tabDiscardManager.waitForClose(tabId)
+  wakeTokens.set(tabId, (wakeTokens.get(tabId) || 0) + 1)
+  inFlightWakes.delete(tabId)
   tabDiscardManager.onExplicitNavigation(tabId)
   const view = ensureAiView(tabId)
   resolveModelKey(tabId, url, modelKey)
   applyWebviewTheme(view, viewModelKeys.get(tabId))
   console.log('[navigate_tab]', tabId, 'url=', url)
-  void view.webContents.loadURL(url)
+  void view.webContents.loadURL(url).catch((err) => {
+    console.warn(`[navigate_tab] Failed to load URL for ${tabId}:`, err)
+  })
 })
 
 ipcMain.handle('history_go_back', () => {
@@ -3374,36 +3566,15 @@ ipcMain.handle('history_go_forward', () => {
 
 
 
-ipcMain.on('destroy_tab_view', (_event, tabId) => {
-  console.log('[destroy_tab_view]', tabId)
-  tabDiscardManager.closeTab(tabId)
-  lastRealBounds.delete(tabId)
-  viewModelKeys.delete(tabId)
-  const view = aiViews.get(tabId)
-  if (!view) return
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    try {
-      mainWindow.contentView.removeChildView(view)
-    } catch {}
+ipcMain.on('destroy_tab_view', async (_event, tabId: string) => {
+  wakeTokens.delete(tabId)
+  inFlightWakes.delete(tabId)
+  if (activeViewId === tabId) {
+    activeViewId = null
+    activationRevision++
   }
-  try {
-    ;(view.webContents as Electron.WebContents & { destroy: () => void }).destroy()
-  } catch {}
-  aiViews.delete(tabId)
-  viewTitles.delete(tabId) // Fix #5: map memory leak
-  
-  // Fix #3: disk/memory leak - cleanup orphaned thumbnails
-  const safeId = tabId.replace(/[^a-zA-Z0-9._-]/g, '')
-  const thumbFilename = lastThumbnailFiles.get(safeId)
-  if (thumbFilename) {
-    try {
-      const fs = require('fs')
-      fs.unlink(join(app.getPath('userData'), 'thumbnails', thumbFilename), () => {})
-    } catch {}
-    lastThumbnailFiles.delete(safeId)
-  }
-
-  if (activeViewId === tabId) activeViewId = null
+  const closed = await tabDiscardManager.closeTab(tabId)
+  if (!closed) console.error('[close] WebContents remains tracked:', tabId)
 })
 
 // Ctrl+R: full reload of the active AI view (like a browser reload)
@@ -3682,7 +3853,7 @@ ipcMain.handle('capture_tab_snapshot', async (_event, tabId?: string) => {
   }
 })
 
-// Live preview stream: capture the real view (no duplicate page) ~3fps while
+// Live preview stream: one single-flight capture/second while
 // the Settings → Webview tab is open, so theme knobs reflect instantly.
 function findPreviewView(providerKey: string | null): [string, Electron.WebContentsView] | null {
   if (providerKey) {
@@ -3701,28 +3872,25 @@ function findPreviewView(providerKey: string | null): [string, Electron.WebConte
   return active ? [activeViewId, active] : null
 }
 
-async function capturePreviewFrame() {
-  if (!previewViewId) return
-  const view = aiViews.get(previewViewId)
-  if (!view || view.webContents.isDestroyed()) return
-  try {
-    const img = await view.webContents.capturePage()
-    if (img.isEmpty()) return
-    const size = img.getSize()
-    const targetWidth = Math.min(1600, Math.max(1024, size.width))
-    const resized = size.width > targetWidth ? img.resize({ width: targetWidth, quality: 'better' }) : img
-    const jpegBase64 = resized.toJPEG(92).toString('base64')
-    sendToMainWindow('webview_preview_frame', 'data:image/jpeg;base64,' + jpegBase64)
-  } catch {
-    // view navigated/destroyed mid-capture — next tick retries
+function capturePreviewFrame(): void {
+  previewLoop.request()
+}
+
+function stopWebviewPreview(): void {
+  previewLoop.stop()
+  if (previewViewId && previewRestoreBounds) {
+    const view = aiViews.get(previewViewId)
+    if (view && !view.webContents.isDestroyed()) {
+      view.setBounds(previewRestoreBounds)
+      view.setVisible(previewViewId === activeViewId && activeViewVisible && !overlaysOpen)
+    }
   }
+  previewViewId = null
+  previewRestoreBounds = null
 }
 
 ipcMain.handle('start_webview_preview', (_event, providerKey: string | null) => {
-  if (previewTimer) {
-    clearInterval(previewTimer)
-    previewTimer = null
-  }
+  stopWebviewPreview()
   const found = findPreviewView(providerKey)
   if (!found) {
     previewViewId = null
@@ -3741,26 +3909,11 @@ ipcMain.handle('start_webview_preview', (_event, providerKey: string | null) => 
   } else {
     previewRestoreBounds = null
   }
-  previewTimer = setInterval(capturePreviewFrame, 350)
-  capturePreviewFrame()
+  previewLoop.start(tabId)
   return true
 })
 
-ipcMain.on('stop_webview_preview', () => {
-  if (previewTimer) {
-    clearInterval(previewTimer)
-    previewTimer = null
-  }
-  if (previewViewId && previewRestoreBounds) {
-    const view = aiViews.get(previewViewId)
-    if (view) {
-      view.setBounds(previewRestoreBounds)
-      view.setVisible(true)
-    }
-  }
-  previewViewId = null
-  previewRestoreBounds = null
-})
+ipcMain.on('stop_webview_preview', stopWebviewPreview)
 
 import fs from 'fs'
 import path from 'path'

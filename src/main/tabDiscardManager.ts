@@ -1,3 +1,5 @@
+import { closeWebContents, type ClosableContents } from './webContentsLifecycle'
+
 import { join } from 'path'
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'fs'
 import {
@@ -5,15 +7,16 @@ import {
   type TabDiscardStatus,
   DEFAULT_TAB_DISCARD_POLICY,
   validateTabDiscardPolicy,
-  validatePartialTabDiscardPolicy
+  validatePartialTabDiscardPolicy,
+  isUsableRestoreUrl
 } from '../shared/tabDiscardPolicy'
 
-export interface DiscardableWebContents {
+export { isUsableRestoreUrl }
+
+export interface DiscardableWebContents extends ClosableContents {
   getURL(): string
   isLoading?(): boolean
   executeJavaScript(code: string): Promise<unknown>
-  destroy(): void
-  isDestroyed?(): boolean
 }
 
 export interface DiscardableView {
@@ -41,7 +44,7 @@ export interface EvictedTabState {
 export interface TabDiscardManagerOptions {
   getUserDataDir: () => string
   isPinned?: (tabId: string) => boolean
-  onTeardown?: (tabId: string, view: DiscardableView) => void
+  onTeardown?: (tabId: string, view: DiscardableView, contents: DiscardableWebContents) => void | Promise<void>
   snapshotTimeoutMs?: number
   idleCheckIntervalMs?: number
   clock?: () => number
@@ -53,6 +56,10 @@ export class TabDiscardManager {
   private activeViewId: string | null = null
 
   private views = new Map<string, DiscardableView>()
+  // Native View accessors may become unavailable after WebContents closes.
+  // Retain the exact owned contents until teardown/accounting has completed.
+  private contents = new Map<string, DiscardableWebContents>()
+  private unavailable = new Set<string>()
   private lastActivatedAt = new Map<string, number>()
   private backgroundSince = new Map<string, number | null>()
   private viewGenerations = new Map<string, number>()
@@ -68,20 +75,22 @@ export class TabDiscardManager {
 
   private readonly getUserDataDir: () => string
   private readonly isPinned: (tabId: string) => boolean
-  private readonly onTeardown: (tabId: string, view: DiscardableView) => void
+  private readonly onTeardown: (tabId: string, view: DiscardableView, contents: DiscardableWebContents) => void | Promise<void>
   private readonly snapshotTimeoutMs: number
   private readonly clock: () => number
+
+  private readonly idleCheckIntervalMs: number
+  private closing = new Map<string, Promise<void>>()
+  private retryAfter = new Map<string, number>()
+  private lastTeardownError: string | null = null
 
   private idleIntervalTimer: NodeJS.Timeout | null = null
 
   constructor(options: TabDiscardManagerOptions) {
     this.getUserDataDir = options.getUserDataDir
     this.isPinned = options.isPinned || (() => false)
-    this.onTeardown = options.onTeardown || ((_id, v) => {
-      try {
-        if (!v.webContents.isDestroyed?.()) v.webContents.destroy()
-      } catch {}
-    })
+    this.onTeardown = options.onTeardown || ((_id, _view, contents) => closeWebContents(contents))
+    this.idleCheckIntervalMs = Math.max(1000, options.idleCheckIntervalMs ?? 30000)
     this.snapshotTimeoutMs = options.snapshotTimeoutMs ?? 1500
     this.clock = options.clock || (() => Date.now())
   }
@@ -222,22 +231,23 @@ export class TabDiscardManager {
 
     for (const [tabId, view] of this.views) {
       const isAct = tabId === this.activeViewId
-      const isLoad = !!(view.webContents.isLoading && view.webContents.isLoading())
+      const isLoad = this.loadingOrUnavailable(tabId, view)
       const isPin = this.isPinned(tabId)
-      if (isAct || isLoad || isPin) {
+      const isNoRestore = !this.hasUsableRestoreUrl(tabId, view)
+      if (isAct || isLoad || isPin || isNoRestore) {
         protectedCount++
       } else {
         eligibleCount++
       }
     }
 
-    let effectiveCapExceeded = false
+    let effectiveCapExceeded = this.policy.maxActiveTabs > 0 && residentCount > this.policy.maxActiveTabs
     let exceededReason: string | undefined
 
     if (this.policy.maxActiveTabs > 0 && residentCount > this.policy.maxActiveTabs) {
       if (eligibleCount === 0) {
         effectiveCapExceeded = true
-        exceededReason = 'All resident background tabs are protected (pinned, loading, or active)'
+        exceededReason = 'All resident background tabs are protected (pinned, loading, active, or missing restore URL)'
       }
     }
 
@@ -248,6 +258,9 @@ export class TabDiscardManager {
       protectedCount,
       effectiveCapExceeded,
       exceededReason,
+      lastTeardownError: this.lastTeardownError,
+      closingCount: this.closing.size,
+      unavailableCount: this.unavailable.size,
       lastEviction: this.lastEviction ? { ...this.lastEviction } : null,
       policy: { ...this.policy },
       revision: this.policyRevision
@@ -255,14 +268,20 @@ export class TabDiscardManager {
   }
 
   public registerView(tabId: string, view: DiscardableView): void {
+    if (this.closing.has(tabId)) throw new Error('Wait for native close before registering a new view')
+    const incoming = view?.webContents
+    if (!incoming || incoming.isDestroyed()) throw new Error('Cannot register unavailable WebContents')
     const prevView = this.views.get(tabId)
     if (prevView && prevView !== view) {
-      try {
-        if (!prevView.webContents.isDestroyed?.()) prevView.webContents.destroy()
-      } catch {}
+      const previous = this.knownContents(tabId, prevView)
+      if (!previous || !previous.isDestroyed()) {
+        throw new Error('Close the previous live view before replacing it')
+      }
     }
 
     this.views.set(tabId, view)
+    this.contents.set(tabId, incoming)
+    this.unavailable.delete(tabId)
     const nextGen = (this.viewGenerations.get(tabId) || 0) + 1
     this.viewGenerations.set(tabId, nextGen)
 
@@ -298,9 +317,7 @@ export class TabDiscardManager {
     this.activityRevisions.set(tabId, (this.activityRevisions.get(tabId) || 0) + 1)
 
     // Critical: If the activating tab has an in-flight eviction, cancel it immediately
-    if (this.pendingTickets.has(tabId)) {
-      this.pendingTickets.delete(tabId)
-    }
+    if (!this.closing.has(tabId)) this.pendingTickets.delete(tabId)
 
     if (this.policy.maxActiveTabs > 0) {
       this.reconcileCapacity()
@@ -315,19 +332,120 @@ export class TabDiscardManager {
     }
   }
 
-  public closeTab(tabId: string): void {
-    this.pendingTickets.delete(tabId)
-    this.evictedTabStates.delete(tabId)
-    this.views.delete(tabId)
-    this.lastActivatedAt.delete(tabId)
-    this.backgroundSince.delete(tabId)
-    this.viewGenerations.delete(tabId)
-    this.activityRevisions.delete(tabId)
+  public waitForClose(tabId: string): Promise<void> {
+    return this.closing.get(tabId) || Promise.resolve()
+  }
 
+  public async closeTab(tabId: string): Promise<boolean> {
+    const requestedView = this.views.get(tabId)
+    this.pendingTickets.delete(tabId)
     if (this.activeViewId === tabId) {
       this.activeViewId = null
+      this.backgroundSince.set(tabId, this.clock())
+    }
+    await this.waitForClose(tabId)
+    if (this.closing.has(tabId)) return this.closeTab(tabId)
+    const view = this.views.get(tabId)
+    if (view !== requestedView) return true // A prior request already closed/replaced it.
+    const forget = () => {
+      this.evictedTabStates.delete(tabId)
+      this.views.delete(tabId)
+      this.contents.delete(tabId)
+      this.unavailable.delete(tabId)
+      this.lastActivatedAt.delete(tabId)
+      this.backgroundSince.delete(tabId)
+      this.viewGenerations.delete(tabId)
+      this.activityRevisions.delete(tabId)
+      this.retryAfter.delete(tabId)
+      if (this.activeViewId === tabId) this.activeViewId = null
+    }
+    if (view) {
+      if (!await this.teardown(tabId, view, forget)) return false
+    } else forget()
+    this.reconcileCapacity()
+    return true
+  }
+
+  // Resolve waiters on either success or failure; failure retains resident state.
+  private async teardown(tabId: string, view: DiscardableView, onSuccess: () => void): Promise<boolean> {
+    let release!: () => void
+    const completion = new Promise<void>((resolve) => { release = resolve })
+    this.closing.set(tabId, completion)
+    try {
+      const contents = this.knownContents(tabId, view)
+      if (!contents) throw new Error('WebContents unavailable; resource remains tracked')
+      await this.onTeardown(tabId, view, contents)
+      // Do not re-read view.webContents after close invalidates its accessor.
+      if (!contents.isDestroyed()) {
+        throw new Error('Teardown returned without destroying WebContents')
+      }
+      this.lastTeardownError = null
+      onSuccess()
+      return true
+    } catch (error) {
+      this.lastTeardownError = `Tab ${tabId}: ${String(error)}`
+      this.retryAfter.set(tabId, this.clock() + 30000)
+      console.warn('[TabDiscardManager]', this.lastTeardownError)
+      return false
+    } finally {
+      this.pendingTickets.delete(tabId)
+      this.closing.delete(tabId)
+      release()
     }
   }
+
+  private knownContents(tabId: string, view: DiscardableView | undefined): DiscardableWebContents | undefined {
+    if (this.views.get(tabId) === view && this.contents.has(tabId)) return this.contents.get(tabId)
+    try { return view?.webContents } catch { return undefined }
+  }
+
+  private loadingOrUnavailable(tabId: string, view: DiscardableView | undefined): boolean {
+    try {
+      const contents = this.knownContents(tabId, view)
+      if (!contents || contents.isDestroyed()) {
+        this.unavailable.add(tabId)
+        return true
+      }
+      const loading = !!contents.isLoading?.()
+      this.unavailable.delete(tabId)
+      return loading
+    } catch {
+      // Native wrappers can become invalid during teardown. Skip this entry;
+      // do not erase ownership or manufacture successful eviction state.
+      this.unavailable.add(tabId)
+      return true
+    }
+  }
+
+  private hasUsableRestoreUrl(tabId: string, view: DiscardableView | undefined): boolean {
+    try {
+      const contents = this.knownContents(tabId, view)
+      if (!contents || contents.isDestroyed()) return false
+      const url = contents.getURL()
+      return isUsableRestoreUrl(url)
+    } catch {
+      return false
+    }
+  }
+
+  private protectedFromEviction(tabId: string, view: DiscardableView | undefined): boolean {
+    return tabId === this.activeViewId || this.pendingTickets.has(tabId) ||
+      this.closing.has(tabId) || this.isPinned(tabId) || this.loadingOrUnavailable(tabId, view) ||
+      !this.hasUsableRestoreUrl(tabId, view) ||
+      (this.retryAfter.get(tabId) ?? 0) > this.clock()
+  }
+
+  public getUsableRestoreUrl(tabId: string, fallbackUrl?: string | null): string | null {
+    const saved = this.evictedTabStates.get(tabId)
+    if (saved && isUsableRestoreUrl(saved.url)) {
+      return saved.url
+    }
+    if (fallbackUrl && isUsableRestoreUrl(fallbackUrl)) {
+      return fallbackUrl
+    }
+    return null
+  }
+
 
   public getEvictedTabState(tabId: string): EvictedTabState | undefined {
     return this.evictedTabStates.get(tabId)
@@ -368,14 +486,7 @@ export class TabDiscardManager {
     const eligible: Array<{ tabId: string; ts: number }> = []
 
     for (const [tabId, view] of this.views) {
-      // 1. NEVER evict active tab
-      if (tabId === this.activeViewId) continue
-      // 2. Skip already pending evictions
-      if (this.pendingTickets.has(tabId)) continue
-      // 3. Skip pinned tabs if possible
-      if (this.isPinned(tabId)) continue
-      // 4. Skip loading tabs
-      if (view.webContents.isLoading && view.webContents.isLoading()) continue
+      if (this.protectedFromEviction(tabId, view)) continue
 
       eligible.push({
         tabId,
@@ -387,7 +498,9 @@ export class TabDiscardManager {
     eligible.sort((a, b) => a.ts - b.ts)
 
     // Number of tabs to evict = totalResident - maxActiveTabs - currently pending
-    const needed = totalResident - this.policy.maxActiveTabs - this.pendingTickets.size
+    const reserved = new Set([...this.pendingTickets.keys(), ...this.closing.keys()])
+    const pendingResident = [...reserved].filter(id => this.views.has(id)).length
+    const needed = totalResident - this.policy.maxActiveTabs - pendingResident
     for (let i = 0; i < needed && i < eligible.length; i++) {
       this.requestEviction(eligible[i].tabId, 'capacity')
     }
@@ -400,14 +513,7 @@ export class TabDiscardManager {
     const thresholdMs = this.policy.tabDiscardMinutes * 60 * 1000
 
     for (const [tabId, view] of this.views) {
-      // 1. Never evict active view
-      if (tabId === this.activeViewId) continue
-      // 2. Never re-evict if pending
-      if (this.pendingTickets.has(tabId)) continue
-      // 3. Skip loading
-      if (view.webContents.isLoading && view.webContents.isLoading()) continue
-      // 4. Skip pinned
-      if (this.isPinned(tabId)) continue
+      if (this.protectedFromEviction(tabId, view)) continue
 
       const bgSince = this.backgroundSince.get(tabId)
       if (bgSince === null || bgSince === undefined) continue
@@ -421,7 +527,7 @@ export class TabDiscardManager {
 
   public requestEviction(tabId: string, reason: 'idle-timeout' | 'capacity'): boolean {
     const view = this.views.get(tabId)
-    if (!view) return false
+    if (!view || this.protectedFromEviction(tabId, view)) return false
     if (tabId === this.activeViewId) return false
     if (this.pendingTickets.has(tabId)) return false
 
@@ -445,7 +551,9 @@ export class TabDiscardManager {
 
     let snapshotPromise: Promise<number>
     try {
-      snapshotPromise = Promise.resolve(view.webContents.executeJavaScript('window.scrollY'))
+      const contents = this.knownContents(tabId, view)
+      if (!contents) throw new Error('WebContents unavailable during snapshot')
+      snapshotPromise = Promise.resolve(contents.executeJavaScript('window.scrollY'))
         .then((val) => Number(val) || 0)
         .catch(() => 0)
     } catch {
@@ -495,13 +603,18 @@ export class TabDiscardManager {
       return false
     }
 
-    // 5. Revalidate policy relevance
-    if (ticket.reason === 'idle-timeout' && this.policy.tabDiscardMinutes <= 0) {
+    // Loading/pinning, unavailable wrapper, or unusable URL may change during the snapshot.
+    const bgSince = this.backgroundSince.get(tabId)
+    if (this.isPinned(tabId) || this.loadingOrUnavailable(tabId, view) ||
+        !this.hasUsableRestoreUrl(tabId, view) ||
+        (ticket.reason === 'idle-timeout' && (this.policy.tabDiscardMinutes <= 0 ||
+         bgSince == null || this.clock() - bgSince < this.policy.tabDiscardMinutes * 60000))) {
       this.pendingTickets.delete(tabId)
       return false
     }
     if (ticket.reason === 'capacity') {
-      if (this.policy.maxActiveTabs <= 0 || this.views.size <= this.policy.maxActiveTabs) {
+      const closingResident = [...this.closing.keys()].filter(id => this.views.has(id)).length
+      if (this.policy.maxActiveTabs <= 0 || this.views.size - closingResident <= this.policy.maxActiveTabs) {
         this.pendingTickets.delete(tabId)
         return false
       }
@@ -510,33 +623,28 @@ export class TabDiscardManager {
     // Commit eviction: save state and teardown
     let url = ''
     try {
-      url = view.webContents.getURL()
+      url = this.knownContents(tabId, view)?.getURL() || ''
     } catch {}
 
-    this.evictedTabStates.set(tabId, {
-      url,
-      scrollY,
-      timestamp: this.clock()
+    if (!isUsableRestoreUrl(url)) {
+      this.pendingTickets.delete(tabId)
+      return false
+    }
+
+    const state = { url, scrollY, timestamp: this.clock() }
+    void this.teardown(tabId, view, () => {
+      if (this.views.get(tabId) !== view) return
+      this.pendingTickets.delete(tabId)
+      this.evictedTabStates.set(tabId, state)
+      this.views.delete(tabId)
+      this.contents.delete(tabId)
+      this.unavailable.delete(tabId)
+      this.lastActivatedAt.delete(tabId)
+      this.backgroundSince.delete(tabId)
+      this.retryAfter.delete(tabId)
+      this.lastEviction = { tabId, reason: ticket.reason, timestamp: this.clock() }
+      this.reconcileCapacity()
     })
-
-    // Execute teardown
-    try {
-      this.onTeardown(tabId, view)
-    } catch (err) {
-      console.warn(`[TabDiscardManager] Teardown warning for ${tabId}:`, err)
-    }
-
-    // Clean up tracking
-    this.views.delete(tabId)
-    this.lastActivatedAt.delete(tabId)
-    this.backgroundSince.delete(tabId)
-    this.pendingTickets.delete(tabId)
-
-    this.lastEviction = {
-      tabId,
-      reason: ticket.reason,
-      timestamp: this.clock()
-    }
 
     return true
   }
@@ -544,11 +652,13 @@ export class TabDiscardManager {
   private startIdleTimer(): void {
     if (this.idleIntervalTimer) return
     this.idleIntervalTimer = setInterval(() => {
+      this.reconcileCapacity()
       this.checkIdleTimeout()
-    }, 30000)
+    }, this.idleCheckIntervalMs)
     // unref so timer doesn't prevent process exit if running in node
     if (typeof this.idleIntervalTimer.unref === 'function') {
       this.idleIntervalTimer.unref()
     }
   }
 }
+
