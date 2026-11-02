@@ -1,7 +1,7 @@
 # Plan: Default Config for New Users
 
 **Date:** 2026-11-02
-**Status:** In progress
+**Status:** Complete
 
 ## Goal
 
@@ -20,19 +20,21 @@ Effect: pinned chats render in the bottom dock (`App.tsx` already supports
 `pinnedPosition === 'bottom'`). Existing users keep their saved value because
 settings are merged over defaults from localStorage.
 
-### 2. Seven default providers
+### 2. Eight default providers
 
 File: `src/renderer/src/App.tsx`
 
-Replace the four hardcoded `DEFAULT_MODELS` with the owner's `models.json` order:
+Replace the four hardcoded `DEFAULT_MODELS` with the owner's live
+`models.json` order (the running profile, not the stale snapshot):
 
 1. Gemini — `https://gemini.google.com`
 2. Qwen — `https://chat.qwen.ai`
-3. Kimi — `https://www.kimi.ai/`
+3. Kimi — `https://kimi.ai`
 4. DeepSeek — `https://chat.deepseek.com`
 5. Perplexity — `https://www.perplexity.ai`
-6. Albert — `https://abliteration.ai/console/playground`
-7. ChatGPT — `https://chatgpt.com`
+6. gemini_aistudio — `https://aistudio.google.com/prompts/new_chat`
+7. arena-ai — `https://arena.ai/`
+8. z-glm — `https://chat.z.ai/`
 
 Keep each provider's icon, color, and description exactly as configured.
 
@@ -45,7 +47,7 @@ Keep each provider's icon, color, and description exactly as configured.
 ## Verification
 
 - Delete/rename local `vicinae.models` + interface settings in a throwaway
-  profile, launch, confirm 7 providers and bottom dock.
+  profile, launch, confirm 8 providers and bottom dock.
 - `npm run typecheck` and `npm test`.
 - Existing profile still opens with its saved layout.
 
