@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: write
+  releases: write
 
 concurrency:
   group: release-windows-${{ github.ref }}
