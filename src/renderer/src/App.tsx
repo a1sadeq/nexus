@@ -73,7 +73,7 @@ const DEFAULT_MODELS: ModelDef[] = [
   {
     key: 'kimi',
     label: 'Kimi',
-    url: 'https://kimi.moonshot.cn',
+    url: 'https://kimi.ai',
     icon: '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>'
   },
   {
@@ -81,6 +81,31 @@ const DEFAULT_MODELS: ModelDef[] = [
     label: 'DeepSeek',
     url: 'https://chat.deepseek.com',
     icon: '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/></svg>'
+  },
+  {
+    key: 'perplexity',
+    label: 'Perplexity',
+    url: 'https://www.perplexity.ai',
+    icon: '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>'
+  },
+  {
+    key: 'gemini-aistudio',
+    label: 'gemini_aistudio',
+    url: 'https://aistudio.google.com/prompts/new_chat',
+    icon: '<svg width="256" height="256" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg"><g fill="#fff"><path d="M107.336 27.398a86.6 86.6 0 0 0-9.931 18.266H54.796c-20.175 0-36.53 16.355-36.53 36.53v127.858c0 20.175 16.355 36.53 36.53 36.53h127.858c20.175 0 36.53-16.355 36.53-36.53v-55.998a87 87 0 0 0 18.266-13.157v69.155c0 30.263-24.533 54.796-54.796 54.796H54.796C24.533 264.848 0 240.315 0 210.052V82.194c0-30.263 24.533-54.796 54.796-54.796z"/><path d="M240.874 61.238c-10.554-4.543-19.788-10.776-27.707-18.69c-7.915-7.915-14.148-17.153-18.69-27.708a82 82 0 0 1-4.221-12.465A3.135 3.135 0 0 0 187.219 0a3.134 3.134 0 0 0-3.036 2.375a82 82 0 0 1-4.22 12.465q-6.817 15.834-18.692 27.708c-7.914 7.914-17.152 14.147-27.707 18.69a82 82 0 0 1-12.465 4.22a3.135 3.135 0 0 0-2.375 3.037c0 1.436.981 2.686 2.375 3.037a82 82 0 0 1 12.465 4.22c10.555 4.543 19.79 10.776 27.707 18.69q11.878 11.874 18.692 27.708a82 82 0 0 1 4.22 12.465a3.134 3.134 0 0 0 3.036 2.375a3.135 3.135 0 0 0 3.037-2.375a82 82 0 0 1 4.22-12.465c4.543-10.555 10.776-19.79 18.69-27.707c7.915-7.915 17.154-14.148 27.708-18.691a82 82 0 0 1 12.466-4.22a3.135 3.135 0 0 0 2.374-3.037a3.135 3.135 0 0 0-2.374-3.037a82 82 0 0 1-12.466-4.22"/></g></svg>'
+  },
+  {
+    key: 'arena-ai',
+    label: 'arena-ai',
+    url: 'https://arena.ai/',
+    icon: '<svg width="48" height="48" viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg"><circle cx="24" cy="24" r="21.5" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"/><path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" d="m30 10l-15.1 1.8l-6 14m30.2-3.6L30 10M18 38l15.1-1.8l6-14M8.9 25.8L18 38"/><path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" d="m39.1 22.2l-11.4-6.8l-12.8-3.6l-.3 13.3L18 38m0 0l11.6-6.4l9.5-9.4"/><path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" d="m29.6 31.6l-15-6.5l13.1-9.7zM8.9 25.8l5.7-.7m13.1-9.7L30 10m3.1 26.2l-3.5-4.6"/></svg>'
+  },
+  {
+    key: 'z-glm',
+    label: 'z-glm',
+    url: 'https://chat.z.ai/',
+    color: '#3b82f6',
+    icon: '<svg width="24" height="24" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><g fill="none"><path fill="#53cbc9" d="M8.35 9.957a5.546 5.546 0 0 1 5.595-5.498a5.545 5.545 0 0 1 5.595 5.498a.34.34 0 0 1-.34.34H8.69a.34.34 0 0 1-.34-.34"/><path fill="#cb1f7a" d="M6.892 11.757c0-.268.18-.486.404-.486H20.11c.223 0 .403.218.403.486s-.18.486-.403.486H7.296c-.224 0-.404-.218-.404-.486m-2.433 1.46c0-.268.185-.487.41-.487h9.398c.224 0 .409.219.409.486c0 .268-.185.487-.409.487H4.868c-.224 0-.409-.219-.409-.486m2.842.972c-.224 0-.41.22-.41.487c0 .268.186.486.41.486h11.344c.224 0 .409-.219.409-.486c0-.268-.185-.487-.409-.487zm-2.355 1.947c0-.268.19-.487.418-.487H9.88c.229 0 .418.219.418.487c0 .267-.19.486-.418.486H5.364c-.228 0-.418-.219-.418-.486m8.178.972c-.22 0-.394.22-.394.487s.175.486.394.486h5.54c.22 0 .395-.219.395-.486c0-.268-.175-.487-.394-.487h-5.546zm-3.8 1.946c0-.267.175-.486.394-.486h5.541c.22 0 .394.219.394.486c0 .268-.175.487-.394.487H9.714c-.218 0-.394-.22-.394-.487zm1.873-3.405c-.228 0-.413.219-.413.487c0 .267.185.486.413.486h9.39c.228 0 .413-.219.413-.486c0-.268-.185-.487-.413-.487zm-5.765-3.892a.487.487 0 1 1 .974 0a.487.487 0 0 1-.974 0m-1.946.973a.486.486 0 1 0 0 .972a.486.486 0 0 0 0-.972m1.946 1.946a.487.487 0 1 1 .974 0a.487.487 0 0 1-.974 0m-1.459.973a.487.487 0 1 0 0 .974a.487.487 0 0 0 0-.974m7.297 1.946a.486.486 0 1 1 .973 0a.486.486 0 0 1-.973 0m-2.919.973a.486.486 0 1 0 0 .972a.486.486 0 0 0 0-.972"/></g></svg>'
   }
 ]
 

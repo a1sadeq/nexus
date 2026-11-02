@@ -94,7 +94,7 @@ export const DEFAULT_INTERFACE_SETTINGS: InterfaceSettings = {
   userPromptWidthPx: 720,
   globalCustomCss: '',
   globalCustomJs: '',
-  pinnedPosition: 'sidebar'
+  pinnedPosition: 'bottom'
 }
 
 export const PRESET_CONFIGS: Record<Exclude<AestheticPreset, 'custom'>, Partial<InterfaceSettings>> = {
