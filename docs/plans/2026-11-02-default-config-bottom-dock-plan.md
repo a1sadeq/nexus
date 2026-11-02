@@ -1,0 +1,55 @@
+# Plan: Default Config for New Users
+
+**Date:** 2026-11-02
+**Status:** In progress
+
+## Goal
+
+New installs should start with the layout and provider set the owner actually
+uses, so the first launch already looks like a power-user setup.
+
+## Changes
+
+### 1. Pinned dock at the bottom
+
+File: `src/renderer/src/lib/interfaceSettings.ts`
+
+- `DEFAULT_INTERFACE_SETTINGS.pinnedPosition`: `'sidebar'` → `'bottom'`.
+
+Effect: pinned chats render in the bottom dock (`App.tsx` already supports
+`pinnedPosition === 'bottom'`). Existing users keep their saved value because
+settings are merged over defaults from localStorage.
+
+### 2. Seven default providers
+
+File: `src/renderer/src/App.tsx`
+
+Replace the four hardcoded `DEFAULT_MODELS` with the owner's `models.json` order:
+
+1. Gemini — `https://gemini.google.com`
+2. Qwen — `https://chat.qwen.ai`
+3. Kimi — `https://www.kimi.ai/`
+4. DeepSeek — `https://chat.deepseek.com`
+5. Perplexity — `https://www.perplexity.ai`
+6. Albert — `https://abliteration.ai/console/playground`
+7. ChatGPT — `https://chatgpt.com`
+
+Keep each provider's icon, color, and description exactly as configured.
+
+## Non-goals
+
+- Do not overwrite existing users' `vicinae.models` or interface settings.
+- Do not change provider theme overrides in `providers.json`; those are
+  per-user runtime config, not shipped defaults.
+
+## Verification
+
+- Delete/rename local `vicinae.models` + interface settings in a throwaway
+  profile, launch, confirm 7 providers and bottom dock.
+- `npm run typecheck` and `npm test`.
+- Existing profile still opens with its saved layout.
+
+## Risks
+
+- Bottom dock uses vertical space; verify on a 1366x768 viewport.
+- Provider URLs change often; `models.json` remains the user-editable source.
