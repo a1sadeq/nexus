@@ -1,6 +1,6 @@
 {
   "name": "nexus",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Nexus — multi-provider AI desktop command center",
   "main": "./out/main/index.js",
   "author": "A1sadeq",
