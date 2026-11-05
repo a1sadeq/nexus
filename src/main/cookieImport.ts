@@ -81,6 +81,7 @@ export interface BrowserCookie {
 }
 
 export type BrowserKind =
+  | 'zen'
   | 'firefox'
   | 'floorp'
   | 'chrome'
@@ -97,14 +98,16 @@ export interface BrowserProfile {
   cookieDb: string
   localState?: string
   hasGoogleAuth?: boolean
+  detectedAiSessions?: string[]
   lastAccessed?: number
   isLatest?: boolean
+  isLocked?: boolean
 }
 
 export const GOOGLE_HOST_PATTERN =
   /(^|\.)(google\.(com|eg|co\.\w+|com\.\w+)|googleusercontent\.com|gstatic\.com|googleapis\.com)$/i
 export const AI_HOST_PATTERN =
-  /(^|\.)(google\.(com|eg|co\.\w+|com\.\w+)|googleusercontent\.com|gstatic\.com|googleapis\.com|openai\.com|chatgpt\.com|oaistatic\.com|oaiusercontent\.com|anthropic\.com|claude\.ai|perplexity\.ai|deepseek\.com|x\.ai|grok\.com|mistral\.ai|z\.ai)$/i
+  /(^|\.)(google\.(com|eg|co\.\w+|com\.\w+)|googleusercontent\.com|gstatic\.com|googleapis\.com|openai\.com|chatgpt\.com|oaistatic\.com|oaiusercontent\.com|anthropic\.com|claude\.ai|perplexity\.ai|deepseek\.com|x\.ai|grok\.com|mistral\.ai|z\.ai|copilot\.microsoft\.com|bing\.com)$/i
 
 const SQL_CHROME_AI_WHERE = `
   host_key LIKE '%google%' OR
@@ -117,7 +120,9 @@ const SQL_CHROME_AI_WHERE = `
   host_key LIKE '%x.ai%' OR
   host_key LIKE '%grok.com%' OR
   host_key LIKE '%mistral.ai%' OR
-  host_key LIKE '%z.ai%'
+  host_key LIKE '%z.ai%' OR
+  host_key LIKE '%copilot.microsoft.com%' OR
+  host_key LIKE '%bing.com%'
 `
 
 const SQL_FIREFOX_AI_WHERE = `
@@ -131,12 +136,31 @@ const SQL_FIREFOX_AI_WHERE = `
   host LIKE '%x.ai%' OR
   host LIKE '%grok.com%' OR
   host LIKE '%mistral.ai%' OR
-  host LIKE '%z.ai%'
+  host LIKE '%z.ai%' OR
+  host LIKE '%copilot.microsoft.com%' OR
+  host LIKE '%bing.com%'
 `
 
 const SESSION_COOKIES = ['SID', '__Secure-1PSID', '__Secure-3PSID'] as const
 
-function firefoxProfileInfo(dbPath: string): { hasGoogleAuth: boolean; lastAccessed?: number } {
+function matchAiProvidersFromHost(host: string, set: Set<string>): void {
+  const h = host.toLowerCase()
+  if (h.includes('openai') || h.includes('chatgpt')) set.add('chatgpt')
+  if (h.includes('anthropic') || h.includes('claude')) set.add('claude')
+  if (h.includes('google')) set.add('google')
+  if (h.includes('perplexity')) set.add('perplexity')
+  if (h.includes('deepseek')) set.add('deepseek')
+  if (h.includes('x.ai') || h.includes('grok')) set.add('grok')
+  if (h.includes('mistral')) set.add('mistral')
+  if (h.includes('copilot') || h.includes('bing.com')) set.add('copilot')
+}
+
+function firefoxProfileInfo(dbPath: string): {
+  hasGoogleAuth: boolean
+  detectedAiSessions: string[]
+  lastAccessed?: number
+  isLocked?: boolean
+} {
   try {
     return withTempSqliteDb(dbPath, (db) => {
       const authRow = db
@@ -145,6 +169,18 @@ function firefoxProfileInfo(dbPath: string): { hasGoogleAuth: boolean; lastAcces
            WHERE host LIKE '%google%' AND name IN (${SESSION_COOKIES.map(() => '?').join(',')})`
         )
         .get(...SESSION_COOKIES) as { n: number }
+
+      const detected = new Set<string>()
+      try {
+        const rows = db
+          .prepare(`SELECT DISTINCT host FROM moz_cookies WHERE ${SQL_FIREFOX_AI_WHERE}`)
+          .all() as Array<{ host: string }>
+        for (const r of rows) {
+          if (r.host) matchAiProvidersFromHost(r.host, detected)
+        }
+      } catch {
+        // ignore fallback
+      }
 
       let maxAccess: number | undefined = undefined
       try {
@@ -159,16 +195,28 @@ function firefoxProfileInfo(dbPath: string): { hasGoogleAuth: boolean; lastAcces
       }
 
       return {
-        hasGoogleAuth: (authRow?.n ?? 0) > 0,
-        lastAccessed: maxAccess
+        hasGoogleAuth: (authRow?.n ?? 0) > 0 || detected.has('google'),
+        detectedAiSessions: Array.from(detected),
+        lastAccessed: maxAccess,
+        isLocked: false
       }
     })
-  } catch {
-    return { hasGoogleAuth: false }
+  } catch (err: any) {
+    const isLocked =
+      err?.code === 'EBUSY' ||
+      err?.code === 'EPERM' ||
+      String(err).toLowerCase().includes('busy') ||
+      String(err).toLowerCase().includes('locked')
+    return { hasGoogleAuth: false, detectedAiSessions: [], isLocked }
   }
 }
 
-function chromeProfileInfo(dbPath: string): { hasGoogleAuth: boolean; lastAccessed?: number } {
+function chromeProfileInfo(dbPath: string): {
+  hasGoogleAuth: boolean
+  detectedAiSessions: string[]
+  lastAccessed?: number
+  isLocked?: boolean
+} {
   try {
     return withTempSqliteDb(dbPath, (db) => {
       const authRow = db
@@ -177,6 +225,18 @@ function chromeProfileInfo(dbPath: string): { hasGoogleAuth: boolean; lastAccess
            WHERE host_key LIKE '%google%' AND name IN (${SESSION_COOKIES.map(() => '?').join(',')})`
         )
         .get(...SESSION_COOKIES) as { n: number }
+
+      const detected = new Set<string>()
+      try {
+        const rows = db
+          .prepare(`SELECT DISTINCT host_key FROM cookies WHERE ${SQL_CHROME_AI_WHERE}`)
+          .all() as Array<{ host_key: string }>
+        for (const r of rows) {
+          if (r.host_key) matchAiProvidersFromHost(r.host_key, detected)
+        }
+      } catch {
+        // ignore fallback
+      }
 
       let maxAccess: number | undefined = undefined
       try {
@@ -191,12 +251,19 @@ function chromeProfileInfo(dbPath: string): { hasGoogleAuth: boolean; lastAccess
       }
 
       return {
-        hasGoogleAuth: (authRow?.n ?? 0) > 0,
-        lastAccessed: maxAccess
+        hasGoogleAuth: (authRow?.n ?? 0) > 0 || detected.has('google'),
+        detectedAiSessions: Array.from(detected),
+        lastAccessed: maxAccess,
+        isLocked: false
       }
     })
-  } catch {
-    return { hasGoogleAuth: false }
+  } catch (err: any) {
+    const isLocked =
+      err?.code === 'EBUSY' ||
+      err?.code === 'EPERM' ||
+      String(err).toLowerCase().includes('busy') ||
+      String(err).toLowerCase().includes('locked')
+    return { hasGoogleAuth: false, detectedAiSessions: [], isLocked }
   }
 }
 
@@ -219,16 +286,78 @@ function getSystemBrowserTargets(): {
 
     return {
       firefoxTargets: [
-        { kind: 'firefox', label: 'Firefox', dirs: [join(appData, 'Mozilla', 'Firefox')] },
-        { kind: 'floorp', label: 'Floorp', dirs: [join(appData, 'Floorp')] }
+        {
+          kind: 'zen',
+          label: 'Zen Browser',
+          dirs: [
+            join(appData, 'zen'),
+            join(appData, 'Zen Browser'),
+            join(localAppData, 'zen'),
+            join(localAppData, 'Zen Browser')
+          ]
+        },
+        {
+          kind: 'firefox',
+          label: 'Firefox',
+          dirs: [
+            join(appData, 'Mozilla', 'Firefox'),
+            join(localAppData, 'Mozilla', 'Firefox')
+          ]
+        },
+        {
+          kind: 'floorp',
+          label: 'Floorp',
+          dirs: [
+            join(appData, 'Floorp'),
+            join(localAppData, 'Floorp')
+          ]
+        }
       ],
       chromeTargets: [
-        { kind: 'chrome', label: 'Chrome', dirs: [join(localAppData, 'Google', 'Chrome', 'User Data')] },
-        { kind: 'edge', label: 'Edge', dirs: [join(localAppData, 'Microsoft', 'Edge', 'User Data')] },
-        { kind: 'brave', label: 'Brave', dirs: [join(localAppData, 'BraveSoftware', 'Brave-Browser', 'User Data')] },
+        {
+          kind: 'chrome',
+          label: 'Chrome',
+          dirs: [
+            join(localAppData, 'Google', 'Chrome', 'User Data'),
+            join(appData, 'Google', 'Chrome', 'User Data')
+          ]
+        },
+        {
+          kind: 'edge',
+          label: 'Edge',
+          dirs: [
+            join(localAppData, 'Microsoft', 'Edge', 'User Data'),
+            join(appData, 'Microsoft', 'Edge', 'User Data')
+          ]
+        },
+        {
+          kind: 'brave',
+          label: 'Brave',
+          dirs: [
+            join(localAppData, 'BraveSoftware', 'Brave-Browser', 'User Data'),
+            join(appData, 'BraveSoftware', 'Brave-Browser', 'User Data')
+          ]
+        },
         { kind: 'chromium', label: 'Chromium', dirs: [join(localAppData, 'Chromium', 'User Data')] },
-        { kind: 'vivaldi', label: 'Vivaldi', dirs: [join(localAppData, 'Vivaldi', 'User Data')] },
-        { kind: 'opera', label: 'Opera', dirs: [join(appData, 'Opera Software', 'Opera Stable'), join(appData, 'Opera Software', 'Opera GX Stable')] }
+        {
+          kind: 'vivaldi',
+          label: 'Vivaldi',
+          dirs: [
+            join(localAppData, 'Vivaldi', 'User Data'),
+            join(appData, 'Vivaldi', 'User Data')
+          ]
+        },
+        {
+          kind: 'opera',
+          label: 'Opera',
+          dirs: [
+            join(appData, 'Opera Software', 'Opera Stable'),
+            join(appData, 'Opera Software', 'Opera GX Stable'),
+            join(localAppData, 'Programs', 'Opera GX'),
+            join(localAppData, 'Opera Software', 'Opera Stable'),
+            join(localAppData, 'Opera Software', 'Opera GX Stable')
+          ]
+        }
       ]
     }
   }
@@ -237,6 +366,7 @@ function getSystemBrowserTargets(): {
     const appSupport = join(home, 'Library', 'Application Support')
     return {
       firefoxTargets: [
+        { kind: 'zen', label: 'Zen Browser', dirs: [join(appSupport, 'zen'), join(appSupport, 'Zen')] },
         { kind: 'firefox', label: 'Firefox', dirs: [join(appSupport, 'Firefox')] },
         { kind: 'floorp', label: 'Floorp', dirs: [join(appSupport, 'Floorp')] }
       ],
@@ -254,14 +384,66 @@ function getSystemBrowserTargets(): {
   // Linux (Default)
   return {
     firefoxTargets: [
-      { kind: 'firefox', label: 'Firefox', dirs: [join(home, '.mozilla', 'firefox')] },
-      { kind: 'floorp', label: 'Floorp', dirs: [join(home, '.floorp')] }
+      {
+        kind: 'zen',
+        label: 'Zen Browser',
+        dirs: [
+          join(home, '.zen'),
+          join(home, '.var', 'app', 'app.zen_browser.zen', '.zen'),
+          join(home, '.var', 'app', 'io.github.zen_browser.zen', '.zen')
+        ]
+      },
+      {
+        kind: 'firefox',
+        label: 'Firefox',
+        dirs: [
+          join(home, '.mozilla', 'firefox'),
+          join(home, '.var', 'app', 'org.mozilla.firefox', '.mozilla', 'firefox'),
+          join(home, 'snap', 'firefox', 'common', '.mozilla', 'firefox')
+        ]
+      },
+      {
+        kind: 'floorp',
+        label: 'Floorp',
+        dirs: [
+          join(home, '.floorp'),
+          join(home, '.var', 'app', 'one.ablaze.floorp', '.floorp')
+        ]
+      }
     ],
     chromeTargets: [
-      { kind: 'chrome', label: 'Chrome', dirs: [join(home, '.config', 'google-chrome')] },
-      { kind: 'chromium', label: 'Chromium', dirs: [join(home, '.config', 'chromium')] },
-      { kind: 'brave', label: 'Brave', dirs: [join(home, '.config', 'BraveSoftware', 'Brave-Browser')] },
-      { kind: 'edge', label: 'Edge', dirs: [join(home, '.config', 'microsoft-edge')] },
+      {
+        kind: 'chrome',
+        label: 'Chrome',
+        dirs: [
+          join(home, '.config', 'google-chrome'),
+          join(home, '.var', 'app', 'com.google.Chrome', 'config', 'google-chrome')
+        ]
+      },
+      {
+        kind: 'chromium',
+        label: 'Chromium',
+        dirs: [
+          join(home, '.config', 'chromium'),
+          join(home, 'snap', 'chromium', 'current', '.config', 'chromium')
+        ]
+      },
+      {
+        kind: 'brave',
+        label: 'Brave',
+        dirs: [
+          join(home, '.config', 'BraveSoftware', 'Brave-Browser'),
+          join(home, '.var', 'app', 'com.brave.Browser', 'config', 'BraveSoftware', 'Brave-Browser')
+        ]
+      },
+      {
+        kind: 'edge',
+        label: 'Edge',
+        dirs: [
+          join(home, '.config', 'microsoft-edge'),
+          join(home, '.var', 'app', 'com.microsoft.Edge', 'config', 'microsoft-edge')
+        ]
+      },
       { kind: 'vivaldi', label: 'Vivaldi', dirs: [join(home, '.config', 'vivaldi')] },
       { kind: 'opera', label: 'Opera', dirs: [join(home, '.config', 'opera')] }
     ]
@@ -272,30 +454,75 @@ export function detectProfiles(): BrowserProfile[] {
   const profiles: BrowserProfile[] = []
   const { firefoxTargets, chromeTargets } = getSystemBrowserTargets()
 
-  // 1. Scan Firefox-family browsers
+  // 1. Scan Firefox-family browsers (Firefox, Floorp, Zen)
   for (const { kind, label, dirs } of firefoxTargets) {
     for (const ffDir of dirs) {
       if (!existsSync(ffDir)) continue
 
       const iniPath = join(ffDir, 'profiles.ini')
-      const ini = existsSync(iniPath) ? readFileSync(iniPath, 'utf8') : ''
       const names = new Map<string, string>()
-      let curPath: string | null = null
-      let curName: string | null = null
-      for (const line of ini.split('\n')) {
-        const pm = line.match(/^Path=(.+)$/)
-        const nm = line.match(/^Name=(.+)$/)
-        if (pm) curPath = pm[1].trim().replace(/\r$/, '')
-        else if (nm) curName = nm[1].trim().replace(/\r$/, '')
-        else if (line.startsWith('[') && curPath && curName) {
-          names.set(curPath, curName)
-          curPath = null
-          curName = null
+
+      if (existsSync(iniPath)) {
+        try {
+          const ini = readFileSync(iniPath, 'utf8')
+          let curPath: string | null = null
+          let curName: string | null = null
+          let isRelative = true
+
+          for (const line of ini.split('\n')) {
+            const trimmed = line.trim()
+            const pm = trimmed.match(/^Path=(.+)$/)
+            const nm = trimmed.match(/^Name=(.+)$/)
+            const rel = trimmed.match(/^IsRelative=(0|1)$/)
+            if (pm) curPath = pm[1].trim().replace(/\r$/, '')
+            else if (nm) curName = nm[1].trim().replace(/\r$/, '')
+            else if (rel) isRelative = rel[1] === '1'
+            else if (trimmed.startsWith('[') && curPath) {
+              names.set(curPath, curName || curPath)
+              const fullDir = isRelative ? join(ffDir, curPath) : curPath
+              const db = join(fullDir, 'cookies.sqlite')
+              if (existsSync(db) && !profiles.some((p) => p.cookieDb === db)) {
+                const info = firefoxProfileInfo(db)
+                profiles.push({
+                  id: `${kind}-${curName || curPath}`,
+                  browser: kind,
+                  name: `${label} — ${curName || curPath}`,
+                  cookieDb: db,
+                  hasGoogleAuth: info.hasGoogleAuth,
+                  detectedAiSessions: info.detectedAiSessions,
+                  lastAccessed: info.lastAccessed,
+                  isLocked: info.isLocked
+                })
+              }
+              curPath = null
+              curName = null
+              isRelative = true
+            }
+          }
+          if (curPath) {
+            names.set(curPath, curName || curPath)
+            const fullDir = isRelative ? join(ffDir, curPath) : curPath
+            const db = join(fullDir, 'cookies.sqlite')
+            if (existsSync(db) && !profiles.some((p) => p.cookieDb === db)) {
+              const info = firefoxProfileInfo(db)
+              profiles.push({
+                id: `${kind}-${curName || curPath}`,
+                browser: kind,
+                name: `${label} — ${curName || curPath}`,
+                cookieDb: db,
+                hasGoogleAuth: info.hasGoogleAuth,
+                detectedAiSessions: info.detectedAiSessions,
+                lastAccessed: info.lastAccessed,
+                isLocked: info.isLocked
+              })
+            }
+          }
+        } catch {
+          // ignore ini parse error
         }
       }
-      if (curPath && curName) names.set(curPath, curName)
 
-      // Look in both root profile dirs and 'Profiles' subfolder
+      // Also scan root dir and 'Profiles' subfolder as fallback
       const searchDirs = [ffDir]
       const profilesSubdir = join(ffDir, 'Profiles')
       if (existsSync(profilesSubdir)) searchDirs.push(profilesSubdir)
@@ -305,7 +532,7 @@ export function detectProfiles(): BrowserProfile[] {
           for (const dir of readdirSync(sDir, { withFileTypes: true })) {
             if (!dir.isDirectory()) continue
             const db = join(sDir, dir.name, 'cookies.sqlite')
-            if (existsSync(db)) {
+            if (existsSync(db) && !profiles.some((p) => p.cookieDb === db)) {
               const name = names.get(dir.name) ?? names.get(`Profiles/${dir.name}`) ?? dir.name
               const info = firefoxProfileInfo(db)
               profiles.push({
@@ -314,7 +541,9 @@ export function detectProfiles(): BrowserProfile[] {
                 name: `${label} — ${name}`,
                 cookieDb: db,
                 hasGoogleAuth: info.hasGoogleAuth,
-                lastAccessed: info.lastAccessed
+                detectedAiSessions: info.detectedAiSessions,
+                lastAccessed: info.lastAccessed,
+                isLocked: info.isLocked
               })
             }
           }
@@ -335,16 +564,20 @@ export function detectProfiles(): BrowserProfile[] {
       const directDbs = [join(dir, 'Network', 'Cookies'), join(dir, 'Cookies')]
       const directDb = directDbs.find((p) => existsSync(p))
       if (directDb) {
-        const info = chromeProfileInfo(directDb)
-        profiles.push({
-          id: `${kind}-default`,
-          browser: kind,
-          name: `${label} — Default`,
-          cookieDb: directDb,
-          localState: existsSync(localState) ? localState : undefined,
-          hasGoogleAuth: info.hasGoogleAuth,
-          lastAccessed: info.lastAccessed
-        })
+        if (!profiles.some((p) => p.cookieDb === directDb)) {
+          const info = chromeProfileInfo(directDb)
+          profiles.push({
+            id: `${kind}-default`,
+            browser: kind,
+            name: `${label} — Default`,
+            cookieDb: directDb,
+            localState: existsSync(localState) ? localState : undefined,
+            hasGoogleAuth: info.hasGoogleAuth,
+            detectedAiSessions: info.detectedAiSessions,
+            lastAccessed: info.lastAccessed,
+            isLocked: info.isLocked
+          })
+        }
       }
 
       // Check all subdirectories (Default, Profile 1, Profile 2, etc.)
@@ -367,7 +600,9 @@ export function detectProfiles(): BrowserProfile[] {
               cookieDb: db,
               localState: existsSync(localState) ? localState : undefined,
               hasGoogleAuth: info.hasGoogleAuth,
-              lastAccessed: info.lastAccessed
+              detectedAiSessions: info.detectedAiSessions,
+              lastAccessed: info.lastAccessed,
+              isLocked: info.isLocked
             })
           }
         }
@@ -377,8 +612,13 @@ export function detectProfiles(): BrowserProfile[] {
     }
   }
 
-  // Sort by lastAccessed descending
-  profiles.sort((a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0))
+  // Sort: profiles with any AI session or recent activity first
+  profiles.sort((a, b) => {
+    const aCount = (a.detectedAiSessions?.length ?? 0) + (a.hasGoogleAuth ? 1 : 0)
+    const bCount = (b.detectedAiSessions?.length ?? 0) + (b.hasGoogleAuth ? 1 : 0)
+    if (bCount !== aCount) return bCount - aCount
+    return (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0)
+  })
   if (profiles.length > 0) {
     profiles[0].isLatest = true
   }
@@ -394,6 +634,7 @@ export async function detectDefaultBrowser(): Promise<BrowserKind | null> {
         timeout: 1500
       })
       const desktop = stdout.trim().toLowerCase()
+      if (desktop.includes('zen')) return 'zen'
       if (desktop.includes('floorp')) return 'floorp'
       if (desktop.includes('firefox')) return 'firefox'
       if (desktop.includes('google-chrome') || desktop.includes('chrome')) return 'chrome'
@@ -688,7 +929,8 @@ export async function readBrowserCookies(
   profile: BrowserProfile,
   scope: 'google' | 'all' = 'all'
 ): Promise<BrowserCookie[]> {
-  const isFirefoxFamily = profile.browser === 'firefox' || profile.browser === 'floorp'
+  const isFirefoxFamily =
+    profile.browser === 'firefox' || profile.browser === 'floorp' || profile.browser === 'zen'
   const all = isFirefoxFamily
     ? await readFirefoxCookies(profile, scope)
     : await readChromeCookies(profile, scope)
@@ -705,6 +947,65 @@ export async function readBrowserCookies(
     }
   }
   return [...best.values()]
+}
+
+export async function readCookiesFromCustomDirectory(
+  dirPath: string
+): Promise<{ profile: BrowserProfile; cookies: BrowserCookie[] }> {
+  if (!existsSync(dirPath)) {
+    throw new Error(`Directory does not exist: ${dirPath}`)
+  }
+
+  // 1. Check for Firefox/Zen cookies.sqlite
+  const ffDbCandidates = [
+    join(dirPath, 'cookies.sqlite'),
+    join(dirPath, 'Profiles', 'cookies.sqlite')
+  ]
+  const ffDb = ffDbCandidates.find((p) => existsSync(p))
+  if (ffDb) {
+    const info = firefoxProfileInfo(ffDb)
+    const profile: BrowserProfile = {
+      id: `custom-zen-${randomUUID()}`,
+      browser: 'zen',
+      name: `Custom Profile (${dirPath})`,
+      cookieDb: ffDb,
+      detectedAiSessions: info.detectedAiSessions,
+      hasGoogleAuth: info.hasGoogleAuth
+    }
+    const cookies = await readFirefoxCookies(profile, 'all')
+    return { profile, cookies }
+  }
+
+  // 2. Check for Chromium Cookies
+  const chromeDbCandidates = [
+    join(dirPath, 'Network', 'Cookies'),
+    join(dirPath, 'Cookies'),
+    join(dirPath, 'Default', 'Network', 'Cookies'),
+    join(dirPath, 'Default', 'Cookies')
+  ]
+  const chromeDb = chromeDbCandidates.find((p) => existsSync(p))
+  if (chromeDb) {
+    const localStateCandidates = [
+      join(dirPath, 'Local State'),
+      join(dirPath, '..', 'Local State'),
+      join(dirPath, 'User Data', 'Local State')
+    ]
+    const localState = localStateCandidates.find((p) => existsSync(p))
+    const info = chromeProfileInfo(chromeDb)
+    const profile: BrowserProfile = {
+      id: `custom-chromium-${randomUUID()}`,
+      browser: 'chromium',
+      name: `Custom Profile (${dirPath})`,
+      cookieDb: chromeDb,
+      localState,
+      detectedAiSessions: info.detectedAiSessions,
+      hasGoogleAuth: info.hasGoogleAuth
+    }
+    const cookies = await readChromeCookies(profile, 'all')
+    return { profile, cookies }
+  }
+
+  throw new Error(`No browser cookie database (cookies.sqlite or Network/Cookies) found in "${dirPath}".`)
 }
 
 export function parseCookieEditorJson(jsonStr: string): BrowserCookie[] {

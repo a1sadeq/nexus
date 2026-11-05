@@ -5,7 +5,7 @@ export const SYNC_BANNER_DISMISSED_KEY = 'nexus.sync_banner_dismissed'
 
 interface SyncReminderBannerProps {
   onSyncComplete?: (count: number) => void
-  onOpenSettings?: (section?: 'general' | 'models' | 'themes' | 'webview' | 'shortcuts') => void
+  onOpenSettings?: (section?: 'general' | 'models' | 'sessions' | 'themes' | 'webview' | 'shortcuts') => void
 }
 
 export default function SyncReminderBanner({ onSyncComplete, onOpenSettings }: SyncReminderBannerProps) {

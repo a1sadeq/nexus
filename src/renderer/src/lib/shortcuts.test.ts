@@ -32,6 +32,7 @@ describe('shortcuts module', () => {
     expect(keys).toEqual(['Ctrl', 'T'])
     expect(getShortcutKeys('skills-palette')).toEqual(['Ctrl', 'S'])
     expect(getShortcutKeys('skills-base-modal')).toEqual(['Ctrl', 'Shift', 'S'])
+    expect(getShortcutKeys('shell-inspector')).toEqual(['Ctrl', 'Alt', 'Shift', 'I'])
   })
 
   it('allows customizing a shortcut and retrieves the custom key', () => {
@@ -150,5 +151,20 @@ describe('shortcuts module', () => {
     } as unknown as KeyboardEvent
 
     expect(parseKeyEventToKeys(event)).toBeNull()
+  })
+
+  it('matches shell-inspector shortcut with Ctrl+Alt+Shift+I', () => {
+    const event = {
+      ctrlKey: true,
+      metaKey: false,
+      altKey: true,
+      shiftKey: true,
+      key: 'I',
+      code: 'KeyI'
+    } as unknown as KeyboardEvent
+
+    expect(matchesShortcut(event, ['Ctrl', 'Alt', 'Shift', 'I'])).toBe(true)
+    expect(matchesShortcut(event, ['Ctrl', 'Shift', 'I'])).toBe(false)
+    expect(matchesShortcut(event, ['Ctrl', 'Shift', 'D'])).toBe(false)
   })
 })

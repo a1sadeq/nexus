@@ -21,7 +21,13 @@ export interface GoogleSignInProfile {
   browser: string
   name: string
   hasGoogleAuth: boolean
+  detectedAiSessions?: string[]
+  lastAccessed?: number
+  isLatest?: boolean
+  isLocked?: boolean
 }
+
+export type DetectedBrowserProfile = GoogleSignInProfile
 
 export type GoogleSignInStage =
   | 'opening-browser'
@@ -42,8 +48,11 @@ export interface SessionImportResult {
   success: boolean
   count?: number
   profilesCount?: number
+  profileName?: string
+  detectedProviders?: string[]
   message?: string
   error?: string
+  canceled?: boolean
 }
 
 export interface NexusGoogleSignIn {
@@ -60,6 +69,7 @@ export interface NexusGoogleSignIn {
 export interface NexusSessions {
   syncAll: () => Promise<SessionImportResult>
   syncProfile: (profileId: string) => Promise<SessionImportResult>
+  pickCustomFolder: () => Promise<SessionImportResult>
   importJson: (json: string) => Promise<SessionImportResult>
   getProfiles: () => Promise<GoogleSignInProfile[]>
   pickProfile: (profileId: string) => Promise<unknown>
@@ -73,6 +83,7 @@ export interface NexusWindowControls {
   maximizeToggle: () => void
   close: () => void
   isMaximized: () => Promise<boolean>
+  onMaximizedChange?: (callback: (isMaximized: boolean) => void) => () => void
 }
 
 export interface SkillVariable {

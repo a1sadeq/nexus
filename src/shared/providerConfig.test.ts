@@ -36,3 +36,11 @@ describe('getMergedProviderFeatures precedence', () => {
     expect(merged.customInitScript).toBe('/*a*/\n\n/*b*/')
   })
 })
+
+describe('provider motion opt-in', () => {
+  it('defaults to off and persists per-provider choices through merge', () => {
+    expect(getMergedProviderFeatures('arena-ai').pauseCssAnimations).not.toBe(true)
+    expect(getMergedProviderFeatures('arena-ai', { features: { pauseCssAnimations: true } }).pauseCssAnimations).toBe(true)
+    expect(getMergedProviderFeatures('gemini', { features: { pauseCssAnimations: false } }).pauseCssAnimations).toBe(false)
+  })
+})

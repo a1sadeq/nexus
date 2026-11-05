@@ -23,7 +23,10 @@ import { executeHookCapture, hookContextId } from './featureHookCapture'
 import { parseFeatureHookImport } from '../shared/featureHookImport'
 import { TabDiscardManager, type DiscardableView, isUsableRestoreUrl } from './tabDiscardManager'
 import { closeWebContents } from './webContentsLifecycle'
+import { chromeCompatibleUserAgent, linuxDisplaySwitches, windowChrome } from './platformConfig'
 import { PreviewCaptureLoop } from './previewCaptureLoop'
+import { buildProviderMotionScript } from './providerMotion'
+import { ActiveTitleSync, buildActiveTitleReadScript } from './activeTitleSync'
 import { getCustomThemeEntry, saveCustomThemeEntry, removeCustomThemeEntry } from './customThemesStore'
 import { PROVIDER_THEMES, mergeOverrides, getStructuralVars } from './providerThemes'
 import { type ProviderOverrides, getMergedProviderFeatures } from '../shared/providerConfig'
@@ -44,8 +47,10 @@ import {
   syncAllSessionsFromBrowsers,
   syncSessionFromProfile,
   importCookiesFromJson,
+  injectCookies,
   type GoogleSignInEvent
 } from './googleAuth'
+import { readCookiesFromCustomDirectory } from './cookieImport'
 import {
   handleFolderUpload,
   handleFileUpload,
@@ -79,6 +84,10 @@ if (!gotSingleInstanceLock) {
   })
 }
 
+// userData pinned: renaming package.json must never orphan tabs/logins again.
+// Must be established BEFORE reading pins, thumbnails, sessions, or stores.
+app.setPath('userData', join(app.getPath('appData'), 'nexus'))
+
 let mainWindow: BrowserWindow | null = null
 
 function sendToMainWindow(channel: string, ...args: any[]) {
@@ -92,30 +101,51 @@ let activeViewVisible = true
 const viewTitles = new Map<string, string>()
 const viewModelKeys = new Map<string, string>()
 let providerConfig: import('../shared/providerConfig').ProviderConfigMap = {}
-// MUST match the real platform AND Chromium version. Google OAuth cross-checks
-// Sec-CH-UA client hints (platform + version) against the User-Agent string.
-// A Windows UA on a Linux box (or a version mismatch) = "This browser or app
-// may not be secure" sign-in block. Electron 43.2.0 ships Chromium 150.
-const AI_UA =
-  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36'
+// Match the actual OS and bundled Chromium version; do not impersonate Linux on Windows.
+// Strip Electron/product tokens by constructing a regular Chrome-compatible UA.
+const AI_UA = chromeCompatibleUserAgent(process.platform, process.arch, process.versions.chrome)
 app.userAgentFallback = AI_UA
 
-// Memory Optimization Flags
+// Preserve the existing site-isolation policy; let V8 select its normal heap limit.
 app.commandLine.appendSwitch('disable-site-isolation-trials')
-app.commandLine.appendSwitch('js-flags', '--max-old-space-size=256')
+
+// Authoritative in-memory pinned tab cache. Eliminates synchronous per-candidate
+// disk reads during discard scans and ensures 100% synchronization with UI state.
+let isPinnedInitialized = false
+export const pinnedTabIds = new Set<string>()
+let pinWriteChain = Promise.resolve()
+
+export function getFinalUserDataDir(): string {
+  return join(app.getPath('appData'), 'nexus')
+}
+
+export function getPinnedFilePath(): string {
+  return join(getFinalUserDataDir(), 'pinned.json')
+}
+
+export function loadInitialPinnedState(): void {
+  try {
+    const pinnedPath = getPinnedFilePath()
+    if (existsSync(pinnedPath)) {
+      const raw = JSON.parse(readFileSync(pinnedPath, 'utf-8'))
+      if (Array.isArray(raw)) {
+        pinnedTabIds.clear()
+        for (const id of raw) {
+          if (typeof id === 'string') pinnedTabIds.add(id)
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[pinned-sync] Failed to read initial pinned.json:', err)
+  } finally {
+    isPinnedInitialized = true
+  }
+}
+loadInitialPinnedState()
 
 export const tabDiscardManager = new TabDiscardManager({
-  getUserDataDir: () => app.getPath('userData'),
-  isPinned: (tabId: string) => {
-    try {
-      const pinnedFile = join(app.getPath('userData'), 'pinned.json')
-      if (existsSync(pinnedFile)) {
-        const arr = JSON.parse(readFileSync(pinnedFile, 'utf-8'))
-        if (Array.isArray(arr) && arr.includes(tabId)) return true
-      }
-    } catch {}
-    return false
-  },
+  getUserDataDir: () => getFinalUserDataDir(),
+  isPinned: (tabId: string) => pinnedTabIds.has(tabId),
   onTeardown: async (tabId, view, contents) => {
     await closeWebContents(contents)
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -167,6 +197,20 @@ ipcMain.handle('get_tab_discard_status', (event) => {
   return { success: true, status: tabDiscardManager.getStatus() }
 })
 
+// Explicit, trusted-shell-only video diagnostics. No URLs, media data or tokens.
+ipcMain.handle('get_media_diagnostics', (event) => {
+  if (!mainWindow || event.sender !== mainWindow.webContents) {
+    return { success: false, reason: 'untrusted_sender' }
+  }
+  return {
+    success: true,
+    platform: process.platform,
+    electron: process.versions.electron,
+    chromium: process.versions.chrome,
+    gpuFeatureStatus: app.getGPUFeatureStatus()
+  }
+})
+
 // Opt-in diagnostics; no polling timer, URLs, prompts, cookies, or page text.
 ipcMain.handle('get_resource_diagnostics', (event) => {
   if (!mainWindow || event.sender !== mainWindow.webContents) {
@@ -211,7 +255,7 @@ ipcMain.on('show_toast', (_event, msg: string) => {
   if (!activeViewId) return
   const view = aiViews.get(activeViewId)
   if (!view) return
-  
+
   const code = `
     (function() {
       let t = document.getElementById('__nexusTabToast');
@@ -227,17 +271,14 @@ ipcMain.on('show_toast', (_event, msg: string) => {
         t.style.marginTop = '0px';
       });
       clearTimeout(t._t);
-      t._t = setTimeout(() => { 
-        t.style.opacity = '0'; 
+      t._t = setTimeout(() => {
+        t.style.opacity = '0';
         t.style.marginTop = '-10px';
       }, 3000);
     })();
   `;
   view.webContents.executeJavaScript(code).catch(() => {})
 })
-
-
-
 
 let tray: Tray | null = null
 let isQuitting = false
@@ -292,7 +333,7 @@ ipcMain.handle('set_global_hotkey', (_event, newHotkey: string) => {
   try { cfg = JSON.parse(readFileSync(configPath, 'utf-8')) } catch {}
   cfg.hotkey = newHotkey
   try { writeFileSync(configPath, JSON.stringify(cfg, null, 2)) } catch {}
-  
+
   return updateGlobalHotkey(newHotkey)
 })
 
@@ -500,7 +541,6 @@ ipcMain.handle(
   }
 )
 
-
 ipcMain.on('trigger_active_upload', async () => {
   if (activeViewId && mainWindow && !mainWindow.isDestroyed()) {
     const view = aiViews.get(activeViewId)
@@ -604,11 +644,19 @@ async function clickActiveViewFeature(
 ipcMain.handle('ai_stop_generation', () => clickActiveViewFeature('stopGenerationSelector'))
 ipcMain.handle('ai_site_new_chat', () => clickActiveViewFeature('newChatSelector'))
 
-ipcMain.on('window_minimize', () => {
+function isValidMainWindowSender(event: Electron.IpcMainEvent | Electron.IpcMainInvokeEvent): boolean {
+  if (!mainWindow || mainWindow.isDestroyed()) return false
+  if (event.sender !== mainWindow.webContents) return false
+  return true
+}
+
+ipcMain.on('window_minimize', (event) => {
+  if (!isValidMainWindowSender(event)) return
   mainWindow?.minimize()
 })
 
-ipcMain.on('window_maximize_toggle', () => {
+ipcMain.on('window_maximize_toggle', (event) => {
+  if (!isValidMainWindowSender(event)) return
   if (!mainWindow || mainWindow.isDestroyed()) return
   if (mainWindow.isMaximized()) {
     mainWindow.unmaximize()
@@ -617,11 +665,13 @@ ipcMain.on('window_maximize_toggle', () => {
   }
 })
 
-ipcMain.on('window_close', () => {
+ipcMain.on('window_close', (event) => {
+  if (!isValidMainWindowSender(event)) return
   mainWindow?.close()
 })
 
-ipcMain.handle('window_is_maximized', () => {
+ipcMain.handle('window_is_maximized', (event) => {
+  if (!isValidMainWindowSender(event)) return false
   return mainWindow && !mainWindow.isDestroyed() ? mainWindow.isMaximized() : false
 })
 
@@ -988,12 +1038,12 @@ async function injectSkillPromptIntoWebview(
 
 ipcMain.handle('switch_to_tauri', () => {
   console.log('Switching to Tauri (Nexus Lite)...')
-  
-  const projectRoot = process.env.NODE_ENV === 'development' 
+
+  const projectRoot = process.env.NODE_ENV === 'development'
     ? path.join(__dirname, '../../')
     : path.join(app.getAppPath(), '../../') // Might need adjustment in prod
 
-  const releaseBin = process.platform === 'win32' 
+  const releaseBin = process.platform === 'win32'
     ? path.join(projectRoot, 'src-tauri/target/release/nexus.exe')
     : path.join(projectRoot, 'src-tauri/target/release/nexus')
 
@@ -1122,6 +1172,7 @@ const DEFAULT_ACTION_KEYS: Record<string, string[]> = {
   'upload-file': ['Ctrl', 'O'],
   'upload-folder': ['Ctrl', 'Shift', 'O'],
   'model-dev-tools': ['Ctrl', 'Shift', 'D'],
+  'shell-inspector': ['Ctrl', 'Alt', 'Shift', 'I'],
   'skills-palette': ['Ctrl', 'S'],
   'skills-base-modal': ['Ctrl', 'Shift', 'S'],
   'fuzzy-cmd': ['Ctrl', 'Shift', 'P'],
@@ -1150,7 +1201,10 @@ function loadCustomKeymap(): void {
 }
 
 ipcMain.on('set_overlays_open', (_event, open: boolean) => {
-  overlaysOpen = Boolean(open)
+  const next = Boolean(open)
+  if (overlaysOpen === next) return
+  overlaysOpen = next
+  restartActiveArenaTitleSync()
 })
 
 ipcMain.on('set_shortcut_map', (_event, map: unknown) => {
@@ -1171,6 +1225,7 @@ function actionKeys(id: string): string[] {
 // even when input.key reports a layout-specific character.
 const CODE_KEY_MAP: Record<string, string> = {
   KeyB: 'b',
+  KeyI: 'i',
   KeyN: 'n',
   KeyO: 'o',
   BracketRight: ']',
@@ -1204,6 +1259,7 @@ function keyMatches(input: Electron.Input, keys: string[]): boolean {
   const eventKey = (input.key || '').toLowerCase()
   if (eventKey && eventKey === target) return true
   if (target === 'b' && (eventKey === 'b' || input.code === 'KeyB' || input.code?.toLowerCase() === 'keyb')) return true
+  if (target === 'i' && (eventKey === 'i' || input.code === 'KeyI' || input.code?.toLowerCase() === 'keyi')) return true
   if (target === 'o' && (eventKey === 'o' || input.code === 'KeyO' || input.code?.toLowerCase() === 'keyo')) return true
   if (eventKey === ' ' && target === 'space') return true
   const codeKey = CODE_KEY_MAP[input.code || '']
@@ -1216,7 +1272,7 @@ function matchesAction(input: Electron.Input, id: string): boolean {
   return modifiersMatch(input, keys) && keyMatches(input, keys)
 }
 
-function routeGlobalShortcut(event: Electron.Event, input: Electron.Input, _source: 'window' | 'view'): boolean {
+export function routeGlobalShortcut(event: Electron.Event, input: Electron.Input, _source: 'window' | 'view'): boolean {
   if (input.type !== 'keyDown') return false
 
   const isCtrlOrMeta = Boolean(input.control || input.meta)
@@ -1365,6 +1421,18 @@ function routeGlobalShortcut(event: Electron.Event, input: Electron.Input, _sour
     return true
   }
 
+  // Ctrl+Alt+Shift+I -> Nexus Shell Inspector (mainWindow.webContents)
+  if (
+    matchesAction(input, 'shell-inspector') ||
+    (isCtrlOrMeta && input.alt && input.shift && (keyLower === 'i' || code === 'KeyI'))
+  ) {
+    event.preventDefault()
+    if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
+      mainWindow.webContents.openDevTools({ mode: 'detach' })
+    }
+    return true
+  }
+
   // Ctrl+Shift+D or Ctrl+Shift+I -> DevTools
   if (
     matchesAction(input, 'model-dev-tools') ||
@@ -1403,6 +1471,28 @@ function routeGlobalShortcut(event: Electron.Event, input: Electron.Input, _sour
   return false
 }
 
+// Exported testing hooks for shortcut routing unit tests
+export function setMainWindowForTesting(win: any): void {
+  mainWindow = win
+}
+
+export function setActiveViewForTesting(tabId: string | null, view?: any): void {
+  activeViewId = tabId
+  if (tabId && view) {
+    aiViews.set(tabId, view)
+  } else if (tabId === null) {
+    aiViews.clear()
+  }
+}
+
+export function setOverlaysOpenForTesting(open: boolean): void {
+  overlaysOpen = open
+}
+
+export function setCustomKeymapForTesting(map: Record<string, string[]>): void {
+  customKeymap = map
+}
+
 function createWindow() {
   if (mainWindow && !mainWindow.isDestroyed()) {
     if (mainWindow.isMinimized()) mainWindow.restore()
@@ -1419,17 +1509,15 @@ function createWindow() {
     height: bounds.height,
     x: bounds.x,
     y: bounds.y,
+    minWidth: 800,
+    minHeight: 500,
     show: true,
     autoHideMenuBar: true,
-    frame: process.platform === 'linux',
-    ...(process.platform !== 'linux' ? {
-      titleBarStyle: 'hidden'
-    } : {}),
+    ...windowChrome(process.platform),
     ...(process.platform === 'linux' ? { icon } : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
-      sandbox: false,
-      additionalArguments: ['--js-flags=--max-old-space-size=256']
+      sandbox: false
     }
   })
 
@@ -1475,15 +1563,31 @@ function createWindow() {
   // Stop screenshot capture when hidden to tray; resume the requested preview on show.
   mainWindow.on('hide', () => {
     previewLoop.stop()
+    arenaTitleSync.stop()
   })
 
-  mainWindow.on('minimize', () => previewLoop.stop())
-  const resumePreview = () => { if (previewViewId) previewLoop.start(previewViewId) }
+  mainWindow.on('minimize', () => { previewLoop.stop(); arenaTitleSync.stop() })
+  mainWindow.on('maximize', () => {
+    sendToMainWindow('window_maximized_changed', true)
+  })
+  mainWindow.on('unmaximize', () => {
+    sendToMainWindow('window_maximized_changed', false)
+  })
+  mainWindow.on('show', restartActiveArenaTitleSync)
+  mainWindow.on('restore', restartActiveArenaTitleSync)
+  mainWindow.on('blur', () => previewLoop.stop())
+  const resumePreview = () => {
+    if (previewViewId && mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() && !mainWindow.isMinimized()) {
+      previewLoop.start(previewViewId)
+    }
+  }
   mainWindow.on('show', resumePreview)
   mainWindow.on('restore', resumePreview)
+  mainWindow.on('focus', resumePreview)
 
   mainWindow.on('closed', () => {
     previewLoop.stop()
+    arenaTitleSync.stop()
     mainWindow = null
     currentUiZoom = 1.0; // reset on destroy if needed
   })
@@ -1532,19 +1636,11 @@ function createWindow() {
   }
 }
 
-// Wayland stays default (X11+NVIDIA GPU presenter is broken); GPU is disabled so
-// Chromium never inits Vulkan (Wayland surface_factory + Vulkan incompatibility error).
-app.commandLine.appendSwitch('ozone-platform-hint', 'auto')
-app.commandLine.appendSwitch('enable-wayland-ime')
-app.commandLine.appendSwitch('wayland-text-input-version', '3')
-app.commandLine.appendSwitch('ignore-gpu-blocklist')
-// NOTE: GPU is intentionally ENABLED. A previous build disabled it for RAM and
-// for an NVIDIA crash that does not apply here (this machine uses the Intel
-// iGPU, which Chromium drives fine — verified). Disabling the GPU kills WebGL
-// entirely in the AI webviews ("no webgl context"), which Google's sign-in risk
-// engine reads as a non-Chrome/automated browser and rejects the flow with
-// /v3/signin/rejected ("This browser or app may not be secure"). Real Chrome on
-// this machine exposes the Intel GPU via WebGL.
+// Let Chromium select a safe GPU/video path; do not force blocked drivers.
+// These switches are Linux-specific, not Windows/macOS settings.
+for (const [name, value] of linuxDisplaySwitches(process.platform)) {
+  app.commandLine.appendSwitch(name, value)
+}
 app.commandLine.appendSwitch('process-per-site')
 
 // userData pinned: renaming package.json must never orphan tabs/logins again
@@ -1569,7 +1665,7 @@ app.whenReady().then(() => {
   loadThemeFromDisk()
   loadProviderConfigFromDisk()
   tabDiscardManager.init()
-  session.fromPartition('persist:ai-shared').clearCache().catch(console.error)
+  // Retain persistent partition cache across launches to avoid cold-load network re-download penalties.
 
   // One-time migration: the old OAuth cookie bridge left empty/corrupted
   // Google cookies in the AI webview partition (blank page on Gemini).
@@ -1688,9 +1784,42 @@ app.whenReady().then(() => {
   // Register intelligent download manager routing
   registerDownloadHandler(session.fromPartition('persist:ai-shared'))
   registerDownloadHandler(session.defaultSession)
+
+  // Intercept and cancel WebAuthn/Passkey prompts in webviews so that authentication flows
+  // (Google, OpenAI, Claude, Microsoft) fall back smoothly to password/2FA instead of hanging
+  // on Windows Hello or unsupported hardware security key modals.
+  const setupWebAuthnCancellation = (targetSession: Electron.Session) => {
+    try {
+      targetSession.on('select-webauthn-account' as any, (_event: any, _details: any, callback: any) => {
+        if (typeof callback === 'function') {
+          try {
+            callback() // Invoking with no args cancels the WebAuthn ceremony cleanly
+          } catch {
+            // ignore
+          }
+        }
+      })
+      targetSession.on('select-webauthn-authenticator' as any, (_event: any, callback: any) => {
+        if (typeof callback === 'function') {
+          try {
+            callback()
+          } catch {
+            // ignore
+          }
+        }
+      })
+    } catch {
+      // ignore
+    }
+  }
+
+  setupWebAuthnCancellation(session.fromPartition('persist:ai-shared'))
+  setupWebAuthnCancellation(session.defaultSession)
+
   app.on('web-contents-created', (_event, contents) => {
     if (contents && contents.session) {
       registerDownloadHandler(contents.session)
+      setupWebAuthnCancellation(contents.session)
     }
   })
 
@@ -1739,7 +1868,6 @@ app.whenReady().then(() => {
 app.on('window-all-closed', () => {
   // e.preventDefault() not needed, removing app.quit() is enough
 })
-
 
 function focusPromptInView(view: Electron.WebContentsView | null | undefined, modelKey?: string): void {
   if (!view || view.webContents.isDestroyed()) return
@@ -1858,7 +1986,7 @@ if (!window.__nexusShiftScrollInjected) {
     if (e.shiftKey && e.deltaY !== 0 && e.deltaX === 0) {
       e.preventDefault();
       e.stopPropagation(); // Hide the broken event from Monaco/React
-      
+
       // Dispatch a corrected horizontal event
       const correctedEvent = new WheelEvent('wheel', {
         bubbles: true,
@@ -1956,10 +2084,18 @@ if (!window.__slashFocusInjected && ${enableSlash}) {
         }
       } catch(e) {}
     };
-    updateTitle();
-    window.__nexusTitleInterval = setInterval(updateTitle, ${pollInterval});
-    window.__nexusTitleVisibilityHandler = updateTitle;
-    document.addEventListener('visibilitychange', updateTitle);
+    const syncTitlePolling = () => {
+      if (document.visibilityState === 'hidden') {
+        if (window.__nexusTitleInterval) clearInterval(window.__nexusTitleInterval);
+        window.__nexusTitleInterval = null;
+        return;
+      }
+      updateTitle();
+      if (!window.__nexusTitleInterval) window.__nexusTitleInterval = setInterval(updateTitle, ${pollInterval});
+    };
+    window.__nexusTitleVisibilityHandler = syncTitlePolling;
+    document.addEventListener('visibilitychange', syncTitlePolling);
+    syncTitlePolling();
   }
   window.__titleExtractionInjected = true;
 })();
@@ -2007,7 +2143,8 @@ if (!window.__focusRetentionInjected && ${enableRetention}) {
       s.id = '__nexus_virtualization';
       document.head.appendChild(s);
     }
-    s.textContent = \`\${sel} { content-visibility: auto; contain-intrinsic-size: auto 800px; }\`;
+    const css = \`\${sel} { content-visibility: auto; contain-intrinsic-size: auto 800px; }\`;
+    if (s.textContent !== css) s.textContent = css;
   }
 })();
 
@@ -2020,10 +2157,46 @@ try {
 `
 }
 
+function shouldIgnoreProviderTitle(title: string, defaultTitles: string[]): boolean {
+  const isDefault = defaultTitles.some((t) => {
+      const defaultLower = t.toLowerCase().trim();
+      const titleLower = (title || '').toLowerCase().trim();
+      return titleLower === defaultLower ||
+             titleLower.startsWith(defaultLower + ' -') ||
+             titleLower.startsWith(defaultLower + ' |') ||
+             titleLower === 'chatgpt' ||
+             titleLower === 'qwen' ||
+             titleLower === 'claude' || titleLower === 'google gemini' || titleLower === 'kimi ai' || titleLower === 'qwen studio' || titleLower === 'z.ai' || titleLower === 'z chat';
+    });
+
+    // Also ignore empty titles or generic "new chat" variations
+    const genericNoise = !title || title.trim() === '' || /^new chat\b/i.test(title.trim()) || title.trim().startsWith('http://') || title.trim().startsWith('https://') || title.trim().toLowerCase() === 'loading' || title.trim().toLowerCase() === 'loading...';
+
+  return isDefault || genericNoise
+}
+
 function ensureAiView(tabId: string): Electron.WebContentsView {
   let view = aiViews.get(tabId)
-  if (view && !view.webContents.isDestroyed()) return view
   if (view) {
+    let isDestroyed = false
+    try {
+      if (view.webContents && !view.webContents.isDestroyed()) {
+        return view
+      }
+      isDestroyed = view.webContents ? view.webContents.isDestroyed() : false
+    } catch (err) {
+      console.warn(`[ensureAiView] Accessor check failed for tab ${tabId}:`, err)
+      // If the accessor throws, but the manager still retains this view as live,
+      // return the existing view instead of creating an orphan replacement.
+      if (tabDiscardManager && typeof tabDiscardManager.hasView === 'function' && tabDiscardManager.hasView(tabId)) {
+        return view
+      }
+    }
+
+    if (!isDestroyed && tabDiscardManager && typeof tabDiscardManager.hasView === 'function' && tabDiscardManager.hasView(tabId)) {
+      return view
+    }
+
     // A close may finish natively after our timeout, or another owner may close
     // the contents. Never hand a destroyed wrapper back to activation/navigation.
     aiViews.delete(tabId)
@@ -2085,7 +2258,7 @@ function ensureAiView(tabId: string): Electron.WebContentsView {
       if (input.control && input.key.toLowerCase() === 'l' && input.type === 'keyDown') {
         event.preventDefault();
         const currentUrl = popupWindow.webContents.getURL();
-        
+
         // Spawn a tiny frameless window as the URL bar to completely bypass CSP
         const win = new BrowserWindow({
           width: 600,
@@ -2099,7 +2272,7 @@ function ensureAiView(tabId: string): Electron.WebContentsView {
             contextIsolation: false
           }
         });
-        
+
         const html = `
           <html>
           <body style="margin:0;padding:0;background:transparent;display:flex;justify-content:center;align-items:center;height:100vh;">
@@ -2121,7 +2294,7 @@ function ensureAiView(tabId: string): Electron.WebContentsView {
           </body>
           </html>
         `;
-        
+
         // using global ipcMain
         const navHandler = (_e, url) => {
           let finalUrl = url.trim();
@@ -2130,15 +2303,15 @@ function ensureAiView(tabId: string): Electron.WebContentsView {
           win.close();
         };
         const closeHandler = () => win.close();
-        
+
         ipcMain.once('popup-nav-' + win.id, navHandler);
         ipcMain.once('popup-close-' + win.id, closeHandler);
-        
+
         win.on('closed', () => {
           ipcMain.removeListener('popup-nav-' + win.id, navHandler);
           ipcMain.removeListener('popup-close-' + win.id, closeHandler);
         });
-        
+
         win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
       }
     });
@@ -2163,12 +2336,6 @@ function ensureAiView(tabId: string): Electron.WebContentsView {
     }
   })
 
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    try {
-      mainWindow.contentView.addChildView(view)
-    } catch {}
-  }
-
   // Forward keyboard events (like global shortcuts) from the inner view back to the main window,
   // handling all global shortcuts through unified native IPC routing.
   view.webContents.on('before-input-event', (event, input) => {
@@ -2190,26 +2357,10 @@ function ensureAiView(tabId: string): Electron.WebContentsView {
   view.webContents.on('page-title-updated', (_event, title) => {
     viewTitles.set(tabId, title) // Fix #1: Track titles for proper idle eviction
     const modelKey = viewModelKeys.get(tabId) || ''
-    const feats = getMergedProviderFeatures(modelKey, providerConfig[modelKey])
-    const defaultTitles = feats.defaultChatTitles || []
-    const isDefault = defaultTitles.some((t) => {
-      const defaultLower = t.toLowerCase().trim();
-      const titleLower = (title || '').toLowerCase().trim();
-      return titleLower === defaultLower || 
-             titleLower.startsWith(defaultLower + ' -') || 
-             titleLower.startsWith(defaultLower + ' |') ||
-             titleLower === 'chatgpt' ||
-             titleLower === 'qwen' ||
-             titleLower === 'claude' || titleLower === 'google gemini' || titleLower === 'kimi ai' || titleLower === 'qwen studio' || titleLower === 'z.ai' || titleLower === 'z chat';
-    });
-    
-    // Also ignore empty titles or generic "new chat" variations
-    const genericNoise = !title || title.trim() === '' || /^new chat\b/i.test(title.trim()) || title.trim().startsWith('http://') || title.trim().startsWith('https://') || title.trim().toLowerCase() === 'loading' || title.trim().toLowerCase() === 'loading...';
-
-    if (isDefault || genericNoise) {
-      // Filter out generic default title noise
-      return
-    }
+    const globalOv = providerConfig['ALL'] || providerConfig['global'] || {}
+    const feats = getMergedProviderFeatures(modelKey, providerConfig[modelKey], globalOv)
+    if (shouldIgnoreProviderTitle(title, feats.defaultChatTitles || [])) return
+    if (activeViewId === tabId) arenaTitleSync.invalidate()
     sendToMainWindow('ai-title-updated', tabId, title)
   })
 
@@ -2217,6 +2368,7 @@ function ensureAiView(tabId: string): Electron.WebContentsView {
     const modelKey = viewModelKeys.get(tabId) || ''
     applyWebviewTheme(view, modelKey)
     injectVirtualizationCss(view, modelKey)
+    applyProviderMotionMode(view, modelKey)
     executeCustomInitScript(view, modelKey)
   })
 
@@ -2282,19 +2434,27 @@ function ensureAiView(tabId: string): Electron.WebContentsView {
     }
   })
 
-  aiViews.set(tabId, view)
+  // Transactional registration: register with TabDiscardManager BEFORE adding to window or setting in aiViews
   tabDiscardManager.registerView(tabId, view as unknown as DiscardableView)
+
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    try {
+      mainWindow.contentView.addChildView(view)
+    } catch {}
+  }
+
+  aiViews.set(tabId, view)
   return view
 }
 
 ipcMain.on('navigate_to_url', async (_event, tabId, url, bounds, modelKey) => {
   await tabDiscardManager.waitForClose(tabId)
   wakeTokens.set(tabId, (wakeTokens.get(tabId) || 0) + 1)
-  inFlightWakes.delete(tabId)
+  activeWakeOperations.delete(tabId)
   console.log('[navigate_to_url]', tabId, url)
   tabDiscardManager.onExplicitNavigation(tabId)
   resolveModelKey(tabId, url, modelKey)
-  
+
   if (currentUiZoom !== 1.0 && bounds) {
     bounds = {
       x: Math.round(bounds.x * currentUiZoom),
@@ -2303,7 +2463,7 @@ ipcMain.on('navigate_to_url', async (_event, tabId, url, bounds, modelKey) => {
       height: Math.round(bounds.height * currentUiZoom)
     }
   }
-  
+
   const view = ensureAiView(tabId)
   applyWebviewTheme(view, viewModelKeys.get(tabId))
   view.setBounds(bounds)
@@ -2357,7 +2517,7 @@ function setViewBackground(view) {
 const previewLoop = new PreviewCaptureLoop<string>({
   intervalMs: 1000,
   canCapture: () => !!mainWindow && !mainWindow.isDestroyed() &&
-    mainWindow.isVisible() && !mainWindow.isMinimized(),
+    mainWindow.isVisible() && !mainWindow.isMinimized() && mainWindow.isFocused(),
   capture: async (tabId) => {
     const view = aiViews.get(tabId)
     if (!view || view.webContents.isDestroyed()) return null
@@ -2410,7 +2570,9 @@ function persistProviderConfig() {
 
 function updateWebviewTitlePoller(view: Electron.WebContentsView, modelKey: string): void {
   if (view.webContents.isDestroyed()) return
-  const feats = getMergedProviderFeatures(modelKey, providerConfig[modelKey])
+  // Keep live reconfiguration consistent with buildWebviewRuntimeJs.
+  const globalOv = providerConfig['ALL'] || providerConfig['global'] || {}
+  const feats = getMergedProviderFeatures(modelKey, providerConfig[modelKey], globalOv)
   const customTitleSel = feats.chatTitleSelector ? JSON.stringify(feats.chatTitleSelector) : 'null'
   const requestedInterval = feats.chatTitlePollingIntervalMs
   const pollInterval = requestedInterval === 0 ? 0
@@ -2444,13 +2606,32 @@ function updateWebviewTitlePoller(view: Electron.WebContentsView, modelKey: stri
           }
         } catch(e) {}
       };
-      updateTitle();
-      window.__nexusTitleInterval = setInterval(updateTitle, ${pollInterval});
-    window.__nexusTitleVisibilityHandler = updateTitle;
-    document.addEventListener('visibilitychange', updateTitle);
+      const syncTitlePolling = () => {
+        if (document.visibilityState === 'hidden') {
+          if (window.__nexusTitleInterval) clearInterval(window.__nexusTitleInterval);
+          window.__nexusTitleInterval = null;
+          return;
+        }
+        updateTitle();
+        if (!window.__nexusTitleInterval) window.__nexusTitleInterval = setInterval(updateTitle, ${pollInterval});
+      };
+      window.__nexusTitleVisibilityHandler = syncTitlePolling;
+      document.addEventListener('visibilitychange', syncTitlePolling);
+      syncTitlePolling();
     }
   })()`
   view.webContents.executeJavaScript(script).catch(() => {})
+}
+
+// Explicit opt-in; a sequence prevents stale async changes from restoring an older setting.
+let providerMotionSequence = 0
+function applyProviderMotionMode(view: Electron.WebContentsView, modelKey: string): void {
+  if (view.webContents.isDestroyed()) return
+  const feats = getMergedProviderFeatures(modelKey, providerConfig[modelKey])
+  const script = buildProviderMotionScript(feats.pauseCssAnimations === true, ++providerMotionSequence)
+  view.webContents.executeJavaScript(script).catch((err) => {
+    console.warn('[provider-motion] Could not update provider animation setting:', err)
+  })
 }
 
 function injectVirtualizationCss(view: Electron.WebContentsView, modelKey: string): void {
@@ -2463,7 +2644,8 @@ function injectVirtualizationCss(view: Electron.WebContentsView, modelKey: strin
     .executeJavaScript(`(() => {
       let s = document.getElementById('__nexus_virtualization');
       if (!s) { s = document.createElement('style'); s.id = '__nexus_virtualization'; document.head.appendChild(s); }
-      s.textContent = ${JSON.stringify(css)};
+      const css = ${JSON.stringify(css)};
+      if (s.textContent !== css) s.textContent = css;
     })()`)
     .catch(() => {})
 }
@@ -2547,7 +2729,7 @@ function buildWebviewThemeCss(themeData, url, viewWidthPx, overrides, modelKey?:
     p.hosts.some((h) => host === h || host.endsWith('.' + h))
   )
   let css = provider ? provider.css(merged) : genericFallbackCss(merged, dark)
-  
+
   // Apply customthemes.conf if exists
   const customKey = modelKey || resolveModelKey('', url)
   if (customKey) {
@@ -2556,7 +2738,7 @@ function buildWebviewThemeCss(themeData, url, viewWidthPx, overrides, modelKey?:
       css += '\n\n/* customthemes.conf */\n' + customEntry.css
     }
   }
-  
+
   // Sanitize customCss before appending: strip bare property declarations
   // (lines like "--bg: #0a0a0f;" outside any selector block) and validate
   // the CSS doesn't start with naked text that crashes the parser.
@@ -2568,36 +2750,36 @@ function buildWebviewThemeCss(themeData, url, viewWidthPx, overrides, modelKey?:
     let insideComment = false
     for (const line of lines) {
       const trimmed = line.trim()
-      
+
       if (trimmed.includes('/*')) insideComment = true
-      
+
       if (!insideComment) {
         for (const ch of trimmed) {
           if (ch === '{') insideBlock++
           if (ch === '}') insideBlock = Math.max(0, insideBlock - 1)
         }
       }
-      
+
       let skip = false
       if (!insideComment && insideBlock === 0) {
         if (/^--[\w-]+\s*:/.test(trimmed)) skip = true
         else if (trimmed.length > 0 && !trimmed.startsWith('/') && !trimmed.startsWith('@') && !trimmed.includes('{') && !trimmed.includes('}') && !trimmed.includes(':') && !trimmed.includes(';') && !trimmed.endsWith(',')) skip = true
       }
-      
+
       if (trimmed.includes('*/')) insideComment = false
-      
+
       if (!skip) cleaned.push(line)
     }
     userCss = cleaned.join('\n').trim()
     if (userCss) css += '\n' + userCss
   }
-  
+
   return css
 }
 
 function genericFallbackCss(v, dark) {
   const feat = v.cssFeatures || { structural: true, colors: true, bubbles: true, typography: true }
-  
+
   const doStruct = feat.structural !== false
   const doColor = feat.colors !== false
   const doBubble = feat.bubbles !== false
@@ -2632,7 +2814,7 @@ function genericFallbackCss(v, dark) {
     a { color: var(--nexus-accent) !important; }
     input, textarea, [contenteditable="true"] { caret-color: var(--nexus-accent) !important; }
     ` : ''}
-    
+
     * { scrollbar-color: var(--nexus-surface2) var(--nexus-surface) !important; scrollbar-width: thin !important; }
     ::-webkit-scrollbar { width: 5px; height: 5px; }
     ::-webkit-scrollbar-thumb { background: var(--nexus-surface2) !important; border-radius: 9999px; }
@@ -2666,33 +2848,12 @@ function genericFallbackCss(v, dark) {
     ${v.themeSelectors?.appContainer ? `
     /* Custom App Container & Canvas Transparency Overwrite */
     #root, #__next, #app, body > div, body > main,
-        ${v.themeSelectors.appContainer},
+    ${v.themeSelectors.appContainer},
     ${v.themeSelectors.appContainer} > div,
     ${v.themeSelectors.appContainer} > div > div,
-    ${v.themeSelectors.appContainer} main,
-    ${v.themeSelectors.appContainer} .flex-1,
-    ${v.themeSelectors.appContainer} .flex-auto,
-    ${v.themeSelectors.appContainer} .flex-col,
-    ${v.themeSelectors.appContainer} [class*="chat-main"],
-    ${v.themeSelectors.appContainer} [class*="chat-content"],
-    ${v.themeSelectors.appContainer} [class*="messages-wrapper"],
-    ${v.themeSelectors.appContainer} #messages-container,
-    ${v.themeSelectors.appContainer} .flex.flex-1.overflow-y-auto,
-    ${v.themeSelectors.appContainer} .flex-1.min-w-0 {
+    ${v.themeSelectors.appContainer} main {
       ${doColor ? 'background-color: transparent !important; background-image: none !important;' : ''}
     }
-    ${doColor ? `
-    /* Utility background neutralizer */
-    ${v.themeSelectors.appContainer} [class*="dark:bg-[#1"],
-    ${v.themeSelectors.appContainer} [class*="dark:bg-[#2"],
-    ${v.themeSelectors.appContainer} [class*="bg-[#f"],
-    ${v.themeSelectors.appContainer} [class*="bg-white"],
-    ${v.themeSelectors.appContainer} [class*="bg-black"],
-    ${v.themeSelectors.appContainer} [class*="bg-gray-"],
-    ${v.themeSelectors.appContainer} [class*="bg-zinc-"],
-    ${v.themeSelectors.appContainer} [class*="bg-neutral-"] {
-      background-color: transparent !important;
-    }` : ''}
     ` : ''}
 
     ${v.themeSelectors?.chatWrapper ? `
@@ -2700,14 +2861,14 @@ function genericFallbackCss(v, dark) {
     ${v.themeSelectors.chatWrapper} {
       ${doColor ? 'background-color: transparent !important; background-image: none !important;' : ''}
       ${doStruct ? `
-      width: 100% !important; 
-      max-width: 100% !important; 
+      width: 100% !important;
+      max-width: 100% !important;
       box-sizing: border-box !important;
       padding-left: calc(max(1rem, 50% - (var(--nexus-ai-width) / 2))) !important;
       padding-right: calc(max(1rem, 50% - (var(--nexus-ai-width) / 2))) !important;
       ` : ''}
     }` : ''}
-    
+
     ${v.themeSelectors?.sidebar ? `
     /* Custom Sidebar Overwrite */
     ${v.themeSelectors.sidebar} {
@@ -2726,7 +2887,7 @@ function genericFallbackCss(v, dark) {
       ${doColor ? 'background-color: var(--nexus-surface) !important; color: var(--nexus-text) !important; border: 1px solid var(--nexus-border) !important;' : ''}
       ${doBubble ? 'border-radius: var(--radius) !important;' : ''}
     }` : ''}
-    
+
     ${v.themeSelectors?.userMessage ? `
     /* Custom User Message Overwrite */
     ${v.themeSelectors.userMessage} {
@@ -2756,7 +2917,7 @@ function genericFallbackCss(v, dark) {
     ${v.themeSelectors.aiMessage} {
       ${doStruct ? `width: 100% !important; max-width: 100% !important; margin-left: 0 !important; margin-right: 0 !important; margin-bottom: var(--nexus-message-gap) !important; box-sizing: border-box !important;` : ''}
     }
-    ${v.themeSelectors.aiMessage.split(',').map(s => `${s.trim()} div, ${s.trim()} p, ${s.trim()} article`).join(', ')} {
+    ${splitSelectorList(v.themeSelectors.aiMessage).map(s => `${s} div, ${s} p, ${s} article`).join(', ')} {
       ${doStruct ? 'max-width: 100% !important;' : ''}
     }` : ''}
 
@@ -2766,14 +2927,14 @@ function genericFallbackCss(v, dark) {
       ${doColor ? 'color: var(--nexus-text) !important;' : ''}
       ${doStruct ? 'max-width: 100% !important;' : ''}
     }
-    ${v.themeSelectors.markdownProse.split(',').map((s: string) => `${s.trim()} p, ${s.trim()} li, ${s.trim()} span`).join(', ')} {
+    ${splitSelectorList(v.themeSelectors.markdownProse).map((s: string) => `${s} p, ${s} li, ${s} span`).join(', ')} {
       ${doColor ? 'color: inherit !important;' : ''}
     }
-    ${v.themeSelectors.markdownProse.split(',').map((s: string) => `${s.trim()} h1, ${s.trim()} h2, ${s.trim()} h3, ${s.trim()} h4`).join(', ')} {
+    ${splitSelectorList(v.themeSelectors.markdownProse).map((s: string) => `${s} h1, ${s} h2, ${s} h3, ${s} h4`).join(', ')} {
       ${doColor ? 'color: var(--nexus-text) !important;' : ''}
       font-weight: 700 !important;
     }
-    ${v.themeSelectors.markdownProse.split(',').map((s: string) => `${s.trim()} table, ${s.trim()} th, ${s.trim()} td`).join(', ')} {
+    ${splitSelectorList(v.themeSelectors.markdownProse).map((s: string) => `${s} table, ${s} th, ${s} td`).join(', ')} {
       ${doColor ? 'border-color: var(--nexus-border) !important;' : ''}
     }` : ''}
 
@@ -2791,7 +2952,7 @@ function genericFallbackCss(v, dark) {
       ${doColor ? 'background: var(--nexus-code-bg) !important; color: var(--nexus-text) !important;' : ''}
       ${doStruct ? 'overflow-x: auto !important;' : ''}
     }
-    ${v.themeSelectors.codeBlock.split(',').map((s: string) => `${s.trim()} code`).join(', ')} {
+    ${splitSelectorList(v.themeSelectors.codeBlock).map((s: string) => `${s} code`).join(', ')} {
       ${doColor ? 'background: transparent !important; color: inherit !important;' : ''}
       font-size: inherit !important;
       padding: 0 !important;
@@ -2805,8 +2966,8 @@ function genericFallbackCss(v, dark) {
       ${doBubble ? 'border: 1px solid var(--nexus-border) !important; border-radius: var(--radius) !important; transition: box-shadow 0.3s ease, border-color 0.3s ease !important;' : ''}
       ${doStruct ? `width: 100% !important; max-width: var(--nexus-ai-width) !important; margin-left: auto !important; margin-right: auto !important; box-sizing: border-box !important;` : ''}
     }
-    ${v.themeSelectors.composer.split(',').map((s: string) => `form:focus-within ${s.trim()}`).join(', ')},
-    ${v.themeSelectors.composer.split(',').map((s: string) => `${s.trim()}:focus`).join(', ')} {
+    ${splitSelectorList(v.themeSelectors.composer).map((s: string) => `form:focus-within ${s}`).join(', ')},
+    ${splitSelectorList(v.themeSelectors.composer).map((s: string) => `${s}:focus`).join(', ')} {
       ${doBubble ? 'border: var(--nexus-composer-focus-border) !important; border-bottom: var(--nexus-composer-focus-border-bottom) !important; box-shadow: var(--nexus-composer-focus-shadow) !important; outline: none !important;' : ''}
     }` : ''}
 
@@ -2822,10 +2983,10 @@ function genericFallbackCss(v, dark) {
     ${v.themeSelectors.actionButtons} {
       ${doColor ? 'color: var(--nexus-text2) !important;' : ''}
     }
-    ${v.themeSelectors.actionButtons.split(',').map((s: string) => `${s.trim()} button, ${s.trim()} svg`).join(', ')} {
+    ${splitSelectorList(v.themeSelectors.actionButtons).map((s: string) => `${s} button, ${s} svg`).join(', ')} {
       ${doColor ? 'color: var(--nexus-text2) !important;' : ''}
     }
-    ${v.themeSelectors.actionButtons.split(',').map((s: string) => `${s.trim()} button:hover, ${s.trim()} svg:hover`).join(', ')} {
+    ${splitSelectorList(v.themeSelectors.actionButtons).map((s: string) => `${s} button:hover, ${s} svg:hover`).join(', ')} {
       ${doColor ? 'color: var(--nexus-accent) !important;' : ''}
     }` : ''}
   `
@@ -3095,7 +3256,7 @@ ipcMain.handle('get_custom_theme_entry', (_event, modelKey: string) => {
 ipcMain.handle('get_provider_base_css', (_event, modelKey: string, providerUrl?: string) => {
   const theme = webviewTheme
   if (!theme || !theme.colors) return ''
-  
+
   const defaultUrls: Record<string, string> = {
     chatgpt: 'https://chatgpt.com',
     claude: 'https://claude.ai',
@@ -3108,19 +3269,19 @@ ipcMain.handle('get_provider_base_css', (_event, modelKey: string, providerUrl?:
     grok: 'https://grok.com'
   }
   const sampleUrl = providerUrl || (modelKey && defaultUrls[modelKey.toLowerCase()]) || ''
-  
+
   // Create generic empty overrides so we get raw base CSS
   const rawOverrides = {}
-  
+
   let host = ''
   try {
     host = sampleUrl ? new URL(sampleUrl).host : ''
   } catch {}
-  
+
   const provider = PROVIDER_THEMES.find((p) =>
     p.hosts.some((h) => host === h || host.endsWith('.' + h))
   )
-  
+
   const vars = {
     bg: theme.colors.bg || '#1a1a2e',
     surface: theme.colors.surface || '#16213e',
@@ -3145,7 +3306,7 @@ ipcMain.handle('get_provider_base_css', (_event, modelKey: string, providerUrl?:
     aiResponseWidthPx: (theme as any).aiResponseWidthPx,
     userPromptWidthPx: (theme as any).userPromptWidthPx
   }
-  
+
   const merged = mergeOverrides(vars, rawOverrides)
   const dark = isDarkColor(merged.bg)
   return provider ? provider.css(merged) : genericFallbackCss(merged, dark)
@@ -3315,9 +3476,9 @@ ipcMain.handle('extract_provider_live_dom', async (_event, modelKey: string, pro
             nodesToRemove.push(node);
           }
         }
-        
+
         nodesToRemove.forEach(c => c.remove());
-        
+
         // Remove empty divs repeatedly to collapse the tree
         let previousLength = -1;
         while (previousLength !== clone.innerHTML.length) {
@@ -3327,7 +3488,7 @@ ipcMain.handle('extract_provider_live_dom', async (_event, modelKey: string, pro
         }
 
         let html = clone.outerHTML || '';
-        
+
         // Final aggressive cleanup of empty class/id attributes to save tokens
         html = html.replace(/ class=""/g, '').replace(/ id=""/g, '');
 
@@ -3358,14 +3519,62 @@ ipcMain.on('set_provider_config', (_event, map) => {
     applyWebviewTheme(view, modelKey)
     updateWebviewTitlePoller(view, modelKey)
     injectVirtualizationCss(view, modelKey)
+    applyProviderMotionMode(view, modelKey)
   }
   if (previewViewId) capturePreviewFrame()
+  restartActiveArenaTitleSync()
 })
+
+// Title recovery for the active Arena view. Unlike provider-page intervals this
+// timer is owned by main, so a stale/clamped page timer cannot permanently block
+// title sync. It never modifies document.title or reloads/discards the page.
+const arenaTitleSync = new ActiveTitleSync()
+function restartActiveArenaTitleSync(): void {
+  arenaTitleSync.stop()
+  const tabId = activeViewId
+  if (!tabId || !mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible() || mainWindow.isMinimized() || !activeViewVisible || overlaysOpen) return
+  const view = aiViews.get(tabId)
+  const modelKey = viewModelKeys.get(tabId) || ''
+  if (!view || !['arena', 'arena-ai'].includes(modelKey.toLowerCase())) return
+  const globalOv = providerConfig['ALL'] || providerConfig['global'] || {}
+  const feats = getMergedProviderFeatures(modelKey, providerConfig[modelKey], globalOv)
+  const selector = feats.chatTitleSelector
+  const requested = feats.chatTitlePollingIntervalMs
+  const interval = requested === 0 ? 0 : typeof requested === 'number' && Number.isFinite(requested)
+    ? Math.max(500, Math.min(60000, requested)) : 1500
+  if (!selector || !interval) return
+  const wc = view.webContents
+  if (!wc || wc.isDestroyed()) return
+  const script = buildActiveTitleReadScript(selector)
+  const canRun = () => Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() && !mainWindow.isMinimized() &&
+    activeViewId === tabId && activeViewVisible && !overlaysOpen && aiViews.get(tabId) === view && !wc.isDestroyed())
+  arenaTitleSync.start({
+    contents: wc,
+    intervalMs: interval,
+    canRun,
+    read: async () => {
+      const beforeUrl = wc.getURL()
+      if (!beforeUrl) return null
+      const title = await wc.executeJavaScript(script)
+      if (wc.isDestroyed() || wc.getURL() !== beforeUrl || typeof title !== 'string') return null
+      const clean = title.trim()
+      return clean && !shouldIgnoreProviderTitle(clean, feats.defaultChatTitles || []) ? clean : null
+    },
+    publish: (title) => {
+      viewTitles.set(tabId, title)
+      sendToMainWindow('ai-title-updated', tabId, title)
+    }
+  })
+}
 
 // Switch tabs: show target view, hide the rest. Loads URL only on first visit.
 let activationRevision = 0
 const wakeTokens = new Map<string, number>()
-const inFlightWakes = new Set<string>()
+interface ActiveWakeOperation {
+  token: number
+  targetUrl: string
+}
+const activeWakeOperations = new Map<string, ActiveWakeOperation>()
 
 ipcMain.on('activate_tab', async (_event, tabId, url, bounds, modelKey) => {
   const revision = ++activationRevision
@@ -3437,6 +3646,8 @@ ipcMain.on('activate_tab', async (_event, tabId, url, bounds, modelKey) => {
     console.error(`[activate_tab] Failed to set active view bounds/visibility for ${tabId}:`, err)
   }
 
+  restartActiveArenaTitleSync()
+
   // 4. Handle Wake / Restoration vs Initial Load
   const wasEvicted = tabDiscardManager.isTabEvicted(tabId)
   const savedState = tabDiscardManager.getEvictedTabState(tabId)
@@ -3453,12 +3664,18 @@ ipcMain.on('activate_tab', async (_event, tabId, url, bounds, modelKey) => {
   }
 
   if (wasEvicted && targetRestoreUrl) {
-    // If a wake is already actively loading this view, let it continue without double-loading
-    if (!inFlightWakes.has(tabId)) {
+    const existingWake = activeWakeOperations.get(tabId)
+    if (existingWake && existingWake.targetUrl === targetRestoreUrl) {
+      // If a wake is already actively loading this exact target URL, reuse it to avoid duplicate loadURL calls
+      console.log('[activate_tab] Reusing in-flight wake for:', tabId, 'token=', existingWake.token)
+    } else {
       const myWakeToken = (wakeTokens.get(tabId) || 0) + 1
       wakeTokens.set(tabId, myWakeToken)
-      inFlightWakes.add(tabId)
-      console.log('[activate_tab] RESTORING evicted tab:', tabId, targetRestoreUrl)
+      activeWakeOperations.set(tabId, {
+        token: myWakeToken,
+        targetUrl: targetRestoreUrl
+      })
+      console.log('[activate_tab] RESTORING evicted tab:', tabId, targetRestoreUrl, 'token=', myWakeToken)
 
       void (async () => {
         try {
@@ -3474,6 +3691,11 @@ ipcMain.on('activate_tab', async (_event, tabId, url, bounds, modelKey) => {
             await view.webContents
               .executeJavaScript(`window.scrollTo(0, ${savedState.scrollY})`)
               .catch(() => {})
+          }
+
+          // Re-verify token after asynchronous executeJavaScript before consuming state
+          if (wakeTokens.get(tabId) !== myWakeToken || !view.webContents || view.webContents.isDestroyed()) {
+            return
           }
 
           // Consume evicted tab state only after restoration succeeded
@@ -3495,7 +3717,9 @@ ipcMain.on('activate_tab', async (_event, tabId, url, bounds, modelKey) => {
           console.warn(`[activate_tab] Failed to restore evicted tab ${tabId}:`, err)
           // Do NOT consume evicted tab state on error so user can retry
         } finally {
-          inFlightWakes.delete(tabId)
+          if (activeWakeOperations.get(tabId)?.token === myWakeToken) {
+            activeWakeOperations.delete(tabId)
+          }
         }
       })()
     }
@@ -3525,7 +3749,7 @@ ipcMain.on('activate_tab', async (_event, tabId, url, bounds, modelKey) => {
 ipcMain.on('navigate_tab', async (_event, tabId: string, url: string, modelKey?: string) => {
   await tabDiscardManager.waitForClose(tabId)
   wakeTokens.set(tabId, (wakeTokens.get(tabId) || 0) + 1)
-  inFlightWakes.delete(tabId)
+  activeWakeOperations.delete(tabId)
   tabDiscardManager.onExplicitNavigation(tabId)
   const view = ensureAiView(tabId)
   resolveModelKey(tabId, url, modelKey)
@@ -3564,14 +3788,13 @@ ipcMain.handle('history_go_forward', () => {
   }
 })
 
-
-
 ipcMain.on('destroy_tab_view', async (_event, tabId: string) => {
   wakeTokens.delete(tabId)
-  inFlightWakes.delete(tabId)
+  activeWakeOperations.delete(tabId)
   if (activeViewId === tabId) {
     activeViewId = null
     activationRevision++
+    arenaTitleSync.stop()
   }
   const closed = await tabDiscardManager.closeTab(tabId)
   if (!closed) console.error('[close] WebContents remains tracked:', tabId)
@@ -3615,6 +3838,39 @@ ipcMain.on('google_signin_cancel', () => {
   cancelGoogleSignIn()
 })
 
+ipcMain.handle('provider_clear_session', async (event, providerKey: string, providerUrl?: string) => {
+  if (!isValidMainWindowSender(event)) return { success: false, message: 'Unauthorized' }
+  const sess = session.fromPartition('persist:ai-shared')
+  try {
+    if (providerUrl) {
+      try {
+        const u = new URL(providerUrl)
+        await sess.clearStorageData({
+          origin: u.origin,
+          storages: ['cookies', 'localstorage', 'cachestorage']
+        })
+      } catch {
+        await sess.clearStorageData({
+          storages: ['cookies', 'localstorage', 'cachestorage']
+        })
+      }
+    } else {
+      await sess.clearStorageData({
+        storages: ['cookies', 'localstorage', 'cachestorage']
+      })
+    }
+    // Reload open view for this provider to reflect signed-out state
+    for (const [tabId, view] of aiViews.entries()) {
+      if (viewModelKeys.get(tabId) === providerKey && !view.webContents.isDestroyed()) {
+        view.webContents.reload()
+      }
+    }
+    return { success: true }
+  } catch (err) {
+    return { success: false, message: String(err) }
+  }
+})
+
 ipcMain.handle('sessions_sync_all', async () => {
   const result = await syncAllSessionsFromBrowsers()
   if (result.success) {
@@ -3639,6 +3895,41 @@ ipcMain.handle('sessions_sync_profile', async (_event, profileId: string) => {
   return result
 })
 
+ipcMain.handle('sessions_get_profiles', () => listProfiles())
+
+ipcMain.handle('sessions_pick_custom_folder', async () => {
+  if (!mainWindow || mainWindow.isDestroyed()) return { success: false, message: 'Window unavailable' }
+  const res = await dialog.showOpenDialog(mainWindow, {
+    title: 'Select Browser Profile Folder',
+    properties: ['openDirectory']
+  })
+  if (res.canceled || !res.filePaths[0]) {
+    return { canceled: true }
+  }
+  const folder = res.filePaths[0]
+  try {
+    const { profile, cookies } = await readCookiesFromCustomDirectory(folder)
+    if (cookies.length === 0) {
+      return { success: false, message: `No active AI session cookies found in "${folder}".` }
+    }
+    const { count } = await injectCookies(cookies)
+    for (const view of aiViews.values()) {
+      if (!view.webContents.isDestroyed()) {
+        view.webContents.reload()
+      }
+    }
+    return {
+      success: count > 0,
+      count,
+      profileName: profile.name,
+      detectedProviders: profile.detectedAiSessions,
+      message: `Successfully imported ${count} cookie(s) from "${profile.name}".`
+    }
+  } catch (err: any) {
+    return { success: false, message: err?.message || String(err) }
+  }
+})
+
 ipcMain.handle('cookies_import_json', async (_event, jsonStr: string) => {
   const result = await importCookiesFromJson(jsonStr)
   if (result.success) {
@@ -3652,7 +3943,6 @@ ipcMain.handle('cookies_import_json', async (_event, jsonStr: string) => {
 })
 
 ipcMain.on('resize_view', (_event, bounds) => {
-  console.log('[DEBUG-RESIZE] App.tsx sent bounds (unscaled):', bounds);
 
   // Apply UI zoom factor to convert DOM pixels back to physical DIPs for BrowserView
   if (currentUiZoom !== 1.0) {
@@ -3665,25 +3955,59 @@ ipcMain.on('resize_view', (_event, bounds) => {
   }
 
   const hidden = bounds.width === 0 && bounds.height === 0
+  const wasViewVisible = activeViewVisible
   activeViewVisible = !hidden
-  for (const [tabId, view] of aiViews) {
-    const prev = view.getBounds()
-    if (!hidden) {
-      view.setBounds(bounds)
-      lastRealBounds.set(tabId, bounds)
+  if (wasViewVisible !== activeViewVisible) restartActiveArenaTitleSync()
+
+  if (hidden) {
+    for (const [, view] of aiViews) {
+      if (!view.webContents.isDestroyed()) {
+        view.setVisible(false)
+      }
     }
-    view.setVisible(!hidden && tabId === activeViewId)
-    // Re-theme only when the view width actually changed: px-based pageWidth
-    // is derived from bounds, so window resizes must re-apply it. The
-    // renderer fires resize_view repeatedly at the same size — skip those.
-    // Debounced: a drag fires ~60 events/sec; we settle once at the end.
-    if (!hidden && (Math.abs(prev.width - bounds.width) > 1 || Math.abs(prev.height - bounds.height) > 1)) {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.focus()
+      mainWindow.focusOnWebView()
+      if (mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
+        mainWindow.webContents.focus()
+      }
+    }
+    return
+  }
+
+  // Not hidden: record real bounds for all views so newly activated tabs have accurate geometry
+  for (const [tabId] of aiViews) {
+    lastRealBounds.set(tabId, bounds)
+  }
+
+  const activeView = activeViewId ? aiViews.get(activeViewId) : null
+  if (activeView && !activeView.webContents.isDestroyed()) {
+    const prev = activeView.getBounds()
+    if (prev.x !== bounds.x || prev.y !== bounds.y || prev.width !== bounds.width || prev.height !== bounds.height) {
+      activeView.setBounds(bounds)
+    }
+    activeView.setVisible(true)
+
+    // Re-theme only when active view width or height actually changed.
+    // Debounced: window resize fires ~60 events/sec; settle once at the end.
+    if (Math.abs(prev.width - bounds.width) > 1 || Math.abs(prev.height - bounds.height) > 1) {
       if (resizeThemeTimer) clearTimeout(resizeThemeTimer)
       resizeThemeTimer = setTimeout(() => {
-        for (const [tabId, v] of aiViews) applyWebviewTheme(v, viewModelKeys.get(tabId))
+        if (activeViewId) {
+          const v = aiViews.get(activeViewId)
+          if (v && !v.webContents.isDestroyed()) {
+            applyWebviewTheme(v, viewModelKeys.get(activeViewId))
+          }
+        }
       }, 120)
     }
-    console.log('[resize_view] applied=', JSON.stringify(view.getBounds()))
+  }
+
+  // Ensure inactive views remain hidden without triggering unwanted background layout thrashing
+  for (const [tabId, view] of aiViews) {
+    if (tabId !== activeViewId && !view.webContents.isDestroyed()) {
+      view.setVisible(false)
+    }
   }
   if (hidden) {
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -3719,11 +4043,6 @@ ipcMain.on('toggle_focus_mode', (_event, enabled) => {
 })
 
 const lastThumbnailFiles = new Map<string, string>()
-
-
-
-
-
 
 ipcMain.handle('clipboard_write', (_, text) => {
   try {
@@ -3956,7 +4275,7 @@ if (fs.existsSync(legacyDataDir)) {
 
 const historyFile = path.join(dataDir, 'history.json')
 const tabsFile = path.join(dataDir, 'tabs.json')
-const pinnedFile = path.join(dataDir, 'pinned.json')
+const pinnedFile = getPinnedFilePath()
 const modelsFile = path.join(dataDir, 'models.json')
 const settingsFile = path.join(dataDir, 'settings.json')
 
@@ -4015,23 +4334,70 @@ ipcMain.handle('save_tabs', (_event, dataStr: string) => {
   }
 })
 
-ipcMain.handle('get_pinned', () => {
+ipcMain.handle('get_pinned', (event) => {
+  if (mainWindow && event?.sender && event.sender !== mainWindow.webContents) {
+    return null
+  }
   try {
-    if (fs.existsSync(pinnedFile)) return fs.readFileSync(pinnedFile, 'utf-8')
-    return null
+    // If pinnedTabIds is initialized, return its serialized contents directly!
+    // Never fall back to rereading disk just because pinnedTabIds is empty (size === 0).
+    // An empty set represents valid user intent (e.g. unpinned all tabs).
+    if (isPinnedInitialized) {
+      return JSON.stringify(Array.from(pinnedTabIds))
+    }
+    loadInitialPinnedState()
+    return JSON.stringify(Array.from(pinnedTabIds))
   } catch {
-    return null
+    return '[]'
   }
 })
 
 ipcMain.handle('save_pinned', (_event, dataStr: string) => {
-  try {
-    fs.writeFileSync(pinnedFile, dataStr, 'utf-8')
-    return true
-  } catch (err) {
-    console.error('Pinned save error:', err)
+  if (mainWindow && _event?.sender && _event.sender !== mainWindow.webContents) {
     return false
   }
+  if (typeof dataStr !== 'string') {
+    return false
+  }
+
+  // 1. Strict validation: MUST parse as a JSON array of string IDs
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(dataStr)
+  } catch {
+    console.warn('[save_pinned] Rejected malformed JSON payload')
+    return false
+  }
+
+  if (!Array.isArray(parsed) || !parsed.every((item) => typeof item === 'string')) {
+    console.warn('[save_pinned] Rejected non-array or non-string pinned payload')
+    return false
+  }
+
+  // 2. Immediately update in-memory authoritative set
+  pinnedTabIds.clear()
+  for (const id of parsed) {
+    pinnedTabIds.add(id)
+  }
+  isPinnedInitialized = true
+
+  // 3. Serialized atomic persistence to disk
+  const targetFile = pinnedFile
+  const payloadToPersist = JSON.stringify(parsed)
+
+  pinWriteChain = pinWriteChain.then(async () => {
+    try {
+      const dir = getFinalUserDataDir()
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+      const tmpPath = `${targetFile}.tmp.${Date.now()}`
+      await fs.promises.writeFile(tmpPath, payloadToPersist, 'utf-8')
+      await fs.promises.rename(tmpPath, targetFile)
+    } catch (err) {
+      console.error('[save_pinned] Asynchronous atomic write error:', err)
+    }
+  })
+
+  return true
 })
 
 ipcMain.handle('get_models', () => {

@@ -44,14 +44,16 @@ for (const kind of ['runtime', 'update'] as const) {
   describe(`injected ${kind} title path`, () => {
     it('does not scan hidden DOM and refreshes on visibility restoration', () => {
       const p = page(); vm.runInContext(getScript(kind, 1500), p.context)
-      expect(p.queries()).toBe(0)
+      expect(p.queries()).toBe(0); expect(p.intervals.size).toBe(0)
       p.document.visibilityState = 'visible'; p.listeners.forEach(fn => fn())
-      expect(p.document.title).toBe('Chat title'); expect(p.queries()).toBe(1)
-      p.document.visibilityState = 'hidden'; p.intervals.forEach(({ fn }) => fn())
+      expect(p.document.title).toBe('Chat title'); expect(p.queries()).toBe(1); expect(p.intervals.size).toBe(1)
+      p.document.visibilityState = 'hidden'; p.listeners.forEach(fn => fn())
+      expect(p.intervals.size).toBe(0); p.intervals.forEach(({ fn }) => fn())
       expect(p.queries()).toBe(1)
     })
     it('bounds pathological poll rates and does not accumulate timers/listeners', () => {
       const p = page(); const script = getScript(kind, 1)
+      p.document.visibilityState = 'visible'
       vm.runInContext(script, p.context); vm.runInContext(script, p.context)
       expect([...p.intervals.values()].map(v => v.ms)).toEqual([500])
       expect(p.listeners.size).toBe(1)

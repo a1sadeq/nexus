@@ -69,9 +69,10 @@ const electronAPI = {
     syncAll: (): Promise<unknown> => ipcRenderer.invoke('sessions_sync_all'),
     syncProfile: (profileId: string): Promise<unknown> =>
       ipcRenderer.invoke('sessions_sync_profile', profileId),
+    pickCustomFolder: (): Promise<unknown> => ipcRenderer.invoke('sessions_pick_custom_folder'),
     importJson: (json: string): Promise<unknown> =>
       ipcRenderer.invoke('cookies_import_json', json),
-    getProfiles: (): Promise<unknown> => ipcRenderer.invoke('google_signin_profiles'),
+    getProfiles: (): Promise<unknown> => ipcRenderer.invoke('sessions_get_profiles'),
     pickProfile: (profileId: string): Promise<unknown> =>
       ipcRenderer.invoke('google_signin_pick_profile', profileId),
     startGoogleSignIn: (): Promise<unknown> => ipcRenderer.invoke('google_signin_start'),
@@ -89,7 +90,16 @@ const electronAPI = {
     minimize: (): void => ipcRenderer.send('window_minimize'),
     maximizeToggle: (): void => ipcRenderer.send('window_maximize_toggle'),
     close: (): void => ipcRenderer.send('window_close'),
-    isMaximized: (): Promise<boolean> => ipcRenderer.invoke('window_is_maximized')
+    isMaximized: (): Promise<boolean> => ipcRenderer.invoke('window_is_maximized'),
+    onMaximizedChange: (callback: (isMaximized: boolean) => void): (() => void) => {
+      const handler = (_event: IpcRendererEvent, isMaximized: boolean) => {
+        callback(Boolean(isMaximized))
+      }
+      ipcRenderer.on('window_maximized_changed', handler)
+      return () => {
+        ipcRenderer.removeListener('window_maximized_changed', handler)
+      }
+    }
   },
   skills: {
     list: (): Promise<unknown> => ipcRenderer.invoke('skills_list'),

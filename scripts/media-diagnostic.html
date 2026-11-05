@@ -1,0 +1,18 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><title>Nexus media diagnostic</title>
+<style>body{font:15px system-ui;background:#101522;color:#e9edf6;margin:30px;max-width:850px}video{display:block;max-width:100%;width:720px;max-height:55vh;background:#000;margin:20px 0}code,pre{background:#202839;padding:8px;white-space:pre-wrap}button,input{font:inherit}label{display:block;margin-top:16px}small{color:#b5c2d5}</style>
+<h1>Nexus local video diagnostic</h1>
+<p>Choose a non-DRM video file you are allowed to use. Nothing is uploaded or saved. Click Play and check that the image <strong>moves</strong> and audio works.</p>
+<label>Local video: <input id="file" type="file" accept="video/*"></label>
+<video id="video" controls playsinline></video>
+<p id="result">No file selected.</p>
+<h2>Codec reports</h2><pre id="codecs"></pre>
+<small>Support strings are capability hints, not proof of hardware decoding, DRM, or provider compatibility. The runner is a separate test app, not your installed Nexus.</small>
+<script>
+const video=document.querySelector('#video'), result=document.querySelector('#result');let objectUrl;
+const codecs={webmVP8:'video/webm; codecs="vp8,vorbis"',webmVP9:'video/webm; codecs="vp9,opus"',mp4H264:'video/mp4; codecs="avc1.42E01E,mp4a.40.2"',mp4AV1:'video/mp4; codecs="av01.0.05M.08"'};
+document.querySelector('#codecs').textContent=JSON.stringify(Object.fromEntries(Object.entries(codecs).map(([key,type])=>[key,video.canPlayType(type)||'not reported'])),null,2);
+document.querySelector('#file').addEventListener('change', e=>{const file=e.target.files[0];if(!file)return;if(objectUrl)URL.revokeObjectURL(objectUrl);objectUrl=URL.createObjectURL(file);video.src=objectUrl;result.textContent='Selected. Press Play; verify moving frames and audio.';});
+video.addEventListener('loadeddata',()=>{result.textContent=`Frame loaded: ${video.videoWidth} × ${video.videoHeight}. Press Play and verify moving frames.`});
+video.addEventListener('error',()=>{result.textContent=`Media error code ${video.error?.code ?? 'unknown'}. Try a different non-DRM WebM or MP4.`});
+addEventListener('beforeunload',()=>{if(objectUrl)URL.revokeObjectURL(objectUrl)});
+</script></html>

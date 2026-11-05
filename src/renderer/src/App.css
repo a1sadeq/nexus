@@ -88,8 +88,6 @@ textarea,
   background: var(--bg);
 }
 
-
-
 .ai-loading-bar {
   position: absolute;
   top: 56px;
@@ -124,6 +122,25 @@ textarea,
 
 .drag-region {
   -webkit-app-region: drag;
+}
+
+/* Windows-only native caption buttons are supplied by Electron's overlay. */
+.nexus-windows-titlebar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 36px;
+  z-index: 100000;
+  display: flex;
+  align-items: center;
+  padding: 0 160px 0 14px;
+  background: #11151e;
+  color: #e9edf4;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .14em;
+  user-select: none;
 }
 
 .no-drag,
@@ -444,7 +461,7 @@ body[data-preset='iron-man-hud'] .app-container {
   inset: 0;
   pointer-events: none;
   background: linear-gradient(
-    rgba(18, 16, 16, 0) 50%, 
+    rgba(18, 16, 16, 0) 50%,
     rgba(0, 229, 255, 0.025) 50%
   );
   background-size: 100% 3px;
@@ -495,6 +512,22 @@ body[data-preset='iron-man-hud'] .app-container {
 
 .hud-arc-spin-reverse {
   animation: arcRingCounterRotate 16s linear infinite;
+}
+
+/* Pause CPU-wasting animations when window is hidden/minimized to save idle battery and CPU */
+.document-hidden *,
+.document-hidden *::before,
+.document-hidden *::after {
+  animation-play-state: paused !important;
+}
+
+/* Accessibility: respect user prefers-reduced-motion settings */
+@media (prefers-reduced-motion: reduce) {
+  .hud-arc-pulse,
+  .hud-arc-spin,
+  .hud-arc-spin-reverse {
+    animation: none !important;
+  }
 }
 
 /* Preset Specific Overrides for Iron Man HUD */
@@ -552,5 +585,3 @@ body[data-preset='iron-man-hud'] .history-btn:hover {
   color: #00e5ff !important;
   box-shadow: 0 0 14px rgba(0, 229, 255, 0.4) !important;
 }
-
-

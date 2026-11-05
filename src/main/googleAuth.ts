@@ -52,23 +52,30 @@ export function listProfiles(): Array<{
   browser: string
   name: string
   hasGoogleAuth: boolean
+  detectedAiSessions: string[]
   lastAccessed?: number
   isLatest?: boolean
+  isLocked?: boolean
 }> {
   const all = detectProfiles()
-  // Filter only profiles that have active session found
-  const withAuth = all.filter((p) => p.hasGoogleAuth)
-  withAuth.sort((a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0))
-  if (withAuth.length > 0) {
-    withAuth[0].isLatest = true
+  all.sort((a, b) => {
+    const aCount = (a.detectedAiSessions?.length ?? 0) + (a.hasGoogleAuth ? 1 : 0)
+    const bCount = (b.detectedAiSessions?.length ?? 0) + (b.hasGoogleAuth ? 1 : 0)
+    if (bCount !== aCount) return bCount - aCount
+    return (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0)
+  })
+  if (all.length > 0) {
+    all[0].isLatest = true
   }
-  return withAuth.map((p) => ({
+  return all.map((p) => ({
     id: p.id,
     browser: p.browser,
     name: p.name,
     hasGoogleAuth: !!p.hasGoogleAuth,
+    detectedAiSessions: p.detectedAiSessions || [],
     lastAccessed: p.lastAccessed,
-    isLatest: !!p.isLatest
+    isLatest: !!p.isLatest,
+    isLocked: !!p.isLocked
   }))
 }
 
@@ -275,6 +282,7 @@ export async function syncAllSessionsFromBrowsers(): Promise<{
   count: number
   profilesCount: number
   message: string
+  detectedProviders?: string[]
 }> {
   const profiles = detectProfiles()
   if (profiles.length === 0) {
@@ -286,41 +294,40 @@ export async function syncAllSessionsFromBrowsers(): Promise<{
     }
   }
 
-  // Target the single latest-used profile
-  const latestProfile = profiles.find((p) => p.isLatest) || profiles[0]
-  try {
-    const cookies = await readBrowserCookies(latestProfile, 'all')
-    if (cookies.length > 0) {
-      await clearAiSessionStorage()
-      const { count } = await injectCookies(cookies)
-      return {
-        success: count > 0,
-        count,
-        profilesCount: 1,
-        message: `Successfully synced ${count} session cookie(s) from latest profile "${latestProfile.name}".`
-      }
-    }
-  } catch (err) {
-    console.warn(`[syncAllSessions] Failed to read cookies from latest profile ${latestProfile.name}:`, err)
-  }
+  // Target profiles that have any detected AI sessions
+  const candidates = profiles.filter((p) => (p.detectedAiSessions?.length ?? 0) > 0 || p.hasGoogleAuth)
+  const targetProfiles = candidates.length > 0 ? candidates : [profiles[0]]
 
-  // Fallback: check remaining profiles in order of recency if latest has 0 cookies
-  for (const profile of profiles) {
-    if (profile.id === latestProfile.id) continue
+  let totalCount = 0
+  let successfulProfiles = 0
+  const allDetected = new Set<string>()
+
+  for (const profile of targetProfiles) {
     try {
       const cookies = await readBrowserCookies(profile, 'all')
       if (cookies.length > 0) {
-        await clearAiSessionStorage()
+        // Safe Merge: preserve existing sessions in Nexus, only add/update imported cookies
         const { count } = await injectCookies(cookies)
-        return {
-          success: count > 0,
-          count,
-          profilesCount: 1,
-          message: `Successfully synced ${count} session cookie(s) from active profile "${profile.name}".`
+        if (count > 0) {
+          totalCount += count
+          successfulProfiles++
+          if (profile.detectedAiSessions) {
+            for (const s of profile.detectedAiSessions) allDetected.add(s)
+          }
         }
       }
-    } catch {
-      // continue
+    } catch (err) {
+      console.warn(`[syncAllSessions] Failed to read cookies from profile ${profile.name}:`, err)
+    }
+  }
+
+  if (totalCount > 0) {
+    return {
+      success: true,
+      count: totalCount,
+      profilesCount: successfulProfiles,
+      detectedProviders: Array.from(allDetected),
+      message: `Successfully synced ${totalCount} AI session cookie(s) from ${successfulProfiles} profile(s).`
     }
   }
 
@@ -337,6 +344,7 @@ export async function syncSessionFromProfile(profileId: string): Promise<{
   count: number
   profileName: string
   message: string
+  detectedProviders?: string[]
 }> {
   const profiles = detectProfiles()
   const profile = profiles.find((p) => p.id === profileId)
@@ -360,20 +368,28 @@ export async function syncSessionFromProfile(profileId: string): Promise<{
       }
     }
 
-    await clearAiSessionStorage()
+    // Safe Merge: preserve existing sessions in Nexus, only add/update imported cookies
     const { count } = await injectCookies(cookies)
     return {
       success: count > 0,
       count,
       profileName: profile.name,
-      message: `Successfully synced ${count} session cookie(s) from "${profile.name}".`
+      detectedProviders: profile.detectedAiSessions,
+      message: `Successfully synced ${count} AI session cookie(s) from "${profile.name}".`
     }
-  } catch (err) {
+  } catch (err: any) {
+    const isLocked =
+      err?.code === 'EBUSY' ||
+      err?.code === 'EPERM' ||
+      String(err).toLowerCase().includes('busy') ||
+      String(err).toLowerCase().includes('locked')
     return {
       success: false,
       count: 0,
       profileName: profile.name,
-      message: `Failed to read cookies from "${profile.name}": ${(err as Error).message}`
+      message: isLocked
+        ? `Cannot read "${profile.name}" because the browser is currently running. Please close the browser and try again.`
+        : `Failed to read cookies from "${profile.name}": ${(err as Error).message}`
     }
   }
 }

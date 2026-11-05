@@ -24,7 +24,39 @@ const BRAND_PATHS: Record<string, string> = {
   perplexity: 'M12 2L2 7v10l10 5 10-5V7L12 2zm0 2.2l7 3.5v7.6l-7 3.5-7-3.5V7.7l7-3.5zM12 7a5 5 0 1 0 0 10 5 5 0 0 0 0-10z',
   grok: 'M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z',
   mistral: 'M4 4h4v4H4V4zm12 0h4v4h-4V4zm-6 6h4v4h-4v-4zm-6 6h4v4H4v-4zm12 0h4v4h-4v-4z',
-  copilot: 'M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm1 14.93V15a1 1 0 0 0-2 0v1.93A8 8 0 0 1 4.07 11H6a1 1 0 0 0 0-2H4.07A8 8 0 0 1 11 4.07V6a1 1 0 0 0 2 0V4.07A8 8 0 0 1 19.93 11H18a1 1 0 0 0 0 2h1.93A8 8 0 0 1 13 16.93z'
+  copilot: 'M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm1 14.93V15a1 1 0 0 0-2 0v1.93A8 8 0 0 1 4.07 11H6a1 1 0 0 0 0-2H4.07A8 8 0 0 1 11 4.07V6a1 1 0 0 0 2 0V4.07A8 8 0 0 1 19.93 11H18a1 1 0 0 0 0 2h1.93A8 8 0 0 1 13 16.93z',
+  'arena-ai': 'M12 2L4 5v6.09c0 5.05 3.41 9.76 8 10.91 4.59-1.15 8-5.86 8-10.91V5l-8-3zm1 14.5h-2v-2h2v2zm0-4h-2V7h2v5.5z',
+  arena: 'M12 2L4 5v6.09c0 5.05 3.41 9.76 8 10.91 4.59-1.15 8-5.86 8-10.91V5l-8-3zm1 14.5h-2v-2h2v2zm0-4h-2V7h2v5.5z'
+}
+
+export function ArcReactorIcon({
+  size = 18,
+  className,
+  ...props
+}: { size?: number; className?: string } & SVGProps<SVGSVGElement>) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width={size}
+      height={size}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.0"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden="true"
+      {...props}
+    >
+      <circle cx="12" cy="12" r="9" stroke="currentColor" strokeOpacity="0.4" />
+      <circle cx="12" cy="12" r="5" stroke="currentColor" strokeWidth="2.2" />
+      <circle cx="12" cy="12" r="2" fill="currentColor" />
+      <line x1="12" y1="3" x2="12" y2="7" />
+      <line x1="12" y1="17" x2="12" y2="21" />
+      <line x1="3" y1="12" x2="7" y2="12" />
+      <line x1="17" y1="12" x2="21" y2="12" />
+    </svg>
+  )
 }
 
 export function BrandIcon({

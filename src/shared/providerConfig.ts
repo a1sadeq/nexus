@@ -11,6 +11,7 @@ export interface ProviderFeatureConfig {
   virtualizationSelector?: string       // Selector for content-visibility: auto memory optimization
   enableSlashFocus?: boolean            // Whether '/' hotkey focuses prompt
   enableFocusRetention?: boolean        // Whether caret position is remembered on blur
+  pauseCssAnimations?: boolean          // Optional provider-only visual performance mode
   attachmentSelector?: string           // File upload input/button selector
   customInitScript?: string             // Custom JavaScript to execute on DOM ready
 }
@@ -134,8 +135,10 @@ const ARENA_FEATURES: ProviderFeatureConfig = {
   chatTitleSelector: 'button[aria-haspopup="menu"] > span[dir="auto"].truncate',
   chatTitlePollingIntervalMs: 1500,
   defaultChatTitles: ['Chatbot Arena', 'Arena', 'Direct Chat', 'Side-by-Side', 'New Chat', 'Untitled'],
-  composerSelector: 'textarea, [contenteditable="true"]',
-  sendButtonSelector: 'button[type="submit"], button[aria-label*="Send"]',
+  composerSelector:
+    '[data-perf-target="composer"], .tiptap.ProseMirror, textarea, [contenteditable="true"]:not(.cm-content)',
+  sendButtonSelector:
+    '[data-perf-target="composer"] button[aria-label*="send" i], [data-perf-target="composer"] button:last-of-type',
   autoSubmitSkillPrompt: true,
   newChatSelector: 'button[aria-label*="New"], a[href*="arena"]',
   stopGenerationSelector: 'button[aria-label*="Stop"]',

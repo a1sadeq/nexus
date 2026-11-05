@@ -205,6 +205,14 @@ export const DEFAULT_SHORTCUTS: ShortcutDef[] = [
     badge: 'Handoff'
   },
   {
+    id: 'shell-inspector',
+    action: 'Nexus Shell Inspector',
+    desc: 'Open detached Chromium DevTools for the Nexus shell',
+    category: 'system',
+    defaultKeys: ['Ctrl', 'Alt', 'Shift', 'I'],
+    badge: 'Shell'
+  },
+  {
     id: 'summon-nexus',
     action: 'Summon Nexus',
     desc: 'Global hotkey — show or hide Nexus from anywhere in the OS',
@@ -366,6 +374,7 @@ export function matchesShortcut(e: KeyboardEvent, keys: string[]): boolean {
 
   if (targetKey === eventKey) return true
   if (targetKey === 'b' && (e.code === 'KeyB' || e.code?.toLowerCase() === 'keyb')) return true
+  if (targetKey === 'i' && (e.code === 'KeyI' || e.code?.toLowerCase() === 'keyi')) return true
   if (targetKey === 'space' && (e.key === ' ' || e.code === 'Space')) return true
   if (targetKey === 'esc' && (e.key === 'Escape' || e.key === 'Esc')) return true
 

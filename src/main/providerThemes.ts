@@ -3,6 +3,7 @@
 // Fragile against site DOM changes — repairs are localized to this file.
 
 import type { ProviderOverrides } from '../shared/providerConfig'
+export { splitSelectorList } from '../shared/selectorUtils'
 
 export interface ThemeVars {
   bg: string

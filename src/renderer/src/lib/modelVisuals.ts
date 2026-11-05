@@ -3,12 +3,14 @@
 
 export const DOT_COLOR: Record<string, string> = {
   chatgpt: '#10a37f',
-  claude: '#d97706',
+  claude: '#d97757',
   gemini: '#22d3ee',
-  perplexity: '#2dd4bf',
-  deepseek: '#6366f1',
-  kimi: '#8b5cf6',
-  qwen: '#0284c7',
+  perplexity: '#22b8cd',
+  deepseek: '#4d6bfe',
+  kimi: '#00d1b2',
+  qwen: '#615ced',
+  'arena-ai': '#f59e0b',
+  arena: '#f59e0b',
   mistral: '#f97316',
   grok: '#ffffff'
 }
@@ -21,6 +23,8 @@ export const BRAND_IDS: Record<string, boolean> = {
   deepseek: true,
   qwen: true,
   kimi: true,
+  'arena-ai': true,
+  arena: true,
   mistral: true,
   grok: true
 }
@@ -34,6 +38,7 @@ export function modelLabel(model: string): string {
   if (m === 'deepseek') return 'DeepSeek'
   if (m === 'qwen') return 'Qwen'
   if (m === 'kimi') return 'Kimi'
+  if (m === 'arena-ai' || m === 'arena') return 'Arena'
   if (m === 'mistral') return 'Mistral'
   if (m === 'grok') return 'Grok'
   return model.charAt(0).toUpperCase() + model.slice(1)

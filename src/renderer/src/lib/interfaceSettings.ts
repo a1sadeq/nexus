@@ -55,6 +55,8 @@ export interface InterfaceSettings {
   globalCustomJs?: string
   tabSwitcherLimit?: number
   pinnedPosition?: 'sidebar' | 'bottom'
+  showTitlebar?: boolean
+  maskTitlebarTitle?: boolean
 }
 
 export const DEFAULT_INTERFACE_SETTINGS: InterfaceSettings = {
@@ -94,7 +96,9 @@ export const DEFAULT_INTERFACE_SETTINGS: InterfaceSettings = {
   userPromptWidthPx: 720,
   globalCustomCss: '',
   globalCustomJs: '',
-  pinnedPosition: 'bottom'
+  pinnedPosition: 'bottom',
+  showTitlebar: true,
+  maskTitlebarTitle: false
 }
 
 export const PRESET_CONFIGS: Record<Exclude<AestheticPreset, 'custom'>, Partial<InterfaceSettings>> = {
@@ -221,7 +225,10 @@ export function loadInterfaceSettings(): InterfaceSettings {
   try {
     const raw = localStorage.getItem(STORAGE_KEY) || localStorage.getItem(LEGACY_STORAGE_KEY)
     if (!raw) return DEFAULT_INTERFACE_SETTINGS
-    const parsed = JSON.parse(raw) as Partial<InterfaceSettings>
+    const parsed = JSON.parse(raw) as Partial<InterfaceSettings> & { maskTitlebarConversationTitle?: boolean }
+    if (parsed.maskTitlebarConversationTitle !== undefined && parsed.maskTitlebarTitle === undefined) {
+      parsed.maskTitlebarTitle = parsed.maskTitlebarConversationTitle
+    }
     return { ...DEFAULT_INTERFACE_SETTINGS, ...parsed }
   } catch {
     return DEFAULT_INTERFACE_SETTINGS

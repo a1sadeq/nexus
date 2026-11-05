@@ -60,5 +60,10 @@ describe('interfaceSettings - globalCustomJs and features', () => {
   it('has empty string as default globalCustomJs', () => {
     expect(DEFAULT_INTERFACE_SETTINGS.globalCustomJs).toBe('')
   })
+
+  it('defaults showTitlebar to true and maskTitlebarTitle to false', () => {
+    expect(DEFAULT_INTERFACE_SETTINGS.showTitlebar).toBe(true)
+    expect(DEFAULT_INTERFACE_SETTINGS.maskTitlebarTitle).toBe(false)
+  })
 })
 

@@ -22,7 +22,11 @@ import {
   IconFolder,
   IconMessageSquare,
   IconTrash,
-  IconPlus
+  IconPlus,
+  IconGlobe,
+  IconCheck,
+  IconRotate,
+  IconDownload
 } from './BrandIcons'
 import {
   loadInterfaceSettings,
@@ -55,6 +59,7 @@ interface Props {
   providerConfig: ProviderConfigMap
   setProviderConfig: (updater: (prev: ProviderConfigMap) => ProviderConfigMap) => void
   activeModelKey?: string
+  onSelectModel?: (modelKey: string) => void
   tabDiscardMinutes: number
   setTabDiscardMinutes: (mins: number) => void
   maxActiveTabs: number
@@ -63,7 +68,7 @@ interface Props {
   setUiZoom: (val: number | ((prev: number) => number)) => void
   webviewZoom: number
   setWebviewZoom: (val: number | ((prev: number) => number)) => void
-  initialSection?: 'general' | 'models' | 'features' | 'skills' | 'workspace' | 'themes' | 'style' | 'webview' | 'shortcuts'
+  initialSection?: 'general' | 'models' | 'sessions' | 'features' | 'skills' | 'workspace' | 'themes' | 'style' | 'webview' | 'shortcuts'
   interfaceSettings?: InterfaceSettings
   onInterfaceSettingsChange?: (settings: InterfaceSettings) => void
   onOpenZenGuide?: () => void
@@ -188,7 +193,7 @@ interface SearchItem {
   id: string
   title: string
   subtitle: string
-  tab: 'general' | 'models' | 'features' | 'skills' | 'workspace' | 'themes' | 'style' | 'webview' | 'shortcuts'
+  tab: 'general' | 'models' | 'sessions' | 'features' | 'skills' | 'workspace' | 'themes' | 'style' | 'webview' | 'shortcuts'
   category?: 'theme' | 'layout' | 'chat' | 'icons' | 'css'
   keywords: string[]
 }
@@ -197,11 +202,13 @@ const SETTINGS_SEARCH_INDEX: SearchItem[] = [
   // General
   { id: 'ui-zoom', title: 'Nexus App UI Zoom', subtitle: 'Global display scale & magnification', tab: 'general', keywords: ['zoom', 'scale', 'ui', 'display', 'size', 'font', 'ctrl+shift++'] },
   { id: 'webview-zoom', title: 'AI Webviews Zoom', subtitle: 'Independent zoom scale for AI tabs', tab: 'general', keywords: ['zoom', 'webview', 'text', 'scale', 'browser', 'ctrl++'] },
-  { id: 'session-sync', title: 'Account Sessions & Cookie Sync', subtitle: 'Import Google and AI sessions from browsers', tab: 'general', keywords: ['session', 'cookie', 'google', 'login', 'auth', 'browser', 'chrome', 'brave', 'json', 'paste'] },
+  { id: 'session-management', title: 'AI Accounts & Provider Sessions', subtitle: 'Manage provider logins and local partition state', tab: 'sessions', keywords: ['session', 'account', 'login', 'auth', 'partition', 'sign in', 'provider', 'google', 'chatgpt', 'claude', 'clear'] },
   { id: 'tab-discard', title: 'Tab Discard System (RAM Saver)', subtitle: 'Auto-discard idle tabs after inactivity', tab: 'general', keywords: ['memory', 'ram', 'discard', 'inactive', 'sleep', 'performance', 'tabs'] },
   { id: 'max-active-tabs', title: 'Max Active Tabs Limit', subtitle: 'Strict threshold for in-memory tabs', tab: 'general', keywords: ['tabs', 'limit', 'active', 'ram', 'memory', 'max'] },
   { id: 'tab-switcher-limit', title: 'Ctrl+Tab Switcher Count', subtitle: 'Number of recent tabs shown in switcher HUD', tab: 'general', keywords: ['ctrl+tab', 'switcher', 'overlay', 'recent', 'hud'] },
   { id: 'pinned-chats-pos', title: 'Pinned Chats Position', subtitle: 'Left vertical sidebar vs bottom horizontal dock', tab: 'general', keywords: ['pinned', 'sidebar', 'dock', 'bottom', 'chats', 'position', 'layout'] },
+  { id: 'window-titlebar', title: 'Window Titlebar', subtitle: 'Show or hide top titlebar with controls', tab: 'general', keywords: ['titlebar', 'title', 'window', 'frame', 'caption', 'controls', 'drag', 'header'] },
+  { id: 'mask-title', title: 'Mask Titlebar Title (Privacy)', subtitle: 'Hide conversation title for screen sharing', tab: 'general', keywords: ['mask', 'privacy', 'title', 'stream', 'share', 'secret', 'hide'] },
 
   // AI Models
   { id: 'ai-providers', title: 'AI Provider Endpoints & URLs', subtitle: 'Configure Gemini, Claude, ChatGPT, Grok, DeepSeek', tab: 'models', keywords: ['model', 'provider', 'gemini', 'claude', 'chatgpt', 'deepseek', 'grok', 'mistral', 'url', 'brand', 'color'] },
@@ -666,12 +673,13 @@ export default function SettingsOverlay({
   onInterfaceSettingsChange,
   onOpenZenGuide,
   onOpenSkillEditor,
-  onClose
+  onClose,
+  onSelectModel
 }: Props) {
-  const [tab, setTab] = useState<'general' | 'models' | 'features' | 'skills' | 'workspace' | 'themes' | 'style' | 'webview' | 'shortcuts'>(() => {
+  const [tab, setTab] = useState<'general' | 'models' | 'sessions' | 'features' | 'skills' | 'workspace' | 'themes' | 'style' | 'webview' | 'shortcuts'>(() => {
     if (initialSection) return initialSection
     const saved = localStorage.getItem('nexus.settingsTab') || localStorage.getItem('vicinae.settingsTab')
-    return saved === 'general' || saved === 'models' || saved === 'features' || saved === 'skills' || saved === 'workspace' || saved === 'themes' || saved === 'style' || saved === 'webview' || saved === 'shortcuts'
+    return saved === 'general' || saved === 'models' || saved === 'sessions' || saved === 'features' || saved === 'skills' || saved === 'workspace' || saved === 'themes' || saved === 'style' || saved === 'webview' || saved === 'shortcuts'
       ? (saved as any)
       : 'general'
   })
@@ -701,7 +709,7 @@ export default function SettingsOverlay({
       setTab(initialSection)
     } else {
       const saved = localStorage.getItem('nexus.settingsTab') || localStorage.getItem('vicinae.settingsTab')
-      if (saved === 'general' || saved === 'models' || saved === 'features' || saved === 'skills' || saved === 'workspace' || saved === 'themes' || saved === 'style' || saved === 'webview' || saved === 'shortcuts') {
+      if (saved === 'general' || saved === 'models' || saved === 'sessions' || saved === 'features' || saved === 'skills' || saved === 'workspace' || saved === 'themes' || saved === 'style' || saved === 'webview' || saved === 'shortcuts') {
         setTab(saved as any)
       }
     }
@@ -868,16 +876,13 @@ export default function SettingsOverlay({
     })
   }
 
-  const [signInStatus, setSignInStatus] = useState<string>('')
-  const [signInProfiles, setSignInProfiles] = useState<
-    Array<{ id: string; browser: string; name: string; hasGoogleAuth: boolean; lastAccessed?: number; isLatest?: boolean }>
-  >([])
-  const [isSyncing, setIsSyncing] = useState(false)
-  const [showJsonPaste, setShowJsonPaste] = useState(false)
-  const [jsonPayload, setJsonPayload] = useState('')
-  const [isApplyingJson, setIsApplyingJson] = useState(false)
-  const [sessionSyncResult, setSessionSyncResult] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null)
+  const [clearingProviderKey, setClearingProviderKey] = useState<string | null>(null)
+  const [clearedFeedbackKey, setClearedFeedbackKey] = useState<string | null>(null)
+  const [browserProfiles, setBrowserProfiles] = useState<any[]>([])
+  const [loadingProfiles, setLoadingProfiles] = useState(false)
+  const [syncingAll, setSyncingAll] = useState(false)
   const [syncingProfileId, setSyncingProfileId] = useState<string | null>(null)
+  const [syncFeedback, setSyncFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null)
 
   const [styleSubTab, setStyleSubTab] = useState<string>(() => {
     try {
@@ -1030,134 +1035,128 @@ export default function SettingsOverlay({
     })
   }
 
-  const handleSyncAllSessions = async () => {
-    setIsSyncing(true)
-    setSessionSyncResult(null)
+  const handleClearProviderSession = async (providerKey: string, providerUrl?: string) => {
+    sfx.click()
+    setClearingProviderKey(providerKey)
     try {
       // @ts-ignore
-      const res = await window.electron?.googleSignIn?.syncAll()
-      if (res && res.success) {
-        try { localStorage.setItem('nexus.has_synced_sessions', 'true') } catch {}
-        setSessionSyncResult({
-          type: 'success',
-          message: res.message || `Successfully synced ${res.count ?? 0} session cookies from browser profiles.`
-        })
-      } else {
-        setSessionSyncResult({
-          type: 'error',
-          message: res?.message || 'No active session cookies found in detected browser profiles.'
-        })
-      }
+      await window.electron?.ipcRenderer?.invoke?.('provider_clear_session', providerKey, providerUrl)
+      setClearedFeedbackKey(providerKey)
+      setTimeout(() => {
+        setClearedFeedbackKey(null)
+      }, 2500)
     } catch (err) {
-      setSessionSyncResult({
-        type: 'error',
-        message: `Sync failed: ${err instanceof Error ? err.message : String(err)}`
-      })
+      console.warn('[handleClearProviderSession] Failed to clear session:', err)
     } finally {
-      setIsSyncing(false)
+      setClearingProviderKey(null)
     }
   }
 
-  const handleSyncProfile = async (profileId: string, profileName: string) => {
-    setSyncingProfileId(profileId)
-    setSessionSyncResult(null)
+  const fetchBrowserProfiles = useCallback(async () => {
+    setLoadingProfiles(true)
     try {
       // @ts-ignore
-      const res = await window.electron?.googleSignIn?.syncProfile(profileId)
-      if (res && res.success) {
-        try { localStorage.setItem('nexus.has_synced_sessions', 'true') } catch {}
-        setSessionSyncResult({
-          type: 'success',
-          message: res.message || `Successfully synced ${res.count ?? 0} session cookie(s) from "${profileName}".`
-        })
-      } else {
-        setSessionSyncResult({
-          type: 'error',
-          message: res?.message || `No active AI cookies found in profile "${profileName}".`
-        })
+      const res = await (window.electron?.sessions?.getProfiles?.() || window.electron?.googleSignIn?.getProfiles?.())
+      if (Array.isArray(res)) {
+        setBrowserProfiles(res)
       }
     } catch (err) {
-      setSessionSyncResult({
+      console.warn('[fetchBrowserProfiles] Failed to load browser profiles:', err)
+    } finally {
+      setLoadingProfiles(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (tab === 'sessions') {
+      fetchBrowserProfiles()
+    }
+  }, [tab, fetchBrowserProfiles])
+
+  const handleSyncAllSessions = async () => {
+    sfx.click()
+    setSyncingAll(true)
+    setSyncFeedback(null)
+    try {
+      // @ts-ignore
+      const res = await window.electron?.sessions?.syncAll?.()
+      if (res?.success) {
+        setSyncFeedback({
+          type: 'success',
+          message: res.message || `Successfully synced ${res.count || 0} AI session cookies!`
+        })
+        fetchBrowserProfiles()
+      } else {
+        setSyncFeedback({
+          type: 'error',
+          message: res?.message || 'No AI session cookies found in detected browsers.'
+        })
+      }
+    } catch (err: any) {
+      setSyncFeedback({
         type: 'error',
-        message: `Sync failed for ${profileName}: ${err instanceof Error ? err.message : String(err)}`
+        message: err?.message || 'Failed to sync sessions.'
+      })
+    } finally {
+      setSyncingAll(false)
+    }
+  }
+
+  const handleSyncProfile = async (profileId: string) => {
+    sfx.click()
+    setSyncingProfileId(profileId)
+    setSyncFeedback(null)
+    try {
+      // @ts-ignore
+      const res = await window.electron?.sessions?.syncProfile?.(profileId)
+      if (res?.success) {
+        setSyncFeedback({
+          type: 'success',
+          message: res.message || `Imported ${res.count || 0} cookies!`
+        })
+        fetchBrowserProfiles()
+      } else {
+        setSyncFeedback({
+          type: 'error',
+          message: res?.message || 'Failed to read cookies from profile.'
+        })
+      }
+    } catch (err: any) {
+      setSyncFeedback({
+        type: 'error',
+        message: err?.message || 'Sync failed.'
       })
     } finally {
       setSyncingProfileId(null)
     }
   }
 
-  const handleApplyJsonCookies = async () => {
-    if (!jsonPayload.trim()) return
-    setIsApplyingJson(true)
-    setSessionSyncResult(null)
+  const handlePickCustomFolder = async () => {
+    sfx.click()
+    setSyncFeedback(null)
     try {
       // @ts-ignore
-      const res = await window.electron?.googleSignIn?.importJson(jsonPayload.trim())
-      if (res && res.success) {
-        try { localStorage.setItem('nexus.has_synced_sessions', 'true') } catch {}
-        setSessionSyncResult({
+      const res = await window.electron?.sessions?.pickCustomFolder?.()
+      if (res?.canceled) return
+      if (res?.success) {
+        setSyncFeedback({
           type: 'success',
-          message: res.message || `Successfully injected ${res.count ?? 0} cookies and reloaded active AI views!`
+          message: res.message || `Successfully imported ${res.count || 0} cookies from custom folder!`
         })
-        setJsonPayload('')
-        setShowJsonPaste(false)
+        fetchBrowserProfiles()
       } else {
-        setSessionSyncResult({
+        setSyncFeedback({
           type: 'error',
-          message: res?.message || res?.error || 'Failed to inject cookies. Please check your JSON format.'
+          message: res?.message || 'No valid AI cookies found in selected folder.'
         })
       }
-    } catch (err) {
-      setSessionSyncResult({
+    } catch (err: any) {
+      setSyncFeedback({
         type: 'error',
-        message: `Import failed: ${err instanceof Error ? err.message : String(err)}`
+        message: err?.message || 'Failed to read custom folder.'
       })
-    } finally {
-      setIsApplyingJson(false)
     }
   }
-
-  useEffect(() => {
-    // @ts-ignore
-    window.electron?.googleSignIn?.getProfiles?.().then((profiles: any) => {
-      if (Array.isArray(profiles) && profiles.length > 0) {
-        setSignInProfiles(profiles)
-      }
-    }).catch(() => {})
-  }, [])
-
-  useEffect(() => {
-    const onEv = (_e: unknown, ev: { stage: string; email?: string; message?: string; profiles?: Array<{ id: string; browser: string; name: string; hasGoogleAuth: boolean }> }) => {
-      switch (ev.stage) {
-        case 'opening-browser':
-          setSignInStatus('Opening your browser… sign in to Google there, then return here.')
-          setSignInProfiles([])
-          break
-        case 'waiting':
-          setSignInStatus('Waiting for you to sign in in your browser…')
-          break
-        case 'success':
-          setSignInStatus(`Signed in as ${ev.email ?? 'you'}. Reloading Gemini…`)
-          break
-        case 'error':
-          setSignInStatus(`Sign-in failed: ${ev.message ?? 'unknown error'}`)
-          break
-        case 'keyring-error':
-          setSignInStatus(`Sign-in failed: ${ev.message ?? 'Chrome keyring locked'}`)
-          break
-        case 'no-auth':
-          setSignInStatus('No Google session found. Pick a browser profile with a Google login:')
-          setSignInProfiles(ev.profiles ?? [])
-          break
-      }
-    }
-    // @ts-ignore
-    window.electron?.googleSignIn?.onEvent(onEv)
-    return () => {
-      // @ts-ignore
-      window.electron?.ipcRenderer.removeListener('google-signin-event', onEv)
-    }
-  }, [])
 
   const activeTheme =
     themeState.customs.find((t) => t.id === themeState.activeId) ??
@@ -1462,7 +1461,7 @@ export default function SettingsOverlay({
                     System & App
                   </span>
                   {[
-                    { id: 'general', label: 'General', sub: 'Zoom, Sessions & RAM', icon: IconSliders },
+                    { id: 'general', label: 'General', sub: 'Zoom & RAM Saver', icon: IconSliders },
                     { id: 'workspace', label: 'Workspace', sub: 'Storage & Exports', icon: IconFolder },
                     { id: 'shortcuts', label: 'Shortcuts', sub: 'Key Matrix & Keycaps', icon: IconKeyboard }
                   ].map(({ id, label, sub, icon: IconComponent }) => {
@@ -1503,6 +1502,7 @@ export default function SettingsOverlay({
                   </span>
                   {[
                     { id: 'models', label: 'AI Providers', sub: 'Endpoints & URLs', icon: IconGrid, count: models.length },
+                    { id: 'sessions', label: 'Accounts & Sessions', sub: 'Logins & Partition State', icon: IconShield },
                     { id: 'features', label: 'AI Features & Hooks', sub: 'Interceptors & Prompts', icon: IconSliders },
                     { id: 'skills', label: 'Skills & Tools', sub: 'Agents & Automation', icon: IconZap }
                   ].map(({ id, label, sub, icon: IconComponent, count }) => {
@@ -1625,7 +1625,7 @@ export default function SettingsOverlay({
               <span className="text-[11px] font-mono uppercase tracking-wider text-(--text2) opacity-70">
                 {tab === 'general' || tab === 'workspace' || tab === 'shortcuts'
                   ? 'System & App'
-                  : tab === 'models' || tab === 'features' || tab === 'skills'
+                  : tab === 'models' || tab === 'sessions' || tab === 'features' || tab === 'skills'
                     ? 'AI Engine'
                     : 'Design & Studio'}
               </span>
@@ -1635,6 +1635,7 @@ export default function SettingsOverlay({
                 {tab === 'workspace' && 'Workspace & Storage'}
                 {tab === 'shortcuts' && 'Keyboard Shortcuts Matrix'}
                 {tab === 'models' && 'AI Providers & Endpoints'}
+                {tab === 'sessions' && 'AI Accounts & Provider Sessions'}
                 {tab === 'features' && 'AI Features & Interceptors'}
                 {tab === 'skills' && 'Skills & Autonomous Tools'}
                 {tab === 'themes' && 'Themes & Color Palettes'}
@@ -1766,217 +1767,31 @@ export default function SettingsOverlay({
                 </Card>
               </div>
 
-              <SectionTitle badge="Multi-Browser Sync">
+              <SectionTitle badge="Provider Logins">
                 <IconShield size={13} style={{ color: 'var(--accent)' }} />
-                <span>Account & AI Provider Sessions</span>
+                <span>Account & Provider Sessions</span>
               </SectionTitle>
 
               <Card>
-                <div className="flex flex-col gap-3">
-                  <div>
-                    <span className="font-bold text-sm text-white">Session Synchronization</span>
-                    <p className="text-[12px] opacity-80 leading-relaxed mt-0.5" style={{ color: 'var(--text2)' }}>
-                      Import active sessions for Gemini, ChatGPT, Claude, Perplexity, DeepSeek, Grok, and Mistral from your installed browsers, or paste cookies directly using Cookie-Editor JSON.
+                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                  <div className="flex flex-col gap-1">
+                    <span className="font-bold text-xs text-white">AI Accounts & Authentication</span>
+                    <p className="text-[11px] opacity-75 leading-relaxed" style={{ color: 'var(--text2)' }}>
+                      Manage authentication status, sign-in flows, and local session data across all configured AI providers.
                     </p>
                   </div>
-
-                  {/* Primary Action Buttons */}
-                  <div className="flex flex-wrap items-center gap-2.5 pt-1">
-                    <button
-                      onClick={() => {
-                        sfx.click()
-                        handleSyncAllSessions()
-                      }}
-                      disabled={isSyncing}
-                      className="px-3.5 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 transition-all hover:opacity-90 disabled:opacity-50 shadow-md cursor-pointer active:scale-98"
-                      style={{ background: 'var(--accent)', color: '#fff' }}
-                    >
-                      {isSyncing ? (
-                        <>
-                          <svg className="animate-spin h-3.5 w-3.5 text-white" viewBox="0 0 24 24">
-                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
-                          </svg>
-                          Syncing All Sessions…
-                        </>
-                      ) : (
-                        <>
-                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                            <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67" />
-                          </svg>
-                          Sync All Sessions from Browser
-                        </>
-                      )}
-                    </button>
-
-                    <button
-                      onClick={() => {
-                        sfx.pop()
-                        setShowJsonPaste((prev) => !prev)
-                      }}
-                      className="px-3.5 py-2 rounded-xl text-xs font-semibold border flex items-center gap-2 transition-all hover:bg-white/5 ml-auto cursor-pointer"
-                      style={{ background: 'var(--surface2)', borderColor: 'var(--border)', color: 'var(--text)' }}
-                    >
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <polyline points="16 18 22 12 16 6" />
-                        <polyline points="8 6 2 12 8 18" />
-                      </svg>
-                      <span>{showJsonPaste ? 'Hide Cookie Paste' : 'Paste Cookies (JSON)'}</span>
-                    </button>
-                  </div>
-
-                  {/* Status Messages */}
-                  {sessionSyncResult && (
-                    <div
-                      className={`p-3 rounded-xl text-xs border ${
-                        sessionSyncResult.type === 'success'
-                          ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
-                          : sessionSyncResult.type === 'error'
-                            ? 'bg-rose-500/10 border-rose-500/30 text-rose-400'
-                            : 'bg-blue-500/10 border-blue-500/30 text-blue-400'
-                      }`}
-                    >
-                      {sessionSyncResult.message}
-                    </div>
-                  )}
-
-                  {signInStatus && (
-                    <p className="text-[12px] leading-relaxed font-medium" style={{ color: 'var(--text2)' }}>
-                      {signInStatus}
-                    </p>
-                  )}
-
-                  {/* Expandable Cookie-Editor JSON Paste Area */}
-                  {showJsonPaste && (
-                    <div className="flex flex-col gap-2 p-3.5 rounded-xl border mt-1" style={{ background: 'var(--surface2)', borderColor: 'var(--border)' }}>
-                      <div className="flex justify-between items-center">
-                        <span className="text-xs font-bold text-white">
-                          Cookie-Editor JSON Payload
-                        </span>
-                        <span className="text-[11px] opacity-70" style={{ color: 'var(--text2)' }}>
-                          Export as JSON from Cookie-Editor extension
-                        </span>
-                      </div>
-                      <textarea
-                        value={jsonPayload}
-                        onChange={(e) => setJsonPayload(e.target.value)}
-                        placeholder='[{"domain": ".chatgpt.com", "name": "__Secure-next-auth.session-token", "value": "...", ...}]'
-                        rows={5}
-                        className="w-full p-2.5 font-mono text-xs rounded-xl border outline-none resize-y"
-                        style={{ background: 'var(--bg)', borderColor: 'var(--border)', color: 'var(--text)' }}
-                      />
-                      <div className="flex items-center justify-between gap-2 pt-1">
-                        <button
-                          onClick={() => {
-                            sfx.click()
-                            handleApplyJsonCookies()
-                          }}
-                          disabled={isApplyingJson || !jsonPayload.trim()}
-                          className="px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all hover:opacity-90 disabled:opacity-50 cursor-pointer shadow-sm"
-                          style={{ background: 'var(--accent)', color: '#fff' }}
-                        >
-                          {isApplyingJson ? 'Applying…' : 'Apply Cookies & Refresh'}
-                        </button>
-                        <button
-                          onClick={() => {
-                            sfx.pop()
-                            setJsonPayload('')
-                            setShowJsonPaste(false)
-                          }}
-                          className="text-xs opacity-70 hover:opacity-100 transition-opacity cursor-pointer"
-                          style={{ color: 'var(--text2)' }}
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Detected Browser Profiles */}
-                  {signInProfiles.length > 0 ? (
-                    <div className="flex flex-col gap-2 mt-2 pt-3 border-t" style={{ borderColor: 'var(--border)' }}>
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs font-bold text-white">
-                          Detected Browser Profiles:
-                        </span>
-                        <span className="sleek-badge">
-                          {signInProfiles.length} Profile(s)
-                        </span>
-                      </div>
-
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                        {signInProfiles.map((p) => (
-                          <div
-                            key={p.id}
-                            className="p-3 rounded-xl border flex flex-col justify-between gap-2.5 transition-all"
-                            style={{
-                              background: p.isLatest ? 'rgba(99, 102, 241, 0.08)' : 'var(--surface2)',
-                              borderColor: p.isLatest ? 'rgba(99, 102, 241, 0.35)' : 'var(--border)'
-                            }}
-                          >
-                            <div className="flex items-start justify-between gap-2">
-                              <div className="flex flex-col min-w-0">
-                                <span className="text-xs font-semibold truncate text-white">
-                                  {p.browser.charAt(0).toUpperCase() + p.browser.slice(1)} — {p.name}
-                                </span>
-                                <span className="text-[11px] opacity-70 truncate mt-0.5" style={{ color: 'var(--text2)' }}>
-                                  {p.isLatest ? 'Most recently active profile' : 'Active session detected'}
-                                </span>
-                              </div>
-                              <div className="flex items-center gap-1.5 shrink-0">
-                                {p.isLatest && (
-                                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 font-semibold shrink-0 border border-amber-500/40 flex items-center gap-1 shadow-sm">
-                                    <span>★</span> Latest
-                                  </span>
-                                )}
-                                {p.hasGoogleAuth && !p.isLatest && (
-                                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 font-medium shrink-0 border border-emerald-500/30">
-                                    auth found
-                                  </span>
-                                )}
-                              </div>
-                            </div>
-
-                            <div className="flex items-center gap-1.5 pt-0.5">
-                              <button
-                                onClick={() => {
-                                  sfx.click()
-                                  handleSyncProfile(p.id, p.name)
-                                }}
-                                disabled={syncingProfileId === p.id || isSyncing}
-                                className="flex-1 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all hover:opacity-90 disabled:opacity-50 flex items-center justify-center gap-1.5 shadow-sm cursor-pointer"
-                                style={{ background: 'var(--accent)', color: '#fff' }}
-                              >
-                                {syncingProfileId === p.id ? (
-                                  <>
-                                    <svg className="animate-spin h-3 w-3 text-white" viewBox="0 0 24 24">
-                                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
-                                    </svg>
-                                    Syncing…
-                                  </>
-                                ) : (
-                                  <>
-                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                      <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67" />
-                                    </svg>
-                                    Sync Profile
-                                  </>
-                                )}
-                              </button>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  ) : (
-                    <div
-                      className="p-3 rounded-xl border text-xs text-center opacity-70 mt-2"
-                      style={{ background: 'var(--surface2)', borderColor: 'var(--border)', color: 'var(--text2)' }}
-                    >
-                      No browser profiles with active Google sessions found. You can import cookies via JSON or log in using the Browser button above.
-                    </div>
-                  )}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      sfx.click()
+                      setTab('sessions')
+                    }}
+                    className="px-3.5 py-2 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all hover:opacity-90 shrink-0 cursor-pointer shadow-sm active:scale-98"
+                    style={{ background: 'var(--accent)', color: '#fff' }}
+                  >
+                    <span>Manage Accounts & Sessions</span>
+                    <span>→</span>
+                  </button>
                 </div>
               </Card>
 
@@ -2114,6 +1929,74 @@ export default function SettingsOverlay({
                         <span>⬒ Bottom Dock</span>
                       </button>
                     </div>
+                  </div>
+                </Card>
+
+                <Card>
+                  <div className="flex flex-col gap-2">
+                    <span className="font-bold text-xs text-white">In-App Window Titlebar</span>
+                    <p className="text-[11px] opacity-75 leading-relaxed" style={{ color: 'var(--text2)' }}>
+                      Display top window titlebar with branding, drag area, and conversation status. Hide to maximize vertical workspace.
+                    </p>
+                    <label
+                      className="flex items-center justify-between p-2.5 rounded-xl border cursor-pointer transition-colors mt-1"
+                      style={{
+                        background: (interfaceSettings?.showTitlebar !== false) ? 'color-mix(in srgb, var(--accent) 12%, transparent)' : 'var(--surface2)',
+                        borderColor: (interfaceSettings?.showTitlebar !== false) ? 'var(--accent)' : 'var(--border)'
+                      }}
+                    >
+                      <span className="text-xs font-semibold text-white">Titlebar Visible</span>
+                      <input
+                        type="checkbox"
+                        checked={interfaceSettings?.showTitlebar !== false}
+                        onChange={(e) => {
+                          sfx.click()
+                          updateInterfaceSetting('showTitlebar', e.target.checked)
+                        }}
+                        className="sr-only"
+                      />
+                      <span
+                        className={`w-4 h-4 rounded-full flex items-center justify-center text-[10px] font-bold ${
+                          (interfaceSettings?.showTitlebar !== false) ? 'bg-(--accent) text-white' : 'bg-white/10 text-white/40'
+                        }`}
+                      >
+                        {(interfaceSettings?.showTitlebar !== false) ? '✓' : ''}
+                      </span>
+                    </label>
+                  </div>
+                </Card>
+
+                <Card>
+                  <div className="flex flex-col gap-2">
+                    <span className="font-bold text-xs text-white">Titlebar Screen Share Privacy</span>
+                    <p className="text-[11px] opacity-75 leading-relaxed" style={{ color: 'var(--text2)' }}>
+                      Mask conversation prompt names in the titlebar, displaying generic 'Nexus' instead for private streaming or screen sharing.
+                    </p>
+                    <label
+                      className="flex items-center justify-between p-2.5 rounded-xl border cursor-pointer transition-colors mt-1"
+                      style={{
+                        background: Boolean(interfaceSettings?.maskTitlebarTitle) ? 'color-mix(in srgb, var(--accent) 12%, transparent)' : 'var(--surface2)',
+                        borderColor: Boolean(interfaceSettings?.maskTitlebarTitle) ? 'var(--accent)' : 'var(--border)'
+                      }}
+                    >
+                      <span className="text-xs font-semibold text-white">Mask Conversation Title</span>
+                      <input
+                        type="checkbox"
+                        checked={Boolean(interfaceSettings?.maskTitlebarTitle)}
+                        onChange={(e) => {
+                          sfx.click()
+                          updateInterfaceSetting('maskTitlebarTitle', e.target.checked)
+                        }}
+                        className="sr-only"
+                      />
+                      <span
+                        className={`w-4 h-4 rounded-full flex items-center justify-center text-[10px] font-bold ${
+                          Boolean(interfaceSettings?.maskTitlebarTitle) ? 'bg-(--accent) text-white' : 'bg-white/10 text-white/40'
+                        }`}
+                      >
+                        {Boolean(interfaceSettings?.maskTitlebarTitle) ? '✓' : ''}
+                      </span>
+                    </label>
                   </div>
                 </Card>
               </div>
@@ -2386,6 +2269,375 @@ export default function SettingsOverlay({
                 <span>Add AI Provider</span>
               </button>
             </div>
+        ) : tab === 'sessions' ? (
+          <div
+            ref={activeContentScrollRef}
+            onScroll={handleContentScroll}
+            onFocusCapture={handleContentFocusCapture}
+            className="p-4 sm:p-6 overflow-y-auto flex-1 flex flex-col gap-5 min-h-0 custom-scrollbar max-w-5xl mx-auto w-full"
+          >
+            <SectionTitle badge={`${models.length} Providers`}>
+              <IconShield size={13} style={{ color: 'var(--accent)' }} />
+              <span>AI Accounts & Provider Sessions</span>
+            </SectionTitle>
+
+            {syncFeedback && (
+              <div
+                className={`p-3.5 rounded-xl border flex items-center justify-between text-xs font-medium animate-in fade-in ${
+                  syncFeedback.type === 'success'
+                    ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+                    : 'bg-rose-500/10 border-rose-500/30 text-rose-300'
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  {syncFeedback.type === 'success' ? (
+                    <IconCheck size={14} className="shrink-0 text-emerald-400" />
+                  ) : (
+                    <span className="shrink-0 font-bold">✕</span>
+                  )}
+                  <span>{syncFeedback.message}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setSyncFeedback(null)}
+                  className="opacity-70 hover:opacity-100 p-1 text-xs"
+                >
+                  ✕
+                </button>
+              </div>
+            )}
+
+            <Card className="p-4 sm:p-5 flex flex-col gap-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <div
+                    className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 border shadow-sm"
+                    style={{
+                      background: 'var(--surface2)',
+                      borderColor: 'var(--accent)',
+                      color: 'var(--accent)'
+                    }}
+                  >
+                    <IconShield size={20} />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-[var(--text)] flex items-center gap-2">
+                      Universal Browser Session Sync
+                      <span
+                        className="px-2 py-0.5 rounded-full text-[10px] font-mono uppercase tracking-wider font-semibold border"
+                        style={{
+                          background: 'rgba(99, 102, 241, 0.1)',
+                          borderColor: 'rgba(99, 102, 241, 0.3)',
+                          color: 'var(--accent)'
+                        }}
+                      >
+                        Safe Merge Active
+                      </span>
+                    </h3>
+                    <p className="text-xs text-[var(--text2)] mt-0.5">
+                      Import active AI chat sessions from Zen, Firefox, Chrome, Edge, Brave, Opera, and custom profiles. Sessions are safely merged into Nexus without clearing other providers.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    disabled={syncingAll}
+                    className="px-3.5 py-2 rounded-xl text-xs font-semibold border transition-all cursor-pointer flex items-center gap-1.5 shadow-sm hover:opacity-95 disabled:opacity-50"
+                    style={{
+                      background: 'var(--accent)',
+                      borderColor: 'var(--accent)',
+                      color: '#ffffff'
+                    }}
+                    onClick={handleSyncAllSessions}
+                    title="Scan all detected browser profiles and merge active AI sessions into Nexus"
+                  >
+                    {syncingAll ? (
+                      <span>Syncing All...</span>
+                    ) : (
+                      <>
+                        <IconDownload size={13} />
+                        <span>Sync All AI Sessions</span>
+                      </>
+                    )}
+                  </button>
+
+                  <button
+                    type="button"
+                    className="px-3 py-2 rounded-xl text-xs font-medium border transition-all cursor-pointer flex items-center gap-1.5 hover:bg-white/5 active:scale-98"
+                    style={{
+                      background: 'var(--surface)',
+                      borderColor: 'var(--border)',
+                      color: 'var(--text)'
+                    }}
+                    onClick={handlePickCustomFolder}
+                    title="Select a custom or portable browser profile folder (Zen/Firefox or Chromium)"
+                  >
+                    <IconFolder size={13} />
+                    <span>Select Profile Folder</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={loadingProfiles}
+                    className="p-2 rounded-xl border transition-all cursor-pointer hover:bg-white/5 active:scale-98 text-[var(--text2)] hover:text-[var(--text)]"
+                    style={{
+                      background: 'var(--surface)',
+                      borderColor: 'var(--border)'
+                    }}
+                    onClick={() => {
+                      sfx.click()
+                      fetchBrowserProfiles()
+                    }}
+                    title="Refresh installed browser profiles"
+                  >
+                    <IconRotate size={14} className={loadingProfiles ? 'animate-spin' : ''} />
+                  </button>
+                </div>
+              </div>
+
+              {/* Detected Browser Profiles Grid */}
+              <div className="border-t pt-4" style={{ borderColor: 'var(--border)' }}>
+                <div className="flex items-center justify-between mb-3">
+                  <span className="text-xs font-semibold text-[var(--text2)] uppercase tracking-wider">
+                    Detected Browser Profiles ({browserProfiles.length})
+                  </span>
+                  <span className="text-[11px] text-[var(--text3)]">
+                    Supports Zen, Firefox, Floorp, Chrome, Edge, Brave, Opera, Vivaldi
+                  </span>
+                </div>
+
+                {loadingProfiles && browserProfiles.length === 0 ? (
+                  <div className="py-6 text-center text-xs text-[var(--text3)]">
+                    Scanning browser installations...
+                  </div>
+                ) : browserProfiles.length === 0 ? (
+                  <div className="py-6 px-4 rounded-xl border border-dashed text-center flex flex-col items-center gap-2" style={{ borderColor: 'var(--border)', background: 'var(--surface)' }}>
+                    <p className="text-xs text-[var(--text2)]">
+                      No browser profiles automatically detected in standard OS locations.
+                    </p>
+                    <button
+                      type="button"
+                      className="px-3 py-1.5 rounded-lg text-xs font-medium border transition-all hover:bg-white/10"
+                      style={{ background: 'var(--surface2)', borderColor: 'var(--border)', color: 'var(--text)' }}
+                      onClick={handlePickCustomFolder}
+                    >
+                      Browse to Profile Folder...
+                    </button>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    {browserProfiles.map((p) => {
+                      const isSyncingThis = syncingProfileId === p.id
+                      const sessions: string[] = p.detectedAiSessions || []
+                      const hasSessions = sessions.length > 0 || p.hasGoogleAuth
+
+                      return (
+                        <div
+                          key={p.id}
+                          className="p-3.5 rounded-xl border flex flex-col justify-between gap-3 transition-all"
+                          style={{
+                            background: 'var(--surface)',
+                            borderColor: p.isLatest ? 'var(--accent)' : 'var(--border)'
+                          }}
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="flex items-center gap-2.5 min-w-0">
+                              <span
+                                className="w-7 h-7 rounded-lg flex items-center justify-center font-bold text-xs uppercase shrink-0"
+                                style={{
+                                  background: p.browser === 'zen' ? '#a855f722' : p.browser === 'firefox' ? '#f9731622' : 'var(--surface2)',
+                                  color: p.browser === 'zen' ? '#c084fc' : p.browser === 'firefox' ? '#fb923c' : 'var(--accent)',
+                                  border: '1px solid currentColor'
+                                }}
+                              >
+                                {p.browser ? p.browser.substring(0, 2) : 'BR'}
+                              </span>
+                              <div className="min-w-0">
+                                <div className="text-xs font-semibold text-[var(--text)] truncate flex items-center gap-1.5">
+                                  <span>{p.name}</span>
+                                  {p.isLatest && (
+                                    <span className="px-1.5 py-0.2 rounded text-[9px] font-bold uppercase bg-indigo-500/20 text-indigo-300">
+                                      Active
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="text-[10px] text-[var(--text3)] font-mono truncate">
+                                  {p.browser} • {p.id}
+                                </div>
+                              </div>
+                            </div>
+
+                            <button
+                              type="button"
+                              disabled={isSyncingThis || syncingAll}
+                              className="px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition-all cursor-pointer shrink-0 disabled:opacity-50 hover:bg-white/10 active:scale-97"
+                              style={{
+                                background: 'var(--surface2)',
+                                borderColor: 'var(--border)',
+                                color: 'var(--text)'
+                              }}
+                              onClick={() => handleSyncProfile(p.id)}
+                              title={`Import sessions from ${p.name}`}
+                            >
+                              {isSyncingThis ? (
+                                <span>Importing...</span>
+                              ) : (
+                                <span>Import</span>
+                              )}
+                            </button>
+                          </div>
+
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            {p.isLocked && (
+                              <span className="px-1.5 py-0.5 rounded text-[10px] bg-amber-500/15 text-amber-300 border border-amber-500/30">
+                                Browser Running
+                              </span>
+                            )}
+                            {sessions.map((s) => (
+                              <span
+                                key={s}
+                                className="px-1.5 py-0.5 rounded text-[10px] font-medium border"
+                                style={{
+                                  background: 'var(--surface2)',
+                                  borderColor: 'var(--border)',
+                                  color: 'var(--text2)'
+                                }}
+                              >
+                                {s === 'chatgpt' ? 'ChatGPT' : s === 'claude' ? 'Claude' : s === 'google' ? 'Google' : s === 'deepseek' ? 'DeepSeek' : s === 'perplexity' ? 'Perplexity' : s === 'grok' ? 'Grok' : s === 'mistral' ? 'Mistral' : s}
+                              </span>
+                            ))}
+                            {!hasSessions && !p.isLocked && (
+                              <span className="text-[10px] text-[var(--text3)] italic">
+                                No AI sessions detected
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
+            </Card>
+
+            <SectionTitle badge={`${models.length} Providers`}>
+              <IconGrid size={13} style={{ color: 'var(--accent)' }} />
+              <span>Configured Provider Matrix & Direct Portals</span>
+            </SectionTitle>
+
+            <div className="flex flex-col gap-3">
+              {models.map((m, idx) => {
+                const provColor = m.color || providerConfig[m.key]?.accentColor || modelColor(m.key)
+                let hostname = ''
+                try {
+                  hostname = new URL(m.url).hostname
+                } catch {
+                  hostname = m.url
+                }
+                const isClearing = clearingProviderKey === m.key
+                const isCleared = clearedFeedbackKey === m.key
+
+                return (
+                  <Card key={`session-card-${m.key || idx}`} className="p-4 sm:p-5">
+                    <div className="flex flex-col sm:flex-row gap-4 items-stretch sm:items-center justify-between">
+                      <div className="flex items-center gap-3.5 min-w-0">
+                        <div
+                          className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 border shadow-sm transition-transform"
+                          style={{
+                            background: 'var(--surface2)',
+                            borderColor: `${provColor}66`,
+                            boxShadow: `0 0 12px ${provColor}22`
+                          }}
+                        >
+                          <BrandIcon
+                            id={m.key}
+                            size={20}
+                            customSvg={m.icon}
+                            style={{ color: provColor }}
+                          />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className="font-bold text-sm text-[var(--text)] truncate">
+                              {m.label}
+                            </span>
+                            <span
+                              className="px-2 py-0.5 rounded-md text-[10px] font-mono border"
+                              style={{
+                                background: 'var(--surface)',
+                                borderColor: 'var(--border)',
+                                color: 'var(--text2)'
+                              }}
+                            >
+                              {m.key}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-2 mt-1">
+                            <IconGlobe size={11} className="text-[var(--text3)] shrink-0" />
+                            <span className="text-xs font-mono text-[var(--text2)] truncate">
+                              {hostname}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2 shrink-0 self-end sm:self-center">
+                        <button
+                          type="button"
+                          className="px-3.5 py-1.5 rounded-xl text-xs font-medium border transition-all cursor-pointer flex items-center gap-1.5 hover:opacity-90 active:scale-97"
+                          style={{
+                            background: 'var(--surface2)',
+                            borderColor: 'var(--border)',
+                            color: 'var(--text)'
+                          }}
+                          onClick={() => {
+                            sfx.click()
+                            if (onSelectModel) {
+                              onSelectModel(m.key)
+                            }
+                            onClose()
+                          }}
+                          title={`Focus ${m.label} tab to sign in or check session`}
+                        >
+                          <IconGlobe size={13} style={{ color: provColor }} />
+                          <span>Open Provider View</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          disabled={isClearing}
+                          className="px-3.5 py-1.5 rounded-xl text-xs font-medium border transition-all cursor-pointer flex items-center gap-1.5 disabled:opacity-50 hover:bg-rose-500/10 hover:border-rose-500/40 hover:text-rose-400 active:scale-97"
+                          style={{
+                            background: isCleared ? 'rgba(34, 197, 94, 0.1)' : 'var(--surface)',
+                            borderColor: isCleared ? 'rgba(34, 197, 94, 0.4)' : 'var(--border)',
+                            color: isCleared ? '#22c55e' : 'var(--text2)'
+                          }}
+                          onClick={() => handleClearProviderSession(m.key, m.url)}
+                          title={`Clear cookies, storage, and local session for ${m.label}`}
+                        >
+                          {isClearing ? (
+                            <span>Clearing...</span>
+                          ) : isCleared ? (
+                            <>
+                              <IconCheck size={13} />
+                              <span>Session Cleared</span>
+                            </>
+                          ) : (
+                            <>
+                              <IconTrash size={13} />
+                              <span>Clear Local Session</span>
+                            </>
+                          )}
+                        </button>
+                      </div>
+                    </div>
+                  </Card>
+                )
+              })}
+            </div>
+          </div>
         ) : tab === 'features' ? (
           <div
             ref={activeContentScrollRef}

@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   parseCookieEditorJson,
   normalizeExpirationDate,
+  readCookiesFromCustomDirectory,
   AI_HOST_PATTERN,
   GOOGLE_HOST_PATTERN
 } from './cookieImport'
@@ -25,7 +26,9 @@ describe('AI_HOST_PATTERN and GOOGLE_HOST_PATTERN', () => {
       'mistral.ai',
       'chat.mistral.ai',
       'z.ai',
-      'chat.z.ai'
+      'chat.z.ai',
+      'copilot.microsoft.com',
+      'bing.com'
     ]
 
     for (const host of validHosts) {
@@ -139,5 +142,19 @@ describe('normalizeExpirationDate', () => {
     expect(normalizeExpirationDate(undefined)).toBeUndefined()
     expect(normalizeExpirationDate(0)).toBeUndefined()
     expect(normalizeExpirationDate(-1)).toBeUndefined()
+  })
+})
+
+describe('readCookiesFromCustomDirectory', () => {
+  it('throws for non-existent directory', async () => {
+    await expect(readCookiesFromCustomDirectory('/path/that/does/not/exist')).rejects.toThrow(
+      'Directory does not exist'
+    )
+  })
+
+  it('throws if directory does not contain cookie database', async () => {
+    await expect(readCookiesFromCustomDirectory('/tmp')).rejects.toThrow(
+      'No browser cookie database'
+    )
   })
 })

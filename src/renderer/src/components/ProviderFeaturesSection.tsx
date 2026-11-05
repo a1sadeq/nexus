@@ -874,13 +874,25 @@ export const ProviderFeaturesSection: React.FC<Props> = ({
             <div className="flex items-center justify-between pb-1 border-b border-white/5">
               <div className="flex items-center gap-2">
                 <IconMonitor size={15} className="text-blue-400" />
-                <span className="text-xs font-bold text-(--text)">Memory Virtualization & DOM Pruning</span>
+                <span className="text-xs font-bold text-(--text)">Off-Screen Rendering</span>
               </div>
               <span className="text-[10px] font-mono text-(--text2)">RAM Optimizer</span>
             </div>
             <p className="text-[11px] text-(--text2) leading-relaxed">
-              Applies CSS `content-visibility: auto` to off-screen messages to keep memory consumption low during long conversations.
+              Uses CSS content-visibility to reduce off-screen rendering. It does not remove messages from the DOM or guarantee lower memory usage.
             </p>
+            <label className="flex items-start gap-2.5 rounded-lg border border-white/10 p-2.5 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={mergedFeatures.pauseCssAnimations === true}
+                onChange={(e) => updateFeatureField('pauseCssAnimations', e.target.checked)}
+                className="mt-0.5 w-4 h-4 shrink-0 accent-cyan-500"
+              />
+              <span className="text-[11px] text-(--text2) leading-relaxed">
+                <strong className="text-(--text)">Pause CSS animations for this provider (experimental)</strong><br />
+                May reduce visual work in long chats. Loading indicators or other animated elements may freeze or appear incomplete; turn off if the page looks wrong. Does not stop video or JavaScript animations. Takes effect on this provider's open tabs; off by default.
+              </span>
+            </label>
             <div className="flex flex-col gap-1">
               <label className="text-[11px] font-semibold text-(--text2)">Off-Screen Chat Messages Selector:</label>
               <input
