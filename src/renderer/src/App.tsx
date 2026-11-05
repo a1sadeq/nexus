@@ -53,6 +53,7 @@ import {
   STORAGE_KEY,
   type ModelDef
 } from './lib/models'
+import { resolveActiveProviderKey } from './lib/providerResolution'
 
 export type { ModelDef }
 
@@ -91,6 +92,9 @@ function App() {
   useEffect(() => { tabsRef.current = tabs }, [tabs])
 
   const activeTab = tabs.find((t) => t.id === activeId)
+  const resolvedActiveModelKey = useMemo(() => {
+    return resolveActiveProviderKey(activeTab, models)
+  }, [activeTab?.url, activeTab?.model, models])
 
   const [showHistory, setShowHistory] = useState(false)
   const [showTabOverview, setShowTabOverview] = useState(false)
@@ -588,7 +592,10 @@ Acknowledge these skills with a concise confirmation in this exact format:
         ) {
           return prev
         }
-        const nextTabs = prev.map((t) => (t.id === tabId && url ? { ...t, url } : t))
+        const resolvedModel = resolveActiveProviderKey({ ...existing, url }, models)
+        const nextTabs = prev.map((t) =>
+          t.id === tabId && url ? { ...t, url, model: resolvedModel || t.model } : t
+        )
         const updatedTab = nextTabs.find((t) => t.id === tabId)
 
         if (
@@ -808,11 +815,13 @@ Acknowledge these skills with a concise confirmation in this exact format:
 
   const handleDeployModel = (model: ModelKey) => {
     const url = getModelUrl(model)
-    const existingUnused = tabs.find((t) => t.model === model && t.title === model.toUpperCase())
-    if (existingUnused) {
-      switchToTab(existingUnused.id, existingUnused.url)
+    const existingProviderTab = tabs.find(
+      (t) => resolveActiveProviderKey(t, models) === model || t.model === model
+    )
+    if (existingProviderTab) {
+      switchToTab(existingProviderTab.id, existingProviderTab.url)
     } else {
-      const result = switchToModel(tabs, model, model.toUpperCase(), url)
+      const result = switchToModel(tabs, model, modelLabel(model), url)
       setTabs(result.tabs)
       loadTabUrl(result.activeId, url)
     }
@@ -1379,11 +1388,11 @@ Acknowledge these skills with a concise confirmation in this exact format:
       {!focusMode && (
         <WindowTitleBar
           activeTabTitle={tabs.find((t) => t.id === activeId)?.title}
-          activeModelName={models.find((m) => m.key === (tabs.find((t) => t.id === activeId)?.model || 'gemini'))?.label}
-          modelColor={modelColor(tabs.find((t) => t.id === activeId)?.model || 'gemini')}
+          activeModelName={models.find((m) => m.key === resolvedActiveModelKey)?.label || modelLabel(resolvedActiveModelKey)}
+          modelColor={modelColor(resolvedActiveModelKey)}
           maskTitle={interfaceSettings.maskTitlebarTitle}
           models={models}
-          activeModelKey={tabs.find((t) => t.id === activeId)?.model || 'gemini'}
+          activeModelKey={resolvedActiveModelKey}
           onSelectModel={handleDeployModel}
           autoHideMode={interfaceSettings.showTitlebar === false}
         />

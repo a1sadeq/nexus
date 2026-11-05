@@ -94,4 +94,25 @@ describe('TitlebarModelPillar Component', () => {
     expect(cssContent).toMatch(/\.titlebar-model-pillar[\s\S]*?-webkit-app-region:\s*no-drag\s*!important;/)
     expect(cssContent).toMatch(/\.titlebar-model-pill[\s\S]*?-webkit-app-region:\s*no-drag\s*!important;/)
   })
+
+  it('renders the glowing active-core-dot inside the active provider pill', async () => {
+    const onSelect = vi.fn()
+    await act(async () => {
+      root.render(
+        <TitlebarModelPillar
+          models={DEFAULT_MODELS}
+          activeModelKey="gemini"
+          onSelectModel={onSelect}
+        />
+      )
+    })
+
+    const geminiBtn = container.querySelector('button[title*="Gemini"]') as HTMLButtonElement
+    expect(geminiBtn).toBeTruthy()
+    const coreDot = geminiBtn.querySelector('.active-core-dot')
+    expect(coreDot).toBeTruthy()
+
+    const claudeBtn = container.querySelector('button[title*="Claude"]') as HTMLButtonElement
+    expect(claudeBtn.querySelector('.active-core-dot')).toBeNull()
+  })
 })

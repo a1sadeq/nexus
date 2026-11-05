@@ -1,4 +1,5 @@
 // Core AI models configuration, definitions, and versioned persistence.
+import { DOT_COLOR } from './modelVisuals'
 
 export interface ModelDef {
   key: string
@@ -26,6 +27,66 @@ export const DEFAULT_MODELS: ModelDef[] = [
 ]
 
 /**
+ * Sanitizes model definitions:
+ * - Purges legacy dirty inline SVGs (like the plus sign <circle><path d="M12 8v8"/><path d="M8 12h8"/></circle>) so BrandIcon renders authentic official vectors.
+ * - Formats dirty uppercase/camelcase legacy labels (e.g. GEMINIV2AISTUDIO -> AI Studio, glm -> GLM, arena-ai -> Arena).
+ * - Fills in brand accent colors if missing.
+ */
+export function sanitizeModelDef(m: ModelDef): ModelDef {
+  if (!m || typeof m !== 'object') return m
+  const key = (m.key || '').toLowerCase().trim()
+
+  // 1. Label formatting
+  let label = m.label || key
+  const upper = label.toUpperCase().trim()
+  if (key === 'geminiv2aistudio' || key === 'aistudio' || upper === 'GEMINIV2AISTUDIO') {
+    label = 'AI Studio'
+  } else if (key === 'glm' || key === 'zai' || key === 'z.ai' || upper === 'GLM') {
+    label = 'GLM'
+  } else if (key === 'arena-ai' || key === 'arena' || upper === 'ARENA') {
+    label = 'Arena'
+  } else if (key === 'qwen' && (upper === 'QWEN' || upper === 'TONGYI QIANWEN')) {
+    label = 'Qwen'
+  } else if (key === 'kimi' && upper === 'KIMI') {
+    label = 'Kimi'
+  } else if (key === 'chatgpt' && upper === 'CHATGPT') {
+    label = 'ChatGPT'
+  } else if (key === 'claude' && upper === 'CLAUDE') {
+    label = 'Claude'
+  } else if (key === 'deepseek' && upper === 'DEEPSEEK') {
+    label = 'DeepSeek'
+  } else if (key === 'perplexity' && upper === 'PERPLEXITY') {
+    label = 'Perplexity'
+  } else if (key === 'albert' && upper === 'ALBERT') {
+    label = 'Albert'
+  }
+
+  // 2. Dirty legacy inline SVG purge
+  let icon = m.icon
+  if (
+    icon &&
+    (icon.includes('M12 8v8') ||
+      icon.includes('M8 12h8') ||
+      icon.includes('circle cx="12" cy="12"') ||
+      icon.includes('m12 14 4-4') ||
+      icon.includes('m12 3-1.912') ||
+      icon.includes('M12 3a6 6 0 0 0 9 9'))
+  ) {
+    icon = undefined
+  }
+
+  // 3. Brand color default
+  const color = m.color || DOT_COLOR[key] || '#22d3ee'
+
+  return {
+    ...m,
+    label,
+    icon,
+    color
+  }
+}
+
+/**
  * Loads models from localStorage and applies a single-shot versioned migration.
  * - Respects deliberate user deletions if schema >= 2.
  * - Safely appends missing default models (e.g. ChatGPT, Claude) only when upgrading from v1 or unversioned.
@@ -48,7 +109,7 @@ export function loadAndMigrateModels(defaultModels: ModelDef[] = DEFAULT_MODELS)
         localStorage.setItem(STORAGE_KEY, JSON.stringify(defaultModels))
         localStorage.setItem(SCHEMA_KEY, CURRENT_MODELS_SCHEMA_VERSION.toString())
       }
-      return defaultModels
+      return defaultModels.map(sanitizeModelDef)
     }
 
     let parsed: ModelDef[]
@@ -63,7 +124,7 @@ export function loadAndMigrateModels(defaultModels: ModelDef[] = DEFAULT_MODELS)
         localStorage.setItem(STORAGE_KEY, JSON.stringify(defaultModels))
         localStorage.setItem(SCHEMA_KEY, CURRENT_MODELS_SCHEMA_VERSION.toString())
       }
-      return defaultModels
+      return defaultModels.map(sanitizeModelDef)
     }
 
     // Only run v1 -> v2 migration ONCE if schema < 2
@@ -79,7 +140,7 @@ export function loadAndMigrateModels(defaultModels: ModelDef[] = DEFAULT_MODELS)
         }
       }
 
-      const migrated = [...parsed, ...toAppend]
+      const migrated = [...parsed, ...toAppend].map(sanitizeModelDef)
       if (typeof localStorage !== 'undefined') {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(migrated))
         localStorage.setItem(SCHEMA_KEY, CURRENT_MODELS_SCHEMA_VERSION.toString())
@@ -87,10 +148,11 @@ export function loadAndMigrateModels(defaultModels: ModelDef[] = DEFAULT_MODELS)
       return migrated
     }
 
-    // Schema >= 2: Return stored models AS IS. Respect deliberate user deletions!
-    return parsed
+    // Schema >= 2: Return stored models sanitized. Respect deliberate user deletions!
+    const sanitized = parsed.map(sanitizeModelDef)
+    return sanitized
   } catch (err) {
     console.error('[models-migration] Failed to load/migrate models:', err)
-    return defaultModels
+    return defaultModels.map(sanitizeModelDef)
   }
 }

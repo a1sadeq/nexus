@@ -78,6 +78,7 @@ export const TitlebarModelPillar: FC<TitlebarModelPillarProps> = ({
               <BrandIcon id={m.key} size={14} className="titlebar-model-icon" />
             )}
             <span className="titlebar-model-label">{m.label}</span>
+            {isActive && <span className="active-core-dot" aria-hidden="true" />}
           </button>
         )
       })}

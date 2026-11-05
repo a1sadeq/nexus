@@ -87,4 +87,39 @@ describe('Models LocalStorage Migration Matrix (Finding H6)', () => {
     const keys = Array.from(storageMap.keys())
     expect(keys.some((k) => k.startsWith('nexus.models.corrupted.'))).toBe(true)
   })
+
+  it('Case 6: Purges dirty legacy inline SVG plus icons and cleans labels', () => {
+    const dirtyData = [
+      {
+        key: 'qwen',
+        label: 'QWEN',
+        url: 'https://chat.qwen.ai',
+        icon: '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="10"/><path d="M12 8v8"/><path d="M8 12h8"/></svg>'
+      },
+      {
+        key: 'geminiv2aistudio',
+        label: 'GEMINIV2AISTUDIO',
+        url: 'https://aistudio.google.com'
+      },
+      {
+        key: 'glm',
+        label: 'GLM',
+        url: 'https://chat.z.ai'
+      }
+    ]
+    mockLocalStorage.setItem(STORAGE_KEY, JSON.stringify(dirtyData))
+    mockLocalStorage.setItem(SCHEMA_KEY, '2')
+
+    const result = loadAndMigrateModels(DEFAULT_MODELS)
+    const qwen = result.find((m) => m.key === 'qwen')
+    expect(qwen?.icon).toBeUndefined() // Purged so BrandIcon renders authentic vector
+    expect(qwen?.label).toBe('Qwen')
+
+    const aiStudio = result.find((m) => m.key === 'geminiv2aistudio')
+    expect(aiStudio?.label).toBe('AI Studio')
+
+    const glm = result.find((m) => m.key === 'glm')
+    expect(glm?.label).toBe('GLM')
+    expect(glm?.color).toBe('#1055ff')
+  })
 })

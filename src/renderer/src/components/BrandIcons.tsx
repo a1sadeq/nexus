@@ -26,7 +26,14 @@ const BRAND_PATHS: Record<string, string> = {
   mistral: 'M4 4h4v4H4V4zm12 0h4v4h-4V4zm-6 6h4v4h-4v-4zm-6 6h4v4H4v-4zm12 0h4v4h-4v-4z',
   copilot: 'M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm1 14.93V15a1 1 0 0 0-2 0v1.93A8 8 0 0 1 4.07 11H6a1 1 0 0 0 0-2H4.07A8 8 0 0 1 11 4.07V6a1 1 0 0 0 2 0V4.07A8 8 0 0 1 19.93 11H18a1 1 0 0 0 0 2h1.93A8 8 0 0 1 13 16.93z',
   'arena-ai': 'M12 2L4 5v6.09c0 5.05 3.41 9.76 8 10.91 4.59-1.15 8-5.86 8-10.91V5l-8-3zm1 14.5h-2v-2h2v2zm0-4h-2V7h2v5.5z',
-  arena: 'M12 2L4 5v6.09c0 5.05 3.41 9.76 8 10.91 4.59-1.15 8-5.86 8-10.91V5l-8-3zm1 14.5h-2v-2h2v2zm0-4h-2V7h2v5.5z'
+  arena: 'M12 2L4 5v6.09c0 5.05 3.41 9.76 8 10.91 4.59-1.15 8-5.86 8-10.91V5l-8-3zm1 14.5h-2v-2h2v2zm0-4h-2V7h2v5.5z',
+  glm: 'M2.5 4.5A2 2 0 0 1 4.5 2.5h15a2 2 0 0 1 2 2v2.5a2 2 0 0 1-.85 1.64L11.5 15.5H19.5a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2h-15a2 2 0 0 1-2-2v-2.5a2 2 0 0 1 .85-1.64L12.5 8.5H4.5a2 2 0 0 1-2-2z',
+  'z.ai': 'M2.5 4.5A2 2 0 0 1 4.5 2.5h15a2 2 0 0 1 2 2v2.5a2 2 0 0 1-.85 1.64L11.5 15.5H19.5a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2h-15a2 2 0 0 1-2-2v-2.5a2 2 0 0 1 .85-1.64L12.5 8.5H4.5a2 2 0 0 1-2-2z',
+  zai: 'M2.5 4.5A2 2 0 0 1 4.5 2.5h15a2 2 0 0 1 2 2v2.5a2 2 0 0 1-.85 1.64L11.5 15.5H19.5a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2h-15a2 2 0 0 1-2-2v-2.5a2 2 0 0 1 .85-1.64L12.5 8.5H4.5a2 2 0 0 1-2-2z',
+  aistudio: 'M12 1L4 9l8 14 8-14-8-8zm0 3.2L17.5 9 12 18.6 6.5 9 12 4.2zM8.5 9h7L12 15.1 8.5 9z',
+  geminiv2aistudio: 'M12 1L4 9l8 14 8-14-8-8zm0 3.2L17.5 9 12 18.6 6.5 9 12 4.2zM8.5 9h7L12 15.1 8.5 9z',
+  'gemini-v2-studio': 'M12 1L4 9l8 14 8-14-8-8zm0 3.2L17.5 9 12 18.6 6.5 9 12 4.2zM8.5 9h7L12 15.1 8.5 9z',
+  albert: 'M12 2a3 3 0 0 0-3 3c0 .35.06.69.17 1L5.5 8.2A3 3 0 0 0 4 8a3 3 0 1 0 2.83 4h10.34A3 3 0 1 0 20 8a3 3 0 0 0-1.5.4L14.83 6A3 3 0 0 0 15 5a3 3 0 0 0-3-3zm0 2a1 1 0 1 1 0 2 1 1 0 0 1 0-2zm-8 8a1 1 0 1 1 0 2 1 1 0 0 1 0-2zm16 0a1 1 0 1 1 0 2 1 1 0 0 1 0-2z'
 }
 
 export function ArcReactorIcon({
@@ -73,8 +80,16 @@ export function BrandIcon({
       />
     )
   }
-  const d = BRAND_PATHS[id]
-  if (!d) return null
+  const cleanKey = (id || '').toLowerCase().trim()
+  const d =
+    BRAND_PATHS[cleanKey] ||
+    BRAND_PATHS[cleanKey.replace(/[^a-z0-9]/g, '')] ||
+    BRAND_PATHS[cleanKey.replace(/-ai$/, '')]
+
+  if (!d) {
+    return <ArcReactorIcon size={size} className={props.className} />
+  }
+
   return (
     <svg
       viewBox="0 0 24 24"
