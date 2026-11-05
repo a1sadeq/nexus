@@ -27,7 +27,7 @@ Nexus is a desktop cockpit for the AI tools you already use. Instead of juggling
 
 It is **not** an API client and **not** a proxy. Each provider runs its real web app inside an isolated Electron webview, so your sessions, attachments, model pickers, and features behave exactly as they do in the browser. Nexus adds the workspace around them.
 
-> **New in v1.0.2:** a rebuilt Windows installer, hardened tab lifecycle, fixed Export Context engine, live feature hooks, a bottom pinned dock by default, and this guide.
+> **New in v1.0.3:** Titlebar AI Models Pillar with 8 frontier providers, Iron Man Arc-Reactor breathing animation, auto-hide on hover engine, models schema v2 migration, and responsive layout clearance.
 
 ---
 
