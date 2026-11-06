@@ -35,6 +35,18 @@ describe('getMergedProviderFeatures precedence', () => {
       { features: { customInitScript: '/*a*/' } })
     expect(merged.customInitScript).toBe('/*a*/\n\n/*b*/')
   })
+  it('allows custom user chatTitleSelector to override defaults', () => {
+    const merged = getMergedProviderFeatures('gemini', {
+      features: { chatTitleSelector: '#custom-selector' }
+    })
+    expect(merged.chatTitleSelector).toBe('#custom-selector')
+  })
+  it('preserves gemini authentic 1.0.3 selectors without radix regression', () => {
+    const geminiFeats = getProviderDefaultFeatures('gemini')
+    expect(geminiFeats.chatTitleSelector).not.toContain('#radix')
+    expect(geminiFeats.chatTitleSelector).toContain('.conversation-title')
+    expect(geminiFeats.chatTitleSelector).toContain('[data-test-id="conversation-title"]')
+  })
 })
 
 describe('provider motion opt-in', () => {

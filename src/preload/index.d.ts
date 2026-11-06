@@ -165,8 +165,16 @@ export interface NexusAiFeatures {
   testLiveHooks: (modelKey: string) => Promise<unknown>
 }
 
+export interface NexusStateBridge {
+  get: (key: string) => Promise<any>
+  save: (key: string, data: unknown) => Promise<boolean>
+  getThemeSync: () => any
+  getTabsSync?: () => any
+}
+
 declare global {
   interface Window {
+    nexusState?: NexusStateBridge
     electron: {
       ipcRenderer: NexusIpcRenderer
       googleSignIn: NexusGoogleSignIn
@@ -176,6 +184,7 @@ declare global {
       skills?: NexusSkills
       downloads?: NexusDownloads
       aiFeatures?: NexusAiFeatures
+      nexusState?: NexusStateBridge
     }
   }
 }

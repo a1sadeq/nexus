@@ -135,6 +135,19 @@ export const PRESET_THEMES: AppTheme[] = [
 
 export function loadThemeState(): ThemeState {
   try {
+    if (typeof window !== 'undefined' && window.nexusState?.getThemeSync) {
+      let syncTheme = window.nexusState.getThemeSync() as any
+      if (typeof syncTheme === 'string') {
+        try {
+          syncTheme = JSON.parse(syncTheme)
+        } catch {}
+      }
+      if (syncTheme && typeof syncTheme.activeId === 'string' && Array.isArray(syncTheme.customs)) {
+        return syncTheme
+      }
+    }
+  } catch {}
+  try {
     const raw = localStorage.getItem(STORAGE_KEY) || localStorage.getItem(LEGACY_STORAGE_KEY)
     if (raw) {
       const parsed = JSON.parse(raw) as ThemeState
@@ -154,6 +167,11 @@ export function saveThemeState(state: ThemeState): void {
   } catch {
     // storage full / unavailable -> non-fatal
   }
+  try {
+    if (typeof window !== 'undefined' && window.nexusState?.save) {
+      window.nexusState.save('theme', state).catch(() => {})
+    }
+  } catch {}
 }
 
 export function findTheme(state: ThemeState): AppTheme {

@@ -155,16 +155,32 @@ const electronAPI = {
     stopGeneration: (): Promise<unknown> => ipcRenderer.invoke('ai_stop_generation'),
     siteNewChat: (): Promise<unknown> => ipcRenderer.invoke('ai_site_new_chat'),
     testLiveHooks: (modelKey: string): Promise<unknown> => ipcRenderer.invoke('test_provider_live_hooks', modelKey)
+  },
+  nexusState: {
+    get: (key: string): Promise<unknown> => ipcRenderer.invoke(`get_${key}`),
+    save: (key: string, data: unknown): Promise<unknown> => ipcRenderer.invoke(`save_${key}`, data),
+    getThemeSync: (): unknown => ipcRenderer.sendSync('get_theme_sync'),
+    getTabsSync: (): unknown => ipcRenderer.sendSync('get_tabs_sync')
   }
+}
+
+const nexusState = {
+  get: (key: string): Promise<unknown> => ipcRenderer.invoke(`get_${key}`),
+  save: (key: string, data: unknown): Promise<unknown> => ipcRenderer.invoke(`save_${key}`, data),
+  getThemeSync: (): unknown => ipcRenderer.sendSync('get_theme_sync'),
+  getTabsSync: (): unknown => ipcRenderer.sendSync('get_tabs_sync')
 }
 
 if (process.contextIsolated) {
   try {
     contextBridge.exposeInMainWorld('electron', electronAPI)
+    contextBridge.exposeInMainWorld('nexusState', nexusState)
   } catch (error) {
     console.error(error)
   }
 } else {
   // @ts-ignore (define in dts)
   window.electron = electronAPI
+  // @ts-ignore
+  window.nexusState = nexusState
 }

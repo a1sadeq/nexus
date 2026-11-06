@@ -248,7 +248,7 @@ const SETTINGS_SEARCH_INDEX: SearchItem[] = [
 
 function SectionTitle({ children, onReset, badge }: { children: ReactNode; onReset?: () => void; badge?: string }) {
   return (
-    <div className="flex items-center justify-between gap-2 pb-1">
+    <div className="flex items-center justify-between gap-2 pb-1 shrink-0">
       <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-[var(--text)]">
         {children}
       </div>
@@ -273,7 +273,7 @@ function SectionTitle({ children, onReset, badge }: { children: ReactNode; onRes
 function Card({ children, className = '', glow = false }: { children: ReactNode; className?: string; glow?: boolean }) {
   return (
     <div
-      className={`sleek-card p-4 sm:p-5 flex flex-col gap-4 relative overflow-hidden ${glow ? 'sleek-card-active' : ''} ${className}`}
+      className={`sleek-card p-4 sm:p-5 flex flex-col gap-4 relative overflow-hidden shrink-0 min-h-fit ${glow ? 'sleek-card-active' : ''} ${className}`}
     >
       {children}
     </div>
@@ -2013,7 +2013,7 @@ export default function SettingsOverlay({
                 <span>AI Providers & Endpoints</span>
               </SectionTitle>
 
-              <div className="flex flex-col gap-3">
+              <div className="flex flex-col gap-3 shrink-0">
                 {models.map((m, idx) => {
                   const isExpanded = !!expandedModels[m.key]
                   const provColor = m.color || providerConfig[m.key]?.accentColor || modelColor(m.key)
@@ -2307,8 +2307,8 @@ export default function SettingsOverlay({
               </div>
             )}
 
-            <Card className="p-4 sm:p-5 flex flex-col gap-4">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <Card className="shrink-0 min-h-fit">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 shrink-0">
                 <div className="flex items-center gap-3">
                   <div
                     className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 border shadow-sm"
@@ -2398,7 +2398,7 @@ export default function SettingsOverlay({
               </div>
 
               {/* Detected Browser Profiles Grid */}
-              <div className="border-t pt-4" style={{ borderColor: 'var(--border)' }}>
+              <div className="border-t pt-4 shrink-0" style={{ borderColor: 'var(--border)' }}>
                 <div className="flex items-center justify-between mb-3">
                   <span className="text-xs font-semibold text-[var(--text2)] uppercase tracking-wider">
                     Detected Browser Profiles ({browserProfiles.length})
@@ -2527,7 +2527,7 @@ export default function SettingsOverlay({
               <span>Configured Provider Matrix & Direct Portals</span>
             </SectionTitle>
 
-            <div className="flex flex-col gap-3">
+            <div className="flex flex-col gap-3 shrink-0">
               {models.map((m, idx) => {
                 const provColor = m.color || providerConfig[m.key]?.accentColor || modelColor(m.key)
                 let hostname = ''

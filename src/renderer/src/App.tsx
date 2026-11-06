@@ -55,19 +55,22 @@ import {
   type ModelDef
 } from './lib/models'
 import { resolveActiveProviderKey } from './lib/providerResolution'
+import { cleanConversationTitle, isDefaultConversationTitle } from '../../shared/titleUtils'
 
 export type { ModelDef }
 
 const TABS_STORAGE_KEY = 'vicinae.tabs'
 
 function App() {
+  const [modelsHydrated, setModelsHydrated] = useState(false)
   const [models, setModels] = useState<ModelDef[]>(() => loadAndMigrateModels(DEFAULT_MODELS))
 
-  // Dual persistence: save to localStorage and to disk models.json
+  // Dual persistence: save to localStorage and to disk models.json (gated on modelsHydrated)
   useEffect(() => {
+    if (!modelsHydrated) return
     localStorage.setItem(STORAGE_KEY, JSON.stringify(models))
     window.electron?.ipcRenderer?.invoke?.('save_models', JSON.stringify(models)).catch(() => {})
-  }, [models])
+  }, [models, modelsHydrated])
 
   // Hydrate configured models from disk models.json on mount
   useEffect(() => {
@@ -75,15 +78,15 @@ function App() {
     const hydrateModelsFromDisk = async () => {
       try {
         const raw = await window.electron?.ipcRenderer?.invoke?.('get_models')
-        if (typeof raw === 'string' && raw.trim().length > 0) {
-          const parsed = JSON.parse(raw)
-          if (Array.isArray(parsed) && parsed.length > 0 && active) {
-            const sanitized = parsed.map(sanitizeModelDef)
-            setModels(sanitized)
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(sanitized))
-            return
-          }
+        const parsed = typeof raw === 'string' ? (raw.trim().length > 0 ? JSON.parse(raw) : null) : raw
+        if (Array.isArray(parsed) && parsed.length > 0 && active) {
+          const sanitized = parsed.map(sanitizeModelDef)
+          setModels(sanitized)
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(sanitized))
+          setModelsHydrated(true)
+          return
         }
+        setModelsHydrated(true)
         // If disk models.json is not yet created, persist current default models to disk
         window.electron?.ipcRenderer?.invoke?.('save_models', JSON.stringify(models)).catch(() => {})
       } catch (err) {
@@ -96,7 +99,17 @@ function App() {
     }
   }, [])
 
+  const [tabsHydrated, setTabsHydrated] = useState(false)
   const [initialTabs] = useState(() => {
+    try {
+      const disk = window.nexusState?.getTabsSync?.()
+      const parsed = typeof disk === 'string' ? JSON.parse(disk) : disk
+      if (parsed && typeof parsed === 'object' && Array.isArray((parsed as any).tabs) && (parsed as any).tabs.length > 0) {
+        const loadedTabs = (parsed as any).tabs as Tab[]
+        const loadedActiveId = (parsed as any).activeId || loadedTabs[0]?.id || null
+        return { tabs: loadedTabs, activeId: loadedActiveId }
+      }
+    } catch {}
     const restored = deserializeState(localStorage.getItem(TABS_STORAGE_KEY))
     if (restored && restored.tabs.length > 0) return restored
     const initial = createTab('gemini', 'New Chat', 'https://gemini.google.com')
@@ -104,6 +117,73 @@ function App() {
   })
   const [tabs, setTabs] = useState<Tab[]>(initialTabs.tabs)
   const [activeId, setActiveId] = useState<string | null>(initialTabs.activeId)
+
+  // Asynchronous universal hydration from disk tabs.json
+  useEffect(() => {
+    let active = true
+    const timeout = new Promise<'timeout'>((resolve) => setTimeout(() => resolve('timeout'), 1500))
+
+    Promise.race([window.nexusState?.get('tabs'), timeout])
+      .then((result) => {
+        if (!active) return
+        let diskState = result
+        if (typeof diskState === 'string' && diskState.trim()) {
+          try {
+            diskState = JSON.parse(diskState)
+          } catch {}
+        }
+
+        if (
+          result !== 'timeout' &&
+          diskState &&
+          typeof diskState === 'object' &&
+          Array.isArray((diskState as any).tabs) &&
+          (diskState as any).tabs.length > 0
+        ) {
+          // Disk wins: hydrate live tabs
+          const loadedTabs = (diskState as any).tabs as Tab[]
+          const loadedActiveId = (diskState as any).activeId || loadedTabs[0]?.id || null
+          setTabs(loadedTabs)
+          setActiveId(loadedActiveId)
+          setMruTabIds(loadedTabs.map((t) => t.id))
+          try {
+            localStorage.setItem(TABS_STORAGE_KEY, serializeState(loadedTabs, loadedActiveId))
+          } catch {}
+          setTabsHydrated(true)
+          const activeTabToActivate = loadedTabs.find((t) => t.id === loadedActiveId) || loadedTabs[0]
+          if (activeTabToActivate?.url) {
+            switchToTabRef.current?.(activeTabToActivate.id, activeTabToActivate.url)
+          }
+        } else if (result === 'timeout') {
+          // Read-only fallback: render local storage, NEVER write back until disk resolves
+          console.warn('[state] Tabs hydration timed out; maintaining read-only local state')
+          const restored = deserializeState(localStorage.getItem(TABS_STORAGE_KEY))
+          if (restored && restored.tabs.length > 0) {
+            setTabs(restored.tabs)
+            setActiveId(restored.activeId)
+          }
+        } else {
+          // Fresh install: initialize default tab
+          const restored = deserializeState(localStorage.getItem(TABS_STORAGE_KEY))
+          if (restored && restored.tabs.length > 0) {
+            setTabs(restored.tabs)
+            setActiveId(restored.activeId)
+          } else {
+            const initial = createTab('gemini', 'New Chat', 'https://gemini.google.com')
+            setTabs([initial])
+            setActiveId(initial.id)
+          }
+          setTabsHydrated(true)
+        }
+      })
+      .catch((err) => {
+        console.warn('[state] Tabs hydration fallback:', err)
+      })
+
+    return () => {
+      active = false
+    }
+  }, [])
 
   // MRU State
   const [mruTabIds, setMruTabIds] = useState<string[]>(initialTabs.tabs.map(t => t.id))
@@ -116,6 +196,7 @@ function App() {
     }
   }, [activeId])
 
+  const switchToTabRef = useRef<((id: string, url: string) => void) | null>(null)
   const mruRef = useRef(mruTabIds)
   const tabsRef = useRef(tabs)
 
@@ -210,10 +291,38 @@ function App() {
 
   const [interfaceSettings, setInterfaceSettings] = useState<InterfaceSettings>(loadInterfaceSettings)
 
+  // One-time promotion and hydration of interface settings
+  useEffect(() => {
+    if (!tabsHydrated) return
+    window.nexusState?.get('interface_settings').then((diskData: unknown) => {
+      let parsed = diskData
+      if (typeof parsed === 'string' && parsed.trim()) {
+        try {
+          parsed = JSON.parse(parsed)
+        } catch {}
+      }
+      if (parsed == null) {
+        const local =
+          localStorage.getItem('nexus.interfaceSettings') || localStorage.getItem('vicinae.interfaceSettings')
+        if (local) {
+          try {
+            const localObj = JSON.parse(local)
+            window.nexusState?.save('interface_settings', localObj).catch(() => {})
+          } catch {}
+        }
+      } else if (typeof parsed === 'object') {
+        setInterfaceSettings((prev) => ({ ...prev, ...(parsed as Partial<InterfaceSettings>) }))
+      }
+    }).catch(() => {})
+  }, [tabsHydrated])
+
   // Apply interface CSS variables immediately on startup and whenever interfaceSettings changes
   useEffect(() => {
     applyInterfaceCssVariables(interfaceSettings)
-  }, [interfaceSettings])
+    if (tabsHydrated) {
+      window.nexusState?.save('interface_settings', interfaceSettings).catch(() => {})
+    }
+  }, [interfaceSettings, tabsHydrated])
 
   const [themeState, setThemeState] = useState(loadThemeState)
   useEffect(() => {
@@ -268,15 +377,17 @@ function App() {
   }, [webviewThemeOn, themeState.activeId, themeState.customs, interfaceSettings])
 
   // Per-provider webview overrides: loaded from main (single source of truth),
-  // pushed back on change. Guarded so the first invoke resolution never wipes
-  // providers.json with an empty object.
+  // pushed back only on intentional mutations.
   const [providerConfig, setProviderConfig] = useState<ProviderConfigMap>({})
   const [providerConfigLoaded, setProviderConfigLoaded] = useState(false)
+  const lastSavedProviderConfigRef = useRef<string>('')
+
   useEffect(() => {
     let cancelled = false
     window.electron?.ipcRenderer.invoke('get_provider_config').then((map: ProviderConfigMap) => {
-      if (!cancelled) {
-        setProviderConfig(map || {})
+      if (!cancelled && map && typeof map === 'object') {
+        setProviderConfig(map)
+        lastSavedProviderConfigRef.current = JSON.stringify(map)
         setProviderConfigLoaded(true)
       }
     })
@@ -284,8 +395,15 @@ function App() {
       cancelled = true
     }
   }, [])
+
   useEffect(() => {
     if (!providerConfigLoaded) return
+    const serialized = JSON.stringify(providerConfig)
+    if (serialized === lastSavedProviderConfigRef.current) return
+    if (Object.keys(providerConfig).length === 0 && lastSavedProviderConfigRef.current !== '' && lastSavedProviderConfigRef.current !== '{}') {
+      return
+    }
+    lastSavedProviderConfigRef.current = serialized
     window.electron?.ipcRenderer.send('set_provider_config', providerConfig)
   }, [providerConfig, providerConfigLoaded])
 
@@ -545,28 +663,18 @@ Acknowledge these skills with a concise confirmation in this exact format:
     if (!ipc) return
 
     const checkIsDefaultTitle = (t: string, m: string) => {
-      if (!t) return true;
-      const tl = t.toLowerCase().trim();
-      const ml = m.toLowerCase().trim();
-      return tl === 'new chat' || tl === 'untitled' || tl.startsWith('new chat') ||
-             tl === ml || tl === ml + ' chat' || tl.startsWith(ml + ' -') || tl.startsWith(ml + ' |') ||
-             tl === 'z.ai' || tl.startsWith('z.ai -') || tl.startsWith('z.ai |') ||
-             tl === 'z chat' || tl === 'glm' || tl.startsWith('glm -') ||
-             tl === 'chatgpt' || tl.startsWith('chatgpt -') ||
-             tl === 'qwen' || tl.startsWith('qwen -') || tl === 'tongyi qianwen' ||
-             tl === 'claude' || tl.startsWith('claude -') ||
-             tl === 'google gemini' || tl.startsWith('google gemini -') ||
-             tl === 'kimi ai' || tl === 'kimi' || tl.startsWith('kimi -') ||
-             tl === 'qwen studio' || tl.startsWith('qwen studio -') ||
-             tl.startsWith('http://') || tl.startsWith('https://') || tl === 'loading' || tl === 'loading...';
+      return isDefaultConversationTitle(t, m);
     };
 
-    const onTitle = (_e: unknown, tabId: string, title: string) => {
+    const onTitle = (_e: unknown, tabId: string, rawTitle: string) => {
       setTabs((prev) => {
         const existingTab = prev.find((t) => t.id === tabId)
-        if (!existingTab || existingTab.title === title) return prev;
+        if (!existingTab) return prev;
 
-        const incomingIsDefault = checkIsDefaultTitle(title, existingTab.model);
+        const effectiveTitle = cleanConversationTitle(rawTitle, existingTab.model) || (rawTitle || '').trim()
+        if (!effectiveTitle || existingTab.title === effectiveTitle) return prev;
+
+        const incomingIsDefault = checkIsDefaultTitle(effectiveTitle, existingTab.model);
         const currentIsDefault = checkIsDefaultTitle(existingTab.title, existingTab.model);
 
         // Don't overwrite a good title with a trash/default title during loads!
@@ -574,7 +682,7 @@ Acknowledge these skills with a concise confirmation in this exact format:
           return prev;
         }
 
-        const nextTabs = prev.map((t) => (t.id === tabId && title ? { ...t, title } : t))
+        const nextTabs = prev.map((t) => (t.id === tabId ? { ...t, title: effectiveTitle } : t))
         const updatedTab = nextTabs.find((t) => t.id === tabId)
 
         if (
@@ -591,12 +699,12 @@ Acknowledge these skills with a concise confirmation in this exact format:
               (h) => h.url === updatedTab.url || h.id === updatedTab.id
             )
             const updatedHistory = prevHistory.filter(
-              (h) => h.url !== updatedTab.url && h.title !== title
+              (h) => h.url !== updatedTab.url && h.title !== effectiveTitle
             )
 
             const newHistoryItem = {
               id: updatedTab.id,
-              title,
+              title: effectiveTitle,
               url: updatedTab.url,
               model: updatedTab.model,
               thumbnail: existingItem?.thumbnail,
@@ -637,7 +745,8 @@ Acknowledge these skills with a concise confirmation in this exact format:
           !updatedTab.url.endsWith('.ai/')
         ) {
           setHistory((prevHistory) => {
-            const title = updatedTab.title || updatedTab.model.toUpperCase()
+            const rawTitle = updatedTab.title || updatedTab.model.toUpperCase()
+            const title = cleanConversationTitle(rawTitle, updatedTab.model) || rawTitle
             const isDefaultTitle = checkIsDefaultTitle(title, updatedTab.model);
 
             if (isDefaultTitle) return prevHistory; // Do not corrupt history with trash!
@@ -793,7 +902,6 @@ Acknowledge these skills with a concise confirmation in this exact format:
     [tabs]
   )
 
-  const switchToTabRef = useRef(switchToTab)
   const togglePinRef = useRef(togglePin)
   useEffect(() => { switchToTabRef.current = switchToTab }, [switchToTab])
   useEffect(() => { togglePinRef.current = togglePin }, [togglePin])
@@ -809,7 +917,7 @@ Acknowledge these skills with a concise confirmation in this exact format:
       const targetTab = tabsRef.current.find((t) => t.id === targetId)
 
       if (targetTab && targetTab.url) {
-        switchToTabRef.current(targetTab.id, targetTab.url)
+        switchToTabRef.current?.(targetTab.id, targetTab.url)
       }
     }
 
@@ -910,6 +1018,8 @@ Acknowledge these skills with a concise confirmation in this exact format:
       return changed ? next : prev
     })
 
+    if (!tabsHydrated) return
+
     const tab = tabs.find((t) => t.id === activeId)
     if (tab?.url) {
       const chat = isProviderHomeUrl(tab.url)
@@ -920,7 +1030,7 @@ Acknowledge these skills with a concise confirmation in this exact format:
       switchToTab(tab.id, chat?.url || tab.url)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [historyLoaded])
+  }, [historyLoaded, tabsHydrated])
 
   const handleUrlBarNavigate = useCallback(
     (newUrl: string, detectedModel?: string, inNewTab?: boolean) => {
@@ -1357,16 +1467,18 @@ Acknowledge these skills with a concise confirmation in this exact format:
     }
   }, [])
 
-  // Persist tabs whenever they change
+  // Persist tabs whenever they change, safely gated on successful hydration
   useEffect(() => {
-    if (tabs.length > 0) {
-      try {
-        localStorage.setItem(TABS_STORAGE_KEY, serializeState(tabs, activeId))
-      } catch (e) {
-        console.error('Failed to persist tabs:', e)
-      }
+    if (!tabsHydrated || tabs.length === 0) return
+    try {
+      localStorage.setItem(TABS_STORAGE_KEY, serializeState(tabs, activeId))
+    } catch (e) {
+      console.error('Failed to persist tabs:', e)
     }
-  }, [tabs, activeId])
+    window.nexusState?.save('tabs', { tabs, activeId }).catch((err: Error) => {
+      console.error('Failed to save tabs to disk:', err)
+    })
+  }, [tabs, activeId, tabsHydrated])
 
   useEffect(() => {
     const el = containerRef.current

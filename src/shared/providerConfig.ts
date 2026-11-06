@@ -107,10 +107,13 @@ export interface CustomProviderTheme {
 
 export type ProviderConfigMap = Record<string, ProviderOverrides>
 
+export { DEFAULT_BUILTIN_PROVIDER_CONFIG } from './defaultProviderConfig'
+
 const ZAI_FEATURES: ProviderFeatureConfig = {
   promptNavSelector:
-    '[data-message-author-role="user"], div[class*="user-message" i]:not([class*="assistant" i]), div[class*="user-query" i]:not([class*="assistant" i])',
-  chatTitleSelector: '[data-testid*="chat-title" i], header h1, nav a[aria-current="page"]',
+    'div.user-message, [data-message-author-role="user"], div[class*="user-message" i]:not([class*="assistant" i]), div[class*="user-query" i]:not([class*="assistant" i])',
+  chatTitleSelector:
+    'div.group > button[data-selected="true"] .truncate, [data-testid*="chat-title" i], nav a[aria-current="page"], header h1',
   chatTitlePollingIntervalMs: 1500,
   defaultChatTitles: ['Z.ai', 'Z Chat', 'GLM', '智谱清言', 'New chat', 'New Chat', 'Untitled'],
   composerSelector:
@@ -123,7 +126,7 @@ const ZAI_FEATURES: ProviderFeatureConfig = {
   stopGenerationSelector:
     'button[aria-label*="stop" i], button[aria-label*="停止" i], button[data-testid*="stop" i], button[class*="stop" i]',
   virtualizationSelector:
-    '[data-message-id], [data-message-author-role], div[class*="message-id" i], div[class*="conversation-turn" i], article[class*="message" i]',
+    '[id^="message-"], [data-message-id], [data-message-author-role], div[class*="message-id" i], div[class*="conversation-turn" i], article[class*="message" i]',
   enableSlashFocus: true,
   enableFocusRetention: true,
   attachmentSelector: 'input[type="file"]'
@@ -136,16 +139,18 @@ const ARENA_FEATURES: ProviderFeatureConfig = {
   chatTitlePollingIntervalMs: 1500,
   defaultChatTitles: ['Chatbot Arena', 'Arena', 'Direct Chat', 'Side-by-Side', 'New Chat', 'Untitled'],
   composerSelector:
-    '[data-perf-target="composer"], .tiptap.ProseMirror, textarea, [contenteditable="true"]:not(.cm-content)',
+    'textarea:not([disabled]):not([readonly]), [contenteditable="true"][role="textbox"], div[contenteditable="true"], #prompt-textarea, .ProseMirror, [data-testid*="prompt-input" i], [data-testid*="chat-input" i], [data-perf-target="composer"]',
   sendButtonSelector:
-    '[data-perf-target="composer"] button[aria-label*="send" i], [data-perf-target="composer"] button:last-of-type',
+    'button[data-testid*="send" i], button[aria-label*="send" i], button[type="submit"]:not([disabled]), button:has(svg.lucide-send), button:has(svg.lucide-arrow-up), [role="button"][aria-label*="send" i], .send-button, [data-perf-target="composer"] button[aria-label*="send" i]',
   autoSubmitSkillPrompt: true,
-  newChatSelector: 'button[aria-label*="New"], a[href*="arena"]',
-  stopGenerationSelector: 'button[aria-label*="Stop"]',
-  virtualizationSelector: '[data-agent-transcript-message="true"]',
+  newChatSelector: 'a[data-sidebar="menu-button"][href="/agent"], button[aria-label*="New"], a[href*="arena"]',
+  stopGenerationSelector:
+    'button[aria-label*="stop" i], button[data-testid*="stop" i], button[aria-label*="interrupt" i], button[data-testid*="interrupt" i], button:has(svg.lucide-square), button[class*="stop" i]',
+  virtualizationSelector: '[data-agent-transcript-message="true"][data-chat-message-id]',
   enableSlashFocus: true,
   enableFocusRetention: true,
-  attachmentSelector: 'input[type="file"]'
+  attachmentSelector:
+    'input[type="file"], button[data-testid*="attach" i], button[data-testid*="upload" i], button[aria-label*="attach" i], button[aria-label*="upload" i], button[aria-label*="file" i], button:has(svg.lucide-paperclip), [data-testid*="dropzone" i], [class*="dropzone" i]'
 }
 
 export const DEFAULT_PROVIDER_FEATURES: Record<string, ProviderFeatureConfig> = {
@@ -181,7 +186,7 @@ export const DEFAULT_PROVIDER_FEATURES: Record<string, ProviderFeatureConfig> = 
   },
   gemini: {
     promptNavSelector: 'user-query, [data-test-id="user-query"], .user-query-container, [class*="user-query"]',
-    chatTitleSelector: '.conversation-title, .chat-title-text, [data-test-id="conversation-title"]',
+    chatTitleSelector: '.conversation-title, .chat-title-text, [data-test-id="conversation-title"], div[class*="conversation-title"], header h1',
     chatTitlePollingIntervalMs: 1500,
     defaultChatTitles: ['Gemini', 'Google Gemini', 'New chat', 'Untitled conversation'],
     composerSelector: 'rich-textarea [contenteditable="true"], .ql-editor, div[contenteditable="true"]',
@@ -254,6 +259,8 @@ export const DEFAULT_PROVIDER_FEATURES: Record<string, ProviderFeatureConfig> = 
     enableFocusRetention: true,
     attachmentSelector: 'input[type="file"]'
   },
+  glm: ZAI_FEATURES,
+  'z-glm': ZAI_FEATURES,
   'z.ai': ZAI_FEATURES,
   zai: ZAI_FEATURES,
   'z-ai': ZAI_FEATURES,
@@ -279,8 +286,9 @@ export const DEFAULT_PROVIDER_FEATURES: Record<string, ProviderFeatureConfig> = 
 export function getProviderDefaultFeatures(providerKey?: string): ProviderFeatureConfig {
   if (!providerKey) return DEFAULT_PROVIDER_FEATURES.generic
   const key = providerKey.toLowerCase()
+  if (DEFAULT_PROVIDER_FEATURES[key]) return DEFAULT_PROVIDER_FEATURES[key]
   for (const [k, v] of Object.entries(DEFAULT_PROVIDER_FEATURES)) {
-    if (key.includes(k)) return v
+    if (key.includes(k) || k.includes(key)) return v
   }
   return DEFAULT_PROVIDER_FEATURES.generic
 }

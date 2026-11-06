@@ -1,3 +1,4 @@
+import './bootstrap'
 import { spawn } from 'child_process'
 import {
   app,
@@ -29,8 +30,11 @@ import { buildProviderMotionScript } from './providerMotion'
 import { ActiveTitleSync, buildActiveTitleReadScript } from './activeTitleSync'
 import { getCustomThemeEntry, saveCustomThemeEntry, removeCustomThemeEntry } from './customThemesStore'
 import { PROVIDER_THEMES, mergeOverrides, getStructuralVars } from './providerThemes'
-import { type ProviderOverrides, getMergedProviderFeatures } from '../shared/providerConfig'
+import { type ProviderOverrides, getMergedProviderFeatures, DEFAULT_BUILTIN_PROVIDER_CONFIG } from '../shared/providerConfig'
 import { splitSelectorList } from '../shared/selectorUtils'
+import { cleanConversationTitle, isDefaultConversationTitle } from '../shared/titleUtils'
+import { consolidateLegacyConfigDir } from './migrations/consolidateLegacyConfigDir'
+import { registerStateIpc, trustWindow } from './stateIpc'
 
 // Page-side helpers embedded into every injected script. Built from the tested
 // shared source via toString() — self-contained, no closures.
@@ -75,6 +79,7 @@ import icon from '../../resources/icon.png?asset'
 
 // Single-instance: a second launch toggles the existing window instead of
 // spawning a duplicate app with broken tab/sidebar state.
+// Note: userData and app.name are established synchronously by ./bootstrap above!
 const gotSingleInstanceLock = app.requestSingleInstanceLock()
 if (!gotSingleInstanceLock) {
   app.quit()
@@ -84,9 +89,19 @@ if (!gotSingleInstanceLock) {
   })
 }
 
-// userData pinned: renaming package.json must never orphan tabs/logins again.
-// Must be established BEFORE reading pins, thumbnails, sessions, or stores.
-app.setPath('userData', join(app.getPath('appData'), 'nexus'))
+// Consolidate legacy ~/.config/Nexus safely into ~/.config/nexus (archive-based, zero data loss)
+consolidateLegacyConfigDir()
+
+// Register universal file-backed State IPC with the Session Write Barrier
+registerStateIpc((key, payload) => {
+  if (key === 'pinned' && Array.isArray(payload)) {
+    pinnedTabIds.clear()
+    for (const id of payload) {
+      if (typeof id === 'string') pinnedTabIds.add(id)
+    }
+    isPinnedInitialized = true
+  }
+})
 
 let mainWindow: BrowserWindow | null = null
 
@@ -111,9 +126,8 @@ app.commandLine.appendSwitch('disable-site-isolation-trials')
 
 // Authoritative in-memory pinned tab cache. Eliminates synchronous per-candidate
 // disk reads during discard scans and ensures 100% synchronization with UI state.
-let isPinnedInitialized = false
+export let isPinnedInitialized = false
 export const pinnedTabIds = new Set<string>()
-let pinWriteChain = Promise.resolve()
 
 export function getFinalUserDataDir(): string {
   return join(app.getPath('appData'), 'nexus')
@@ -1521,6 +1535,8 @@ function createWindow() {
     }
   })
 
+  trustWindow(mainWindow)
+
   mainWindow.setMenu(null)
 
   mainWindow.on('ready-to-show', () => {
@@ -2157,21 +2173,24 @@ try {
 `
 }
 
-function shouldIgnoreProviderTitle(title: string, defaultTitles: string[]): boolean {
-  const isDefault = defaultTitles.some((t) => {
-      const defaultLower = t.toLowerCase().trim();
-      const titleLower = (title || '').toLowerCase().trim();
-      return titleLower === defaultLower ||
-             titleLower.startsWith(defaultLower + ' -') ||
-             titleLower.startsWith(defaultLower + ' |') ||
-             titleLower === 'chatgpt' ||
-             titleLower === 'qwen' ||
-             titleLower === 'claude' || titleLower === 'google gemini' || titleLower === 'kimi ai' || titleLower === 'qwen studio' || titleLower === 'z.ai' || titleLower === 'z chat';
-    });
-
-    // Also ignore empty titles or generic "new chat" variations
-    const genericNoise = !title || title.trim() === '' || /^new chat\b/i.test(title.trim()) || title.trim().startsWith('http://') || title.trim().startsWith('https://') || title.trim().toLowerCase() === 'loading' || title.trim().toLowerCase() === 'loading...';
-
+function shouldIgnoreProviderTitle(title: string, defaultTitles: string[] = [], modelKey?: string): boolean {
+  if (typeof isDefaultConversationTitle === 'function') {
+    return isDefaultConversationTitle(title, modelKey, defaultTitles)
+  }
+  if (!title || !title.trim() || title.trim().toLowerCase() === 'loading' || title.trim().toLowerCase() === 'loading...') return true
+  const rawLower = title.toLowerCase().trim()
+  if (rawLower.startsWith('http://') || rawLower.startsWith('https://')) return true
+  const cleaned = (typeof cleanConversationTitle === 'function'
+    ? cleanConversationTitle(title, modelKey)
+    : title.replace(/^(chatgpt|kimi\s*ai|kimi|claude|gemini|google\s*gemini|deepseek|perplexity|qwen\s*studio|qwen|arena\s*ai|arena|z\.ai|z\s*chat|glm)\s*[-|–—:•·]\s*/i, '')
+  ).trim()
+  if (!cleaned) return true
+  const lower = cleaned.toLowerCase()
+  const isDefault = (defaultTitles || []).some((t) => {
+    const dLower = (t || '').toLowerCase().trim()
+    return lower === dLower || rawLower === dLower
+  })
+  const genericNoise = /^new chat\b/i.test(lower) || lower === 'untitled' || lower === 'chat' || lower === 'chatgpt' || lower === 'qwen' || lower === 'claude' || lower === 'gemini' || lower === 'google gemini' || lower === 'kimi' || lower === 'kimi ai' || lower === 'deepseek' || lower === 'perplexity' || lower === 'arena' || lower === 'arena ai' || lower === 'z.ai' || lower === 'z chat'
   return isDefault || genericNoise
 }
 
@@ -2355,13 +2374,14 @@ function ensureAiView(tabId: string): Electron.WebContentsView {
   })
 
   view.webContents.on('page-title-updated', (_event, title) => {
-    viewTitles.set(tabId, title) // Fix #1: Track titles for proper idle eviction
     const modelKey = viewModelKeys.get(tabId) || ''
     const globalOv = providerConfig['ALL'] || providerConfig['global'] || {}
     const feats = getMergedProviderFeatures(modelKey, providerConfig[modelKey], globalOv)
-    if (shouldIgnoreProviderTitle(title, feats.defaultChatTitles || [])) return
+    if (shouldIgnoreProviderTitle(title, feats.defaultChatTitles || [], modelKey)) return
+    const cleanTitle = (typeof cleanConversationTitle === 'function' ? cleanConversationTitle(title, modelKey) : title.trim()) || title.trim()
+    viewTitles.set(tabId, cleanTitle) // Fix #1: Track titles for proper idle eviction
     if (activeViewId === tabId) arenaTitleSync.invalidate()
-    sendToMainWindow('ai-title-updated', tabId, title)
+    sendToMainWindow('ai-title-updated', tabId, cleanTitle)
   })
 
   view.webContents.on('dom-ready', () => {
@@ -2542,16 +2562,45 @@ function providerConfigFile() {
 
 function loadProviderConfigFromDisk() {
   const filePath = providerConfigFile()
-  if (!existsSync(filePath)) return
+  if (!existsSync(filePath)) {
+    // Fresh install or missing file: initialize with user's exact default configurations
+    providerConfig = JSON.parse(JSON.stringify(DEFAULT_BUILTIN_PROVIDER_CONFIG))
+    persistProviderConfig()
+    return
+  }
   try {
     const raw = readFileSync(filePath, 'utf-8')
     const parsed = JSON.parse(raw)
-    if (parsed && typeof parsed === 'object') providerConfig = parsed
+    if (parsed && typeof parsed === 'object') {
+      const merged: import('../shared/providerConfig').ProviderConfigMap = {}
+      for (const [k, v] of Object.entries(DEFAULT_BUILTIN_PROVIDER_CONFIG)) {
+        merged[k] = JSON.parse(JSON.stringify(v))
+      }
+      for (const [k, v] of Object.entries(parsed)) {
+        if (merged[k] && typeof merged[k] === 'object' && typeof v === 'object' && v !== null) {
+          merged[k] = {
+            ...merged[k],
+            ...(v as any),
+            cssFeatures: { ...merged[k].cssFeatures, ...(v as any).cssFeatures },
+            themeSelectors: { ...merged[k].themeSelectors, ...(v as any).themeSelectors },
+            features: { ...merged[k].features, ...(v as any).features },
+            geometry: { ...merged[k].geometry, ...(v as any).geometry }
+          }
+        } else {
+          merged[k] = v as any
+        }
+      }
+      providerConfig = merged
+    } else {
+      providerConfig = JSON.parse(JSON.stringify(DEFAULT_BUILTIN_PROVIDER_CONFIG))
+      persistProviderConfig()
+    }
   } catch (e) {
     console.error('[ProviderConfig] Corrupted providers.json, creating backup:', e)
     try {
       copyFileSync(filePath, `${filePath}.corrupt.${Date.now()}`)
     } catch {}
+    providerConfig = JSON.parse(JSON.stringify(DEFAULT_BUILTIN_PROVIDER_CONFIG))
   }
 }
 
@@ -2560,6 +2609,27 @@ function persistProviderConfig() {
     const filePath = providerConfigFile()
     const dir = app.getPath('userData')
     mkdirSync(dir, { recursive: true })
+
+    // SAFETY GUARD: Refuse to overwrite non-empty providers.json with an empty object!
+    if (!providerConfig || typeof providerConfig !== 'object' || Object.keys(providerConfig).length === 0) {
+      if (existsSync(filePath)) {
+        try {
+          const existing = readFileSync(filePath, 'utf-8').trim()
+          if (existing && existing !== '{}') {
+            console.warn('[ProviderConfig] Refusing to overwrite non-empty providers.json with empty config.')
+            return
+          }
+        } catch {}
+      }
+    }
+
+    // Safety backup of existing configuration before overwriting
+    if (existsSync(filePath)) {
+      try {
+        copyFileSync(filePath, `${filePath}.bak`)
+      } catch {}
+    }
+
     const tmpPath = `${filePath}.tmp`
     writeFileSync(tmpPath, JSON.stringify(providerConfig, null, 2), 'utf-8')
     renameSync(tmpPath, filePath)
@@ -3512,6 +3582,12 @@ ipcMain.handle('extract_provider_live_dom', async (_event, modelKey: string, pro
 })
 
 ipcMain.on('set_provider_config', (_event, map) => {
+  if (!map || typeof map !== 'object' || Object.keys(map).length === 0) {
+    if (Object.keys(providerConfig).length > 0) {
+      console.warn('[ProviderConfig] Rejected empty set_provider_config payload.')
+      return
+    }
+  }
   providerConfig = map && typeof map === 'object' ? map : {}
   persistProviderConfig()
   for (const [tabId, view] of aiViews) {
@@ -3557,8 +3633,9 @@ function restartActiveArenaTitleSync(): void {
       if (!beforeUrl) return null
       const title = await wc.executeJavaScript(script)
       if (wc.isDestroyed() || wc.getURL() !== beforeUrl || typeof title !== 'string') return null
-      const clean = title.trim()
-      return clean && !shouldIgnoreProviderTitle(clean, feats.defaultChatTitles || []) ? clean : null
+      const rawClean = title.trim()
+      const clean = (typeof cleanConversationTitle === 'function' ? cleanConversationTitle(rawClean, modelKey) : rawClean) || rawClean
+      return clean && !shouldIgnoreProviderTitle(rawClean, feats.defaultChatTitles || [], modelKey) ? clean : null
     },
     publish: (title) => {
       viewTitles.set(tabId, title)
@@ -4273,16 +4350,23 @@ if (fs.existsSync(legacyDataDir)) {
     if (fs.existsSync(legacyModels) && !fs.existsSync(newModels)) {
       fs.copyFileSync(legacyModels, newModels)
     }
+    const legacyProviders = path.join(legacyDataDir, 'providers.json')
+    const newProviders = path.join(dataDir, 'providers.json')
+    if (fs.existsSync(legacyProviders)) {
+      const legacySize = fs.statSync(legacyProviders).size
+      const newSize = fs.existsSync(newProviders) ? fs.statSync(newProviders).size : 0
+      if (legacySize > newSize && newSize <= 5) {
+        fs.copyFileSync(legacyProviders, newProviders)
+      } else if (!fs.existsSync(newProviders)) {
+        fs.copyFileSync(legacyProviders, newProviders)
+      }
+    }
   } catch (e: any) {
     console.error('Migration error from legacy vicinae directory:', e)
   }
 }
 
 const historyFile = path.join(dataDir, 'history.json')
-const tabsFile = path.join(dataDir, 'tabs.json')
-const pinnedFile = getPinnedFilePath()
-const modelsFile = path.join(dataDir, 'models.json')
-const settingsFile = path.join(dataDir, 'settings.json')
 
 ipcMain.handle('read_history', () => {
   try {
@@ -4319,126 +4403,6 @@ ipcMain.handle('list_history', () => {
   }
 })
 
-// Universal File-Backed App State IPC (guarantees dev and prod always share exact tabs, pinned, models)
-ipcMain.handle('get_tabs', () => {
-  try {
-    if (fs.existsSync(tabsFile)) return fs.readFileSync(tabsFile, 'utf-8')
-    return null
-  } catch {
-    return null
-  }
-})
+// Universal file-backed app state (tabs, pinned, models, providers, interface-settings, theme)
+// is registered with the Session Write Barrier and Atomic Write Engine in registerStateIpc().
 
-ipcMain.handle('save_tabs', (_event, dataStr: string) => {
-  try {
-    fs.writeFileSync(tabsFile, dataStr, 'utf-8')
-    return true
-  } catch (err) {
-    console.error('Tabs save error:', err)
-    return false
-  }
-})
-
-ipcMain.handle('get_pinned', (event) => {
-  if (mainWindow && event?.sender && event.sender !== mainWindow.webContents) {
-    return null
-  }
-  try {
-    // If pinnedTabIds is initialized, return its serialized contents directly!
-    // Never fall back to rereading disk just because pinnedTabIds is empty (size === 0).
-    // An empty set represents valid user intent (e.g. unpinned all tabs).
-    if (isPinnedInitialized) {
-      return JSON.stringify(Array.from(pinnedTabIds))
-    }
-    loadInitialPinnedState()
-    return JSON.stringify(Array.from(pinnedTabIds))
-  } catch {
-    return '[]'
-  }
-})
-
-ipcMain.handle('save_pinned', (_event, dataStr: string) => {
-  if (mainWindow && _event?.sender && _event.sender !== mainWindow.webContents) {
-    return false
-  }
-  if (typeof dataStr !== 'string') {
-    return false
-  }
-
-  // 1. Strict validation: MUST parse as a JSON array of string IDs
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(dataStr)
-  } catch {
-    console.warn('[save_pinned] Rejected malformed JSON payload')
-    return false
-  }
-
-  if (!Array.isArray(parsed) || !parsed.every((item) => typeof item === 'string')) {
-    console.warn('[save_pinned] Rejected non-array or non-string pinned payload')
-    return false
-  }
-
-  // 2. Immediately update in-memory authoritative set
-  pinnedTabIds.clear()
-  for (const id of parsed) {
-    pinnedTabIds.add(id)
-  }
-  isPinnedInitialized = true
-
-  // 3. Serialized atomic persistence to disk
-  const targetFile = pinnedFile
-  const payloadToPersist = JSON.stringify(parsed)
-
-  pinWriteChain = pinWriteChain.then(async () => {
-    try {
-      const dir = getFinalUserDataDir()
-      if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-      const tmpPath = `${targetFile}.tmp.${Date.now()}`
-      await fs.promises.writeFile(tmpPath, payloadToPersist, 'utf-8')
-      await fs.promises.rename(tmpPath, targetFile)
-    } catch (err) {
-      console.error('[save_pinned] Asynchronous atomic write error:', err)
-    }
-  })
-
-  return true
-})
-
-ipcMain.handle('get_models', () => {
-  try {
-    if (fs.existsSync(modelsFile)) return fs.readFileSync(modelsFile, 'utf-8')
-    return null
-  } catch {
-    return null
-  }
-})
-
-ipcMain.handle('save_models', (_event, dataStr: string) => {
-  try {
-    fs.writeFileSync(modelsFile, dataStr, 'utf-8')
-    return true
-  } catch (err) {
-    console.error('Models save error:', err)
-    return false
-  }
-})
-
-ipcMain.handle('get_interface_settings', () => {
-  try {
-    if (fs.existsSync(settingsFile)) return fs.readFileSync(settingsFile, 'utf-8')
-    return null
-  } catch {
-    return null
-  }
-})
-
-ipcMain.handle('save_interface_settings', (_event, dataStr: string) => {
-  try {
-    fs.writeFileSync(settingsFile, dataStr, 'utf-8')
-    return true
-  } catch (err) {
-    console.error('Interface settings save error:', err)
-    return false
-  }
-})
