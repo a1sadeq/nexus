@@ -35,7 +35,7 @@ describe('Models LocalStorage Migration Matrix (Finding H6)', () => {
     expect(mockLocalStorage.getItem(STORAGE_KEY)).not.toBeNull()
   })
 
-  it('Case 2: Legacy v1 upgrade appends missing ChatGPT and Claude while preserving order', () => {
+  it('Case 2: Preserves user configured models on app upgrade without force-appending unrequested models', () => {
     const legacyData = [
       { key: 'gemini', label: 'Gemini', url: 'https://gemini.google.com', color: '#22d3ee' },
       { key: 'deepseek', label: 'DeepSeek', url: 'https://chat.deepseek.com', color: '#4d6bfe' }
@@ -43,10 +43,10 @@ describe('Models LocalStorage Migration Matrix (Finding H6)', () => {
     mockLocalStorage.setItem(LEGACY_STORAGE_KEY, JSON.stringify(legacyData))
 
     const result = loadAndMigrateModels(DEFAULT_MODELS)
+    expect(result.length).toBe(2)
     expect(result[0].key).toBe('gemini')
     expect(result[1].key).toBe('deepseek')
-    expect(result.some((m) => m.key === 'chatgpt')).toBe(true)
-    expect(result.some((m) => m.key === 'claude')).toBe(true)
+    expect(result.some((m) => m.key === 'claude')).toBe(false)
     expect(mockLocalStorage.getItem(SCHEMA_KEY)).toBe('2')
   })
 

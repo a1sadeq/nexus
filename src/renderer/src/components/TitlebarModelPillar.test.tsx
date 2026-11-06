@@ -25,16 +25,16 @@ describe('TitlebarModelPillar Component', () => {
       root.render(
         <TitlebarModelPillar
           models={DEFAULT_MODELS}
-          activeModelKey="claude"
+          activeModelKey="gemini"
           onSelectModel={onSelect}
         />
       )
     })
 
-    const claudeBtn = container.querySelector('button[title*="Claude"]') as HTMLButtonElement
-    expect(claudeBtn).toBeTruthy()
-    expect(claudeBtn.getAttribute('aria-checked')).toBe('true')
-    expect(claudeBtn.tabIndex).toBe(0)
+    const geminiBtn = container.querySelector('button[title*="Gemini"]') as HTMLButtonElement
+    expect(geminiBtn).toBeTruthy()
+    expect(geminiBtn.getAttribute('aria-checked')).toBe('true')
+    expect(geminiBtn.tabIndex).toBe(0)
 
     const chatgptBtn = container.querySelector('button[title*="ChatGPT"]') as HTMLButtonElement
     expect(chatgptBtn).toBeTruthy()
@@ -48,7 +48,7 @@ describe('TitlebarModelPillar Component', () => {
       root.render(
         <TitlebarModelPillar
           models={DEFAULT_MODELS}
-          activeModelKey="chatgpt"
+          activeModelKey="gemini"
           onSelectModel={onSelect}
         />
       )
@@ -61,7 +61,7 @@ describe('TitlebarModelPillar Component', () => {
       radiogroup.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))
     })
 
-    expect(onSelect).toHaveBeenCalledWith('claude')
+    expect(onSelect).toHaveBeenCalledWith('qwen')
   })
 
   it('triggers onSelectModel when a model button is clicked', async () => {
@@ -112,7 +112,7 @@ describe('TitlebarModelPillar Component', () => {
     const coreDot = geminiBtn.querySelector('.active-core-dot')
     expect(coreDot).toBeTruthy()
 
-    const claudeBtn = container.querySelector('button[title*="Claude"]') as HTMLButtonElement
-    expect(claudeBtn.querySelector('.active-core-dot')).toBeNull()
+    const qwenBtn = container.querySelector('button[title*="Qwen"]') as HTMLButtonElement
+    expect(qwenBtn.querySelector('.active-core-dot')).toBeNull()
   })
 })

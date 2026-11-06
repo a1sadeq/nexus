@@ -4268,6 +4268,11 @@ if (fs.existsSync(legacyDataDir)) {
     if (fs.existsSync(legacySkills) && !fs.existsSync(newSkills)) {
       fs.cpSync(legacySkills, newSkills, { recursive: true })
     }
+    const legacyModels = path.join(legacyDataDir, 'models.json')
+    const newModels = path.join(dataDir, 'models.json')
+    if (fs.existsSync(legacyModels) && !fs.existsSync(newModels)) {
+      fs.copyFileSync(legacyModels, newModels)
+    }
   } catch (e: any) {
     console.error('Migration error from legacy vicinae directory:', e)
   }

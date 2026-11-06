@@ -7,7 +7,7 @@ export const DOT_COLOR: Record<string, string> = {
   gemini: '#22d3ee',
   perplexity: '#22b8cd',
   deepseek: '#4d6bfe',
-  kimi: '#00d1b2',
+  kimi: '#8b5cf6',
   qwen: '#615ced',
   'arena-ai': '#f59e0b',
   arena: '#f59e0b',

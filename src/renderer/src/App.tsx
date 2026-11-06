@@ -50,6 +50,7 @@ import './App.css'
 import {
   DEFAULT_MODELS,
   loadAndMigrateModels,
+  sanitizeModelDef,
   STORAGE_KEY,
   type ModelDef
 } from './lib/models'
@@ -61,9 +62,39 @@ const TABS_STORAGE_KEY = 'vicinae.tabs'
 
 function App() {
   const [models, setModels] = useState<ModelDef[]>(() => loadAndMigrateModels(DEFAULT_MODELS))
+
+  // Dual persistence: save to localStorage and to disk models.json
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(models))
+    window.electron?.ipcRenderer?.invoke?.('save_models', JSON.stringify(models)).catch(() => {})
   }, [models])
+
+  // Hydrate configured models from disk models.json on mount
+  useEffect(() => {
+    let active = true
+    const hydrateModelsFromDisk = async () => {
+      try {
+        const raw = await window.electron?.ipcRenderer?.invoke?.('get_models')
+        if (typeof raw === 'string' && raw.trim().length > 0) {
+          const parsed = JSON.parse(raw)
+          if (Array.isArray(parsed) && parsed.length > 0 && active) {
+            const sanitized = parsed.map(sanitizeModelDef)
+            setModels(sanitized)
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(sanitized))
+            return
+          }
+        }
+        // If disk models.json is not yet created, persist current default models to disk
+        window.electron?.ipcRenderer?.invoke?.('save_models', JSON.stringify(models)).catch(() => {})
+      } catch (err) {
+        console.warn('[models] Failed to hydrate models from disk:', err)
+      }
+    }
+    hydrateModelsFromDisk()
+    return () => {
+      active = false
+    }
+  }, [])
 
   const [initialTabs] = useState(() => {
     const restored = deserializeState(localStorage.getItem(TABS_STORAGE_KEY))
