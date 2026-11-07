@@ -26,7 +26,7 @@ export interface TabDiscardStatus {
 export const DEFAULT_TAB_DISCARD_POLICY: TabDiscardPolicy = {
   version: 1,
   tabDiscardMinutes: 10,
-  maxActiveTabs: 0
+  maxActiveTabs: 3
 }
 
 export const VALID_DISCARD_MINUTES = [0, 5, 10, 30, 60] as const

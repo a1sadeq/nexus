@@ -19,4 +19,16 @@ try {
   // Graceful fallback for older Electron versions where sessionData is derived lazily
 }
 
+// 4. Bound Chromium cache and V8 heap early to prevent memory-mapped disk bloat
+if (app.commandLine?.appendSwitch) {
+  // Limit HTTP disk cache to 100MB (104857600 bytes)
+  app.commandLine.appendSwitch('disk-cache-size', '104857600')
+  // Limit media cache to 50MB (52428800 bytes)
+  app.commandLine.appendSwitch('media-cache-size', '52428800')
+  // Cap renderer V8 heap to 512MB to trigger timely GC
+  app.commandLine.appendSwitch('js-flags', '--max-old-space-size=512')
+  // Consolidate duplicate renderer processes
+  app.commandLine.appendSwitch('process-per-site')
+}
+
 export {}

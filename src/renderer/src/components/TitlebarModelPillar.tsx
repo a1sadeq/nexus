@@ -1,6 +1,9 @@
 import { type FC, type KeyboardEvent, useRef } from 'react'
 import type { ModelDef } from '../lib/models'
-import { modelColor } from '../lib/modelVisuals'
+import {
+  getEffectiveProviderColor,
+  getProviderGradient
+} from '../lib/modelVisuals'
 import { BrandIcon } from './BrandIcons'
 import './TitlebarModelPillar.css'
 
@@ -16,6 +19,12 @@ export const TitlebarModelPillar: FC<TitlebarModelPillarProps> = ({
   onSelectModel
 }) => {
   const buttonRefs = useRef<Map<string, HTMLButtonElement>>(new Map())
+
+  // Resolve active provider to dynamically tint the surrounding dock's ambient aura
+  const activeModel = models.find((m) => m.key === activeModelKey) || models[0]
+  const activeColor = activeModel
+    ? getEffectiveProviderColor(activeModel.key, activeModel.color)
+    : '#00e5ff'
 
   // WAI-ARIA Roving Tabindex & Arrow Key Handler
   const handleKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
@@ -51,11 +60,13 @@ export const TitlebarModelPillar: FC<TitlebarModelPillarProps> = ({
       className="titlebar-model-pillar no-drag"
       role="radiogroup"
       aria-label="Active AI Provider Selector"
+      style={{ '--active-provider-color': activeColor } as React.CSSProperties}
       onKeyDown={handleKeyDown}
     >
       {models.map((m) => {
         const isActive = m.key === activeModelKey
-        const color = m.color || modelColor(m.key)
+        const color = getEffectiveProviderColor(m.key, m.color)
+        const gradient = getProviderGradient(m.key, m.color)
         return (
           <button
             key={m.key}
@@ -69,7 +80,13 @@ export const TitlebarModelPillar: FC<TitlebarModelPillarProps> = ({
             tabIndex={isActive ? 0 : -1}
             title={`${m.label} — Switch to provider`}
             className={`titlebar-model-pill no-drag ${isActive ? 'active' : ''}`}
-            style={{ '--provider-color': color } as React.CSSProperties}
+            style={
+              {
+                '--provider-color': color,
+                '--provider-gradient-start': gradient.start,
+                '--provider-gradient-end': gradient.end
+              } as React.CSSProperties
+            }
             onClick={() => onSelectModel(m.key)}
           >
             {m.icon ? (

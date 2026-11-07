@@ -35,6 +35,7 @@ import { splitSelectorList } from '../shared/selectorUtils'
 import { cleanConversationTitle, isDefaultConversationTitle } from '../shared/titleUtils'
 import { consolidateLegacyConfigDir } from './migrations/consolidateLegacyConfigDir'
 import { registerStateIpc, trustWindow } from './stateIpc'
+import { scheduleStartupAndExitPruning, getCacheStats, pruneAppCaches } from './cachePruningManager'
 
 // Page-side helpers embedded into every injected script. Built from the tested
 // shared source via toString() — self-contained, no closures.
@@ -123,6 +124,11 @@ app.userAgentFallback = AI_UA
 
 // Preserve the existing site-isolation policy; let V8 select its normal heap limit.
 app.commandLine.appendSwitch('disable-site-isolation-trials')
+// Strictly bound Chromium disk cache & media cache to prevent memory-mapped RSS bloat
+app.commandLine.appendSwitch('disk-cache-size', '104857600')
+app.commandLine.appendSwitch('media-cache-size', '52428800')
+app.commandLine.appendSwitch('js-flags', '--max-old-space-size=512')
+app.commandLine.appendSwitch('process-per-site')
 
 // Authoritative in-memory pinned tab cache. Eliminates synchronous per-candidate
 // disk reads during discard scans and ensures 100% synchronization with UI state.
@@ -209,6 +215,20 @@ ipcMain.handle('get_tab_discard_status', (event) => {
     return { success: false, reason: 'untrusted_sender' }
   }
   return { success: true, status: tabDiscardManager.getStatus() }
+})
+
+ipcMain.handle('get_cache_stats', (event) => {
+  if (!mainWindow || event.sender !== mainWindow.webContents) {
+    return { success: false, reason: 'untrusted_sender' }
+  }
+  return { success: true, stats: getCacheStats(getFinalUserDataDir()) }
+})
+
+ipcMain.handle('purge_cache', async (event) => {
+  if (!mainWindow || event.sender !== mainWindow.webContents) {
+    return { success: false, reason: 'untrusted_sender' }
+  }
+  return pruneAppCaches(getFinalUserDataDir())
 })
 
 // Explicit, trusted-shell-only video diagnostics. No URLs, media data or tokens.
@@ -1576,21 +1596,38 @@ function createWindow() {
     routeGlobalShortcut(event, input, 'window')
   })
 
-  // Stop screenshot capture when hidden to tray; resume the requested preview on show.
-  mainWindow.on('hide', () => {
+  const suspendAllViews = () => {
     previewLoop.stop()
     arenaTitleSync.stop()
-  })
+    for (const view of aiViews.values()) {
+      if (!view.webContents.isDestroyed()) {
+        view.webContents.setBackgroundThrottling(true)
+        view.webContents.setAudioMuted(true)
+      }
+    }
+  }
 
-  mainWindow.on('minimize', () => { previewLoop.stop(); arenaTitleSync.stop() })
+  // Stop screenshot capture and throttle background webviews when hidden/minimized
+  mainWindow.on('hide', suspendAllViews)
+  mainWindow.on('minimize', suspendAllViews)
   mainWindow.on('maximize', () => {
     sendToMainWindow('window_maximized_changed', true)
   })
   mainWindow.on('unmaximize', () => {
     sendToMainWindow('window_maximized_changed', false)
   })
-  mainWindow.on('show', restartActiveArenaTitleSync)
-  mainWindow.on('restore', restartActiveArenaTitleSync)
+  const resumeActiveView = () => {
+    restartActiveArenaTitleSync()
+    if (activeViewId && activeViewVisible) {
+      const active = aiViews.get(activeViewId)
+      if (active && !active.webContents.isDestroyed()) {
+        active.webContents.setBackgroundThrottling(false)
+        active.webContents.setAudioMuted(false)
+      }
+    }
+  }
+  mainWindow.on('show', resumeActiveView)
+  mainWindow.on('restore', resumeActiveView)
   mainWindow.on('blur', () => previewLoop.stop())
   const resumePreview = () => {
     if (previewViewId && mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() && !mainWindow.isMinimized()) {
@@ -1681,6 +1718,7 @@ app.whenReady().then(() => {
   loadThemeFromDisk()
   loadProviderConfigFromDisk()
   tabDiscardManager.init()
+  scheduleStartupAndExitPruning(getFinalUserDataDir())
   // Retain persistent partition cache across launches to avoid cold-load network re-download penalties.
 
   // One-time migration: the old OAuth cookie bridge left empty/corrupted
@@ -2236,6 +2274,8 @@ function ensureAiView(tabId: string): Electron.WebContentsView {
   view.webContents.setZoomFactor(currentWebviewZoom);
   setViewBackground(view)
   view.setVisible(false)
+  view.webContents.setBackgroundThrottling(true)
+  view.webContents.setAudioMuted(true)
 
   view.webContents.on('context-menu', (_event, params) => {
     const template: Electron.MenuItemConstructorOptions[] = [
@@ -3704,6 +3744,8 @@ ipcMain.on('activate_tab', async (_event, tabId, url, bounds, modelKey) => {
       try {
         if (!v.webContents?.isDestroyed?.()) {
           v.setVisible(false)
+          v.webContents.setBackgroundThrottling(true)
+          v.webContents.setAudioMuted(true)
         }
       } catch (err) {
         console.warn(`[activate_tab] Failed to set background view visibility for ${id}:`, err)
@@ -3719,6 +3761,10 @@ ipcMain.on('activate_tab', async (_event, tabId, url, bounds, modelKey) => {
       if (!isHidden) lastRealBounds.set(tabId, bounds)
     }
     view.setVisible(!isHidden)
+    if (!view.webContents?.isDestroyed?.()) {
+      view.webContents.setBackgroundThrottling(isHidden)
+      view.webContents.setAudioMuted(isHidden)
+    }
   } catch (err) {
     console.error(`[activate_tab] Failed to set active view bounds/visibility for ${tabId}:`, err)
   }
@@ -4040,6 +4086,8 @@ ipcMain.on('resize_view', (_event, bounds) => {
     for (const [, view] of aiViews) {
       if (!view.webContents.isDestroyed()) {
         view.setVisible(false)
+        view.webContents.setBackgroundThrottling(true)
+        view.webContents.setAudioMuted(true)
       }
     }
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -4064,6 +4112,8 @@ ipcMain.on('resize_view', (_event, bounds) => {
       activeView.setBounds(bounds)
     }
     activeView.setVisible(true)
+    activeView.webContents.setBackgroundThrottling(false)
+    activeView.webContents.setAudioMuted(false)
 
     // Re-theme only when active view width or height actually changed.
     // Debounced: window resize fires ~60 events/sec; settle once at the end.
@@ -4084,6 +4134,8 @@ ipcMain.on('resize_view', (_event, bounds) => {
   for (const [tabId, view] of aiViews) {
     if (tabId !== activeViewId && !view.webContents.isDestroyed()) {
       view.setVisible(false)
+      view.webContents.setBackgroundThrottling(true)
+      view.webContents.setAudioMuted(true)
     }
   }
   if (hidden) {

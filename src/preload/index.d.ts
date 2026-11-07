@@ -172,6 +172,25 @@ export interface NexusStateBridge {
   getTabsSync?: () => any
 }
 
+export interface NexusCacheBridge {
+  getStats: () => Promise<{
+    rootCacheBytes: number
+    partitionCacheBytes: number
+    totalCacheBytes: number
+    totalCacheMB: number
+    processMemoryMB: number
+    heapUsedMB: number
+  }>
+  purge: () => Promise<{
+    success: boolean
+    freedBytes: number
+    freedMB: number
+    currentCacheBytes: number
+    currentCacheMB: number
+    error?: string
+  }>
+}
+
 declare global {
   interface Window {
     nexusState?: NexusStateBridge
@@ -185,6 +204,7 @@ declare global {
       downloads?: NexusDownloads
       aiFeatures?: NexusAiFeatures
       nexusState?: NexusStateBridge
+      cache?: NexusCacheBridge
     }
   }
 }

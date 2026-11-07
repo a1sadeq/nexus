@@ -4,6 +4,9 @@ import {
   deduplicateModels,
   modelLabel,
   modelColor,
+  getProviderGradient,
+  getEffectiveProviderColor,
+  deriveSecondaryGradientColor,
   type ModelDef
 } from './modelVisuals'
 
@@ -47,5 +50,22 @@ describe('modelVisuals', () => {
     expect(modelLabel('chatgpt')).toBe('ChatGPT')
     expect(modelColor('gemini')).toBe('#22d3ee')
     expect(modelColor('unknown-custom')).toBe('#818cf8')
+  })
+
+  it('provides signature dual-tone gradients and respects custom user colors', () => {
+    const geminiGrad = getProviderGradient('gemini')
+    expect(geminiGrad).toEqual({ start: '#22d3ee', end: '#4f46e5' })
+
+    const claudeGrad = getProviderGradient('claude')
+    expect(claudeGrad).toEqual({ start: '#d97757', end: '#ea580c' })
+
+    // Custom user color override
+    const customGrad = getProviderGradient('gemini', '#ff0055')
+    expect(customGrad.start).toBe('#ff0055')
+    expect(customGrad.end).toBe(deriveSecondaryGradientColor('#ff0055'))
+
+    // Effective provider color
+    expect(getEffectiveProviderColor('gemini')).toBe('#22d3ee')
+    expect(getEffectiveProviderColor('gemini', '#123456')).toBe('#123456')
   })
 })

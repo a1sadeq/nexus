@@ -156,6 +156,10 @@ const electronAPI = {
     siteNewChat: (): Promise<unknown> => ipcRenderer.invoke('ai_site_new_chat'),
     testLiveHooks: (modelKey: string): Promise<unknown> => ipcRenderer.invoke('test_provider_live_hooks', modelKey)
   },
+  cache: {
+    getStats: (): Promise<unknown> => ipcRenderer.invoke('get_cache_stats'),
+    purge: (): Promise<unknown> => ipcRenderer.invoke('purge_cache')
+  },
   nexusState: {
     get: (key: string): Promise<unknown> => ipcRenderer.invoke(`get_${key}`),
     save: (key: string, data: unknown): Promise<unknown> => ipcRenderer.invoke(`save_${key}`, data),

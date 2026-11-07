@@ -115,4 +115,27 @@ describe('TitlebarModelPillar Component', () => {
     const qwenBtn = container.querySelector('button[title*="Qwen"]') as HTMLButtonElement
     expect(qwenBtn.querySelector('.active-core-dot')).toBeNull()
   })
+
+  it('sets dynamic provider gradient and adaptive dock aura variables', async () => {
+    const onSelect = vi.fn()
+    await act(async () => {
+      root.render(
+        <TitlebarModelPillar
+          models={DEFAULT_MODELS}
+          activeModelKey="gemini"
+          onSelectModel={onSelect}
+        />
+      )
+    })
+
+    const dock = container.querySelector('.titlebar-model-pillar') as HTMLDivElement
+    expect(dock).toBeTruthy()
+    // Container inherits active provider color
+    expect(dock.style.getPropertyValue('--active-provider-color')).toBe('#22d3ee')
+
+    const geminiBtn = container.querySelector('button[title*="Gemini"]') as HTMLButtonElement
+    expect(geminiBtn.style.getPropertyValue('--provider-color')).toBe('#22d3ee')
+    expect(geminiBtn.style.getPropertyValue('--provider-gradient-start')).toBe('#22d3ee')
+    expect(geminiBtn.style.getPropertyValue('--provider-gradient-end')).toBe('#4f46e5')
+  })
 })

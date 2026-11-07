@@ -704,6 +704,55 @@ export default function SettingsOverlay({
     }
   }, [tabDiscardMinutes, maxActiveTabs])
 
+  const [cacheStats, setCacheStats] = useState<{
+    totalCacheMB: number
+    processMemoryMB: number
+    heapUsedMB: number
+  } | null>(null)
+  const [isPurgingCache, setIsPurgingCache] = useState(false)
+  const [purgeFeedback, setPurgeFeedback] = useState<string | null>(null)
+
+  const refreshCacheStats = useCallback(async () => {
+    try {
+      const res = await (window.electron?.cache?.getStats
+        ? window.electron.cache.getStats()
+        : window.electron?.ipcRenderer?.invoke?.('get_cache_stats'))
+      if (res && typeof res === 'object') {
+        const stats = 'stats' in res && res.stats ? (res.stats as any) : res
+        if (typeof stats.totalCacheMB === 'number') {
+          setCacheStats(stats)
+        }
+      }
+    } catch {}
+  }, [])
+
+  useEffect(() => {
+    refreshCacheStats()
+  }, [refreshCacheStats])
+
+  const handlePurgeCache = async () => {
+    if (isPurgingCache) return
+    setIsPurgingCache(true)
+    setPurgeFeedback(null)
+    sfx.pop()
+    try {
+      const res = await (window.electron?.cache?.purge
+        ? window.electron.cache.purge()
+        : window.electron?.ipcRenderer?.invoke?.('purge_cache'))
+      if (res?.success) {
+        setPurgeFeedback(`Freed ${res.freedMB ?? 0} MB! Logins & cookies preserved.`)
+        sfx.chime()
+        await refreshCacheStats()
+      } else {
+        setPurgeFeedback(`Failed to purge cache: ${res?.error || 'Unknown error'}`)
+      }
+    } catch (err) {
+      setPurgeFeedback(`Purge error: ${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+      setIsPurgingCache(false)
+    }
+  }
+
   useEffect(() => {
     if (initialSection) {
       setTab(initialSection)
@@ -1862,6 +1911,59 @@ export default function SettingsOverlay({
                         <option value="5">5 tabs</option>
                         <option value="10">10 tabs</option>
                       </select>
+                    </div>
+                  </div>
+                </Card>
+
+                <Card>
+                  <div className="flex flex-col gap-2">
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-xs text-white">Temporary Files & Web Cache</span>
+                      {cacheStats && (
+                        <span className="text-[11px] font-mono px-2 py-0.5 rounded-full border border-white/10 bg-white/5" style={{ color: 'var(--text2)' }}>
+                          Cache: {cacheStats.totalCacheMB} MB | RAM: {cacheStats.processMemoryMB} MB
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-[11px] opacity-75 leading-relaxed" style={{ color: 'var(--text2)' }}>
+                      Chromium memory-maps disk caches into RAM. Purging transient network and shader caches reclaims memory immediately without logging you out of your AI sessions.
+                    </p>
+                    <div className="flex items-center gap-3 pt-2">
+                      <button
+                        type="button"
+                        onClick={handlePurgeCache}
+                        disabled={isPurgingCache}
+                        className="px-4 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 border transition-all active:scale-95 disabled:opacity-50"
+                        style={{
+                          background: 'linear-gradient(135deg, rgba(59, 130, 246, 0.15), rgba(147, 51, 234, 0.15))',
+                          borderColor: 'rgba(59, 130, 246, 0.4)',
+                          color: '#fff'
+                        }}
+                      >
+                        {isPurgingCache ? (
+                          <>
+                            <span className="w-3.5 h-3.5 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+                            Purging Cache...
+                          </>
+                        ) : (
+                          <>
+                            <span>Purge Temp & Web Cache</span>
+                          </>
+                        )}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={refreshCacheStats}
+                        className="px-3 py-2 rounded-xl text-xs border border-white/10 hover:border-white/20 transition-all opacity-75 hover:opacity-100"
+                        title="Refresh cache statistics"
+                      >
+                        Refresh Stats
+                      </button>
+                      {purgeFeedback && (
+                        <span className="text-[11px] font-medium text-emerald-400">
+                          {purgeFeedback}
+                        </span>
+                      )}
                     </div>
                   </div>
                 </Card>

@@ -1,21 +1,25 @@
-/* TitlebarModelPillar — Iron Man Arc-Reactor Cockpit HUD with Dynamic Responsive Dock */
+/* TitlebarModelPillar — Spatial Cockpit Arc-Reactor with Adaptive Ambient Aura & Radar Ripple HUD */
 
 .titlebar-model-pillar {
+  position: relative;
   display: inline-flex;
   align-items: center;
   gap: 5px;
   padding: 3px 6px;
-  background: rgba(8, 12, 22, 0.85);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-  border: 1px solid rgba(0, 229, 255, 0.16);
+  background: rgba(8, 12, 22, 0.88);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border: 1px solid color-mix(in srgb, var(--active-provider-color, #00e5ff) 26%, rgba(255, 255, 255, 0.08));
   border-radius: 9999px;
   box-shadow:
-    0 4px 20px rgba(0, 0, 0, 0.6),
-    inset 0 1px 0 rgba(255, 255, 255, 0.08),
-    inset 0 0 12px rgba(0, 229, 255, 0.04);
+    0 6px 24px rgba(0, 0, 0, 0.7),
+    inset 0 1px 0 rgba(255, 255, 255, 0.12),
+    inset 0 0 16px color-mix(in srgb, var(--active-provider-color, #00e5ff) 12%, transparent);
   -webkit-app-region: no-drag !important;
   user-select: none;
+  transition:
+    border-color 0.3s cubic-bezier(0.16, 1, 0.3, 1),
+    box-shadow 0.3s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .titlebar-model-pill {
@@ -25,21 +29,22 @@
   gap: 6px;
   padding: 4px 10px;
   border-radius: 9999px;
-  border: 1px solid transparent;
-  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--provider-color, #00e5ff) 18%, rgba(255, 255, 255, 0.05));
+  background: color-mix(in srgb, var(--provider-color, #00e5ff) 4%, rgba(255, 255, 255, 0.02));
   color: #cbd5e1;
   font-size: 11.5px;
   font-weight: 500;
   letter-spacing: 0.2px;
   cursor: pointer;
   transition:
-    color 0.2s ease,
-    background 0.2s ease,
-    border-color 0.2s ease,
-    box-shadow 0.2s ease;
+    color 0.2s cubic-bezier(0.16, 1, 0.3, 1),
+    background 0.2s cubic-bezier(0.16, 1, 0.3, 1),
+    border-color 0.2s cubic-bezier(0.16, 1, 0.3, 1),
+    box-shadow 0.2s cubic-bezier(0.16, 1, 0.3, 1),
+    transform 0.15s ease;
   -webkit-app-region: no-drag !important;
 
-  /* Defensive fallbacks preceding CSS Color 5 color-mix() */
+  /* Defensive fallbacks */
   --provider-glow: var(--provider-color, #00e5ff);
   --provider-glow-ambient: var(--provider-color, #00e5ff);
 
@@ -48,11 +53,22 @@
   --provider-glow-ambient: color-mix(in srgb, var(--provider-color, #00e5ff) 25%, transparent);
 }
 
+/* Inactive provider brand icon colors */
+.titlebar-model-pill:not(.active) .titlebar-model-icon {
+  color: var(--provider-color, #94a3b8);
+  filter: drop-shadow(0 0 4px color-mix(in srgb, var(--provider-color, #00e5ff) 35%, transparent));
+}
+
 .titlebar-model-pill:hover:not(.active) {
-  background: rgba(255, 255, 255, 0.07);
+  background: color-mix(in srgb, var(--provider-color, #00e5ff) 14%, rgba(255, 255, 255, 0.06));
   color: #ffffff;
-  border-color: rgba(255, 255, 255, 0.18);
-  box-shadow: 0 0 10px color-mix(in srgb, var(--provider-color, #00e5ff) 35%, transparent);
+  border-color: color-mix(in srgb, var(--provider-color, #00e5ff) 45%, rgba(255, 255, 255, 0.2));
+  box-shadow: 0 0 12px color-mix(in srgb, var(--provider-color, #00e5ff) 30%, transparent);
+  transform: scale(1.02);
+}
+
+.titlebar-model-pill:hover:not(.active) .titlebar-model-icon {
+  filter: drop-shadow(0 0 8px var(--provider-color, #00e5ff));
 }
 
 .titlebar-model-pill:focus-visible {
@@ -69,45 +85,81 @@
   pointer-events: none;
   opacity: 0;
   box-shadow:
-    0 0 12px var(--provider-glow),
-    0 0 24px var(--provider-glow-ambient),
-    inset 0 0 8px var(--provider-glow);
+    0 0 14px color-mix(in srgb, var(--provider-gradient-start, var(--provider-color, #00e5ff)) 65%, transparent),
+    0 0 28px color-mix(in srgb, var(--provider-gradient-end, var(--provider-color, #00e5ff)) 30%, transparent),
+    inset 0 0 10px color-mix(in srgb, var(--provider-gradient-start, var(--provider-color, #00e5ff)) 50%, transparent);
   transform: scale(0.96);
   will-change: opacity, transform;
 }
 
-/* Active Provider State — Iron Man Arc-Reactor Core */
+/* Active Provider State — Spatial Cockpit Arc-Reactor Core */
 .titlebar-model-pill.active {
-  background: color-mix(in srgb, var(--provider-color, #00e5ff) 22%, rgba(10, 16, 28, 0.95));
-  border-color: color-mix(in srgb, var(--provider-color, #00e5ff) 80%, #ffffff 20%);
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--provider-gradient-start, #00e5ff) 36%, rgba(12, 18, 32, 0.96)),
+    color-mix(in srgb, var(--provider-gradient-end, #4f46e5) 28%, rgba(6, 10, 18, 0.98))
+  );
+  border-color: color-mix(in srgb, var(--provider-gradient-start, #00e5ff) 80%, #ffffff 20%);
   color: #ffffff;
   font-weight: 600;
-  box-shadow: 0 0 14px color-mix(in srgb, var(--provider-color, #00e5ff) 40%, transparent);
+  box-shadow:
+    0 0 18px color-mix(in srgb, var(--provider-gradient-start, #00e5ff) 45%, transparent),
+    0 0 34px color-mix(in srgb, var(--provider-gradient-end, #4f46e5) 22%, transparent),
+    inset 0 1px 0 rgba(255, 255, 255, 0.4);
 }
 
 .titlebar-model-pill.active .titlebar-model-icon {
-  color: var(--provider-color, #ffffff);
-  filter: drop-shadow(0 0 6px var(--provider-glow));
+  color: #ffffff;
+  filter: drop-shadow(0 0 8px var(--provider-gradient-start, var(--provider-color, #ffffff)));
 }
 
 .titlebar-model-pill.active::before {
-  animation: arcReactorBreathe 2.8s ease-in-out infinite;
+  animation: arcReactorBreathe 2.6s ease-in-out infinite;
 }
 
-/* Micro-Reactor Status Core Dot */
+/* Micro-Reactor Status Core Dot with Concentric Radar Ripple */
 .active-core-dot {
-  width: 5px;
-  height: 5px;
+  position: relative;
+  width: 6px;
+  height: 6px;
   border-radius: 9999px;
-  background-color: var(--provider-color, #00e5ff);
-  box-shadow: 0 0 8px var(--provider-color, #00e5ff);
+  background: radial-gradient(circle at 35% 35%, #ffffff 0%, var(--provider-gradient-start, #00e5ff) 65%, var(--provider-gradient-end, #4f46e5) 100%);
+  box-shadow: 0 0 10px var(--provider-gradient-start, #00e5ff);
   flex-shrink: 0;
+}
+
+.active-core-dot::after {
+  content: "";
+  position: absolute;
+  inset: -2px;
+  border-radius: 9999px;
+  border: 1.5px solid var(--provider-gradient-start, #00e5ff);
+  opacity: 0.8;
+  pointer-events: none;
+  animation: radarRipple 2.6s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+  will-change: transform, opacity;
+}
+
+/* Micro-Radar Expanding Ripple Animation */
+@keyframes radarRipple {
+  0% {
+    transform: scale(0.9);
+    opacity: 0.85;
+  }
+  60% {
+    transform: scale(2.6);
+    opacity: 0;
+  }
+  100% {
+    transform: scale(2.6);
+    opacity: 0;
+  }
 }
 
 /* Pure Compositor-Only Animation: Zero Paint Passes / Reflows */
 @keyframes arcReactorBreathe {
   0%, 100% {
-    opacity: 0.65;
+    opacity: 0.7;
     transform: scale(0.97);
   }
   50% {
@@ -178,5 +230,9 @@
     animation: none !important;
     opacity: 0.85;
     transform: scale(1);
+  }
+  .active-core-dot::after {
+    animation: none !important;
+    display: none;
   }
 }

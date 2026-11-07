@@ -73,16 +73,16 @@ describe('TabDiscardManager', () => {
     expect(manager.getPolicy().policy).toEqual({
       version: 1,
       tabDiscardMinutes: 10,
-      maxActiveTabs: 0
+      maxActiveTabs: 3
     })
 
-    // Set new policy: 60 minutes, max 3 tabs
-    const res = manager.setPolicy({ tabDiscardMinutes: 60, maxActiveTabs: 3 })
+    // Set new policy: 60 minutes, max 5 tabs
+    const res = manager.setPolicy({ tabDiscardMinutes: 60, maxActiveTabs: 5 })
     expect(res.success).toBe(true)
     expect(res.policy).toEqual({
       version: 1,
       tabDiscardMinutes: 60,
-      maxActiveTabs: 3
+      maxActiveTabs: 5
     })
 
     // Verify file exists on disk
@@ -92,7 +92,7 @@ describe('TabDiscardManager', () => {
     expect(diskContent).toEqual({
       version: 1,
       tabDiscardMinutes: 60,
-      maxActiveTabs: 3
+      maxActiveTabs: 5
     })
 
     // Recreate manager to simulate app restart
@@ -104,7 +104,7 @@ describe('TabDiscardManager', () => {
     expect(manager2.getPolicy().policy).toEqual({
       version: 1,
       tabDiscardMinutes: 60,
-      maxActiveTabs: 3
+      maxActiveTabs: 5
     })
   })
 
