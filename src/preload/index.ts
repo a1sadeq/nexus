@@ -160,6 +160,10 @@ const electronAPI = {
     getStats: (): Promise<unknown> => ipcRenderer.invoke('get_cache_stats'),
     purge: (): Promise<unknown> => ipcRenderer.invoke('purge_cache')
   },
+  diagnostics: {
+    capture: (samplingMs?: number): Promise<unknown> => ipcRenderer.invoke('capture_diagnostics', samplingMs),
+    exportToFile: (report: unknown): Promise<unknown> => ipcRenderer.invoke('export_diagnostics_file', report)
+  },
   nexusState: {
     get: (key: string): Promise<unknown> => ipcRenderer.invoke(`get_${key}`),
     save: (key: string, data: unknown): Promise<unknown> => ipcRenderer.invoke(`save_${key}`, data),

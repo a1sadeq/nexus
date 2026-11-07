@@ -43,6 +43,7 @@ import { ZenGuideModal } from './components/ZenGuideModal'
 import { HudStatusHeader } from './components/HudStatusHeader'
 import { WindowTitleBar } from './components/WindowTitleBar'
 import { FolderUploadModal } from './components/FolderUploadModal'
+import { DiagnosticsModal } from './components/DiagnosticsModal'
 import type { FolderScanResult } from '../../shared/folderUpload'
 import { shouldCaptureAutomaticSnapshot } from './lib/snapshotThrottle'
 import './App.css'
@@ -520,6 +521,7 @@ function App() {
   const [showSkillEditorModal, setShowSkillEditorModal] = useState(false)
   const [showCategoryManagerModal, setShowCategoryManagerModal] = useState(false)
   const [editingSkill, setEditingSkill] = useState<SkillDef | null>(null)
+  const [showDiagnosticsModal, setShowDiagnosticsModal] = useState(false)
 
   const refreshSkills = useCallback(() => {
     if (window.electron?.skills) {
@@ -1131,6 +1133,7 @@ Acknowledge these skills with a concise confirmation in this exact format:
       showSkillEditorModal ||
       showCategoryManagerModal ||
       showBootSequence ||
+      showDiagnosticsModal ||
       Boolean(folderUploadData)
     // @ts-ignore
     window.electron?.ipcRenderer.send('set_overlays_open', Boolean(anyOverlayOpen))
@@ -1148,6 +1151,7 @@ Acknowledge these skills with a concise confirmation in this exact format:
     showSkillEditorModal,
     showCategoryManagerModal,
     showBootSequence,
+    showDiagnosticsModal,
     folderUploadData
   ])
 
@@ -1219,6 +1223,7 @@ Acknowledge these skills with a concise confirmation in this exact format:
           if (showSkillParamsModal) { setShowSkillParamsModal(false); closedAny = true }
           if (showSkillEditorModal) { setShowSkillEditorModal(false); closedAny = true }
           if (showCategoryManagerModal) { setShowCategoryManagerModal(false); closedAny = true }
+          if (showDiagnosticsModal) { setShowDiagnosticsModal(false); closedAny = true }
           if (folderUploadData) { setFolderUploadData(null); closedAny = true }
           if (closedAny) {
             restoreViewBounds()
@@ -1350,7 +1355,7 @@ Acknowledge these skills with a concise confirmation in this exact format:
           break
         }
         case 'navigate_tab': {
-          const overlaysOpen = showHistory || showTabOverview || showSettings || showNewTab || showExport || showUrlBar || showGuide || showSkillsPalette || showBaseSkillsModal || showSkillParamsModal || showSkillEditorModal
+          const overlaysOpen = showHistory || showTabOverview || showSettings || showNewTab || showExport || showUrlBar || showGuide || showSkillsPalette || showBaseSkillsModal || showSkillParamsModal || showSkillEditorModal || showDiagnosticsModal
           if (!overlaysOpen) {
             const isPinned = pinnedIds.includes(activeId || '')
             const relevantTabs = tabs.filter((t) => pinnedIds.includes(t.id) === isPinned)
@@ -1492,7 +1497,7 @@ Acknowledge these skills with a concise confirmation in this exact format:
       // Never re-show the native view while an overlay or boot sequence is open:
       // the observer fires on layout changes and would otherwise
       // override the 0x0 hide sent by overlay-open handlers.
-      if (showBootSequence || showHistory || showTabOverview || showSettings || showNewTab || showExport || showUrlBar || showGuide || showSkillsPalette || showBaseSkillsModal || showSkillParamsModal || showSkillEditorModal) return
+      if (showBootSequence || showHistory || showTabOverview || showSettings || showNewTab || showExport || showUrlBar || showGuide || showSkillsPalette || showBaseSkillsModal || showSkillParamsModal || showSkillEditorModal || showDiagnosticsModal) return
       const rect = el.getBoundingClientRect()
       if (rect.width > 0 && rect.height > 0) {
         const payload = JSON.stringify({
@@ -1522,7 +1527,7 @@ Acknowledge these skills with a concise confirmation in this exact format:
       if (rafId !== null) cancelAnimationFrame(rafId)
       observer.disconnect()
     }
-  }, [showBootSequence, showHistory, showTabOverview, showSettings, showNewTab, showExport, showUrlBar, showGuide, showSkillsPalette, showBaseSkillsModal, showSkillParamsModal, showSkillEditorModal])
+  }, [showBootSequence, showHistory, showTabOverview, showSettings, showNewTab, showExport, showUrlBar, showGuide, showSkillsPalette, showBaseSkillsModal, showSkillParamsModal, showSkillEditorModal, showDiagnosticsModal])
 
   return (
     <div
@@ -1538,6 +1543,7 @@ Acknowledge these skills with a concise confirmation in this exact format:
           activeModelKey={resolvedActiveModelKey}
           onSelectModel={handleDeployModel}
           autoHideMode={interfaceSettings.showTitlebar === false}
+          onOpenDiagnostics={() => setShowDiagnosticsModal(true)}
         />
       )}
       <div className="flex flex-1 min-h-0 w-full overflow-hidden">
@@ -2198,6 +2204,13 @@ Acknowledge these skills with a concise confirmation in this exact format:
             })
           }
           setFolderUploadData(null)
+          restoreViewBounds()
+        }}
+      />
+      <DiagnosticsModal
+        isOpen={showDiagnosticsModal}
+        onClose={() => {
+          setShowDiagnosticsModal(false)
           restoreViewBounds()
         }}
       />

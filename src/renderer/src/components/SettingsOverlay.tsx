@@ -26,7 +26,8 @@ import {
   IconGlobe,
   IconCheck,
   IconRotate,
-  IconDownload
+  IconDownload,
+  IconActivity
 } from './BrandIcons'
 import {
   loadInterfaceSettings,
@@ -44,6 +45,7 @@ import { matchesShortcut, getShortcutKeys } from '../lib/shortcuts'
 import { ShortcutsMatrix } from './ShortcutsMatrix'
 import { SkillsSettingsSection } from './SkillsSettingsSection'
 import { WorkspaceSettingsSection } from './WorkspaceSettingsSection'
+import { DiagnosticsSettingsSection } from './DiagnosticsSettingsSection'
 import { StyleStudioCanvas } from './StyleStudioCanvas'
 import { ProviderFeaturesSection } from './ProviderFeaturesSection'
 import { generateAiThemingPrompt } from '../lib/promptGenerator'
@@ -676,10 +678,10 @@ export default function SettingsOverlay({
   onClose,
   onSelectModel
 }: Props) {
-  const [tab, setTab] = useState<'general' | 'models' | 'sessions' | 'features' | 'skills' | 'workspace' | 'themes' | 'style' | 'webview' | 'shortcuts'>(() => {
+  const [tab, setTab] = useState<'general' | 'diagnostics' | 'models' | 'sessions' | 'features' | 'skills' | 'workspace' | 'themes' | 'style' | 'webview' | 'shortcuts'>(() => {
     if (initialSection) return initialSection
     const saved = localStorage.getItem('nexus.settingsTab') || localStorage.getItem('vicinae.settingsTab')
-    return saved === 'general' || saved === 'models' || saved === 'sessions' || saved === 'features' || saved === 'skills' || saved === 'workspace' || saved === 'themes' || saved === 'style' || saved === 'webview' || saved === 'shortcuts'
+    return saved === 'general' || saved === 'diagnostics' || saved === 'models' || saved === 'sessions' || saved === 'features' || saved === 'skills' || saved === 'workspace' || saved === 'themes' || saved === 'style' || saved === 'webview' || saved === 'shortcuts'
       ? (saved as any)
       : 'general'
   })
@@ -758,7 +760,7 @@ export default function SettingsOverlay({
       setTab(initialSection)
     } else {
       const saved = localStorage.getItem('nexus.settingsTab') || localStorage.getItem('vicinae.settingsTab')
-      if (saved === 'general' || saved === 'models' || saved === 'sessions' || saved === 'features' || saved === 'skills' || saved === 'workspace' || saved === 'themes' || saved === 'style' || saved === 'webview' || saved === 'shortcuts') {
+      if (saved === 'general' || saved === 'diagnostics' || saved === 'models' || saved === 'sessions' || saved === 'features' || saved === 'skills' || saved === 'workspace' || saved === 'themes' || saved === 'style' || saved === 'webview' || saved === 'shortcuts') {
         setTab(saved as any)
       }
     }
@@ -1511,6 +1513,7 @@ export default function SettingsOverlay({
                   </span>
                   {[
                     { id: 'general', label: 'General', sub: 'Zoom & RAM Saver', icon: IconSliders },
+                    { id: 'diagnostics', label: 'Diagnostics', sub: 'CPU, RAM & Telemetry', icon: IconActivity },
                     { id: 'workspace', label: 'Workspace', sub: 'Storage & Exports', icon: IconFolder },
                     { id: 'shortcuts', label: 'Shortcuts', sub: 'Key Matrix & Keycaps', icon: IconKeyboard }
                   ].map(({ id, label, sub, icon: IconComponent }) => {
@@ -1672,7 +1675,7 @@ export default function SettingsOverlay({
           >
             <div className="flex items-center gap-2">
               <span className="text-[11px] font-mono uppercase tracking-wider text-(--text2) opacity-70">
-                {tab === 'general' || tab === 'workspace' || tab === 'shortcuts'
+                {tab === 'general' || tab === 'diagnostics' || tab === 'workspace' || tab === 'shortcuts'
                   ? 'System & App'
                   : tab === 'models' || tab === 'sessions' || tab === 'features' || tab === 'skills'
                     ? 'AI Engine'
@@ -1681,6 +1684,7 @@ export default function SettingsOverlay({
               <span className="text-(--text2) opacity-40">/</span>
               <span className="text-sm font-bold text-white flex items-center gap-1.5">
                 {tab === 'general' && 'General Preferences'}
+                {tab === 'diagnostics' && 'System Diagnostics & Telemetry'}
                 {tab === 'workspace' && 'Workspace & Storage'}
                 {tab === 'shortcuts' && 'Keyboard Shortcuts Matrix'}
                 {tab === 'models' && 'AI Providers & Endpoints'}
@@ -2763,6 +2767,15 @@ export default function SettingsOverlay({
             className="flex-1 min-h-0 overflow-y-auto p-4 custom-scrollbar h-full"
           >
             <SkillsSettingsSection onOpenEditor={onOpenSkillEditor} />
+          </div>
+        ) : tab === 'diagnostics' ? (
+          <div
+            ref={activeContentScrollRef}
+            onScroll={handleContentScroll}
+            onFocusCapture={handleContentFocusCapture}
+            className="flex-1 min-h-0 overflow-y-auto p-5 custom-scrollbar h-full"
+          >
+            <DiagnosticsSettingsSection />
           </div>
         ) : tab === 'workspace' ? (
           <div

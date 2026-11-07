@@ -36,6 +36,7 @@ import { cleanConversationTitle, isDefaultConversationTitle } from '../shared/ti
 import { consolidateLegacyConfigDir } from './migrations/consolidateLegacyConfigDir'
 import { registerStateIpc, trustWindow } from './stateIpc'
 import { scheduleStartupAndExitPruning, getCacheStats, pruneAppCaches } from './cachePruningManager'
+import { captureDiagnosticReport, saveDiagnosticsToFile, type ViewContextInfo } from './diagnosticsManager'
 
 // Page-side helpers embedded into every injected script. Built from the tested
 // shared source via toString() — self-contained, no closures.
@@ -229,6 +230,44 @@ ipcMain.handle('purge_cache', async (event) => {
     return { success: false, reason: 'untrusted_sender' }
   }
   return pruneAppCaches(getFinalUserDataDir())
+})
+
+ipcMain.handle('capture_diagnostics', async (event, samplingMs?: number) => {
+  if (!mainWindow || event.sender !== mainWindow.webContents) {
+    return { success: false, reason: 'untrusted_sender' }
+  }
+  const views = new Map<string, ViewContextInfo>()
+  for (const [tabId, view] of aiViews.entries()) {
+    views.set(tabId, {
+      tabId,
+      modelKey: viewModelKeys.get(tabId) || '',
+      title: viewTitles.get(tabId) || '',
+      url: !view.webContents.isDestroyed() ? view.webContents.getURL() : '',
+      webContents: view.webContents
+    })
+  }
+
+  const report = await captureDiagnosticReport(
+    {
+      userDataDir: getFinalUserDataDir(),
+      mainWindowWebContents: mainWindow?.webContents,
+      activeViewId,
+      views,
+      isPinned: (tabId) => pinnedTabIds.has(tabId),
+      isEvicted: (tabId) => tabDiscardManager.isTabEvicted(tabId),
+      tabDiscardPolicy: tabDiscardManager.getPolicy().policy
+    },
+    typeof samplingMs === 'number' ? samplingMs : 2000
+  )
+
+  return { success: true, report }
+})
+
+ipcMain.handle('export_diagnostics_file', async (event, report) => {
+  if (!mainWindow || event.sender !== mainWindow.webContents) {
+    return { success: false, reason: 'untrusted_sender' }
+  }
+  return saveDiagnosticsToFile(report)
 })
 
 // Explicit, trusted-shell-only video diagnostics. No URLs, media data or tokens.

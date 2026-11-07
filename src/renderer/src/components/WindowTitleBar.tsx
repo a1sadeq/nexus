@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback, useRef, type FC } from 'react'
 import type { ModelDef } from '../lib/models'
-import { ArcReactorIcon } from './BrandIcons'
+import { ArcReactorIcon, IconActivity } from './BrandIcons'
 import { TitlebarModelPillar } from './TitlebarModelPillar'
 import './WindowTitleBar.css'
 
@@ -14,6 +14,7 @@ export interface WindowTitleBarProps {
   activeModelKey?: string
   onSelectModel?: (key: string) => void
   autoHideMode?: boolean
+  onOpenDiagnostics?: () => void
 }
 
 export const WindowTitleBar: FC<WindowTitleBarProps> = ({
@@ -25,7 +26,8 @@ export const WindowTitleBar: FC<WindowTitleBarProps> = ({
   models,
   activeModelKey = 'gemini',
   onSelectModel,
-  autoHideMode = false
+  autoHideMode = false,
+  onOpenDiagnostics
 }) => {
   const [isMaximized, setIsMaximized] = useState(false)
   const [isRevealed, setIsRevealed] = useState(false)
@@ -208,55 +210,69 @@ export const WindowTitleBar: FC<WindowTitleBarProps> = ({
       </div>
 
       {/* Right: Window Control Action Buttons (Non-Windows / CSD mode) */}
-      {renderControls ? (
-        <div className="no-drag flex items-center h-full shrink-0">
+      <div className="no-drag flex items-center h-full shrink-0">
+        {onOpenDiagnostics && (
           <button
             type="button"
-            onClick={handleMinimize}
-            className="h-full px-3.5 flex items-center justify-center hover:bg-white/10 active:bg-white/15 text-slate-300 hover:text-white transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-indigo-400"
-            title="Minimize"
-            aria-label="Minimize window"
+            onClick={onOpenDiagnostics}
+            className="h-full px-2.5 flex items-center justify-center text-slate-400 hover:text-indigo-300 hover:bg-white/10 active:bg-white/15 transition-all focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-indigo-400 mr-1"
+            title="System Diagnostics & Resource Monitor"
+            aria-label="Open System Diagnostics"
           >
-            <svg width="10" height="2" viewBox="0 0 10 2" fill="currentColor">
-              <rect width="10" height="2" rx="1" />
-            </svg>
+            <IconActivity size={14} />
           </button>
+        )}
 
-          <button
-            type="button"
-            onClick={handleMaximizeToggle}
-            className="h-full px-3.5 flex items-center justify-center hover:bg-white/10 active:bg-white/15 text-slate-300 hover:text-white transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-indigo-400"
-            title={isMaximized ? 'Restore' : 'Maximize'}
-            aria-label={isMaximized ? 'Restore window' : 'Maximize window'}
-          >
-            {isMaximized ? (
-              <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2">
-                <rect x="2.5" y="0.5" width="7" height="7" rx="0.5" />
-                <path d="M0.5 2.5v7h7" />
+        {renderControls ? (
+          <>
+            <button
+              type="button"
+              onClick={handleMinimize}
+              className="h-full px-3.5 flex items-center justify-center hover:bg-white/10 active:bg-white/15 text-slate-300 hover:text-white transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-indigo-400"
+              title="Minimize"
+              aria-label="Minimize window"
+            >
+              <svg width="10" height="2" viewBox="0 0 10 2" fill="currentColor">
+                <rect width="10" height="2" rx="1" />
               </svg>
-            ) : (
-              <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2">
-                <rect x="0.5" y="0.5" width="9" height="9" rx="0.5" />
-              </svg>
-            )}
-          </button>
+            </button>
 
-          <button
-            type="button"
-            onClick={handleClose}
-            className="h-full px-3.5 flex items-center justify-center hover:bg-[#e81123] active:bg-[#c90f1e] text-slate-300 hover:text-white transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-rose-400"
-            title="Close"
-            aria-label="Close window"
-          >
-            <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round">
-              <line x1="1" y1="1" x2="9" y2="9" />
-              <line x1="9" y1="1" x2="1" y2="9" />
-            </svg>
-          </button>
-        </div>
-      ) : (
-        <div className="w-2 shrink-0" aria-hidden="true" />
-      )}
+            <button
+              type="button"
+              onClick={handleMaximizeToggle}
+              className="h-full px-3.5 flex items-center justify-center hover:bg-white/10 active:bg-white/15 text-slate-300 hover:text-white transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-indigo-400"
+              title={isMaximized ? 'Restore' : 'Maximize'}
+              aria-label={isMaximized ? 'Restore window' : 'Maximize window'}
+            >
+              {isMaximized ? (
+                <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2">
+                  <rect x="2.5" y="0.5" width="7" height="7" rx="0.5" />
+                  <path d="M0.5 2.5v7h7" />
+                </svg>
+              ) : (
+                <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2">
+                  <rect x="0.5" y="0.5" width="9" height="9" rx="0.5" />
+                </svg>
+              )}
+            </button>
+
+            <button
+              type="button"
+              onClick={handleClose}
+              className="h-full px-3.5 flex items-center justify-center hover:bg-[#e81123] active:bg-[#c90f1e] text-slate-300 hover:text-white transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-rose-400"
+              title="Close"
+              aria-label="Close window"
+            >
+              <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round">
+                <line x1="1" y1="1" x2="9" y2="9" />
+                <line x1="9" y1="1" x2="1" y2="9" />
+              </svg>
+            </button>
+          </>
+        ) : (
+          <div className="w-2 shrink-0" aria-hidden="true" />
+        )}
+      </div>
     </header>
   )
 }

@@ -1304,3 +1304,28 @@ export const IconDownload = createUniversalIcon(
   'IconDownload'
 )
 
+/* Icon Activity / Diagnostics */
+export const IconActivity = createUniversalIcon(
+  {
+    'lucide-line': () => (
+      <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+    ),
+    'cyber-hud': (sw) => (
+      <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" strokeWidth={sw} />
+    ),
+    'duotone-glow': () => (
+      <>
+        <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" strokeOpacity={0.4} strokeWidth="3" />
+        <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+      </>
+    ),
+    'solid-silhouette': () => (
+      <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" strokeWidth="2.5" />
+    ),
+    'retro-monoline': () => (
+      <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" strokeWidth="1" />
+    )
+  },
+  'IconActivity'
+)
+

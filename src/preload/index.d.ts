@@ -191,6 +191,11 @@ export interface NexusCacheBridge {
   }>
 }
 
+export interface NexusDiagnosticsBridge {
+  capture: (samplingMs?: number) => Promise<{ success: boolean; report?: any; reason?: string }>
+  exportToFile: (report: any) => Promise<{ success: boolean; filePath?: string; error?: string }>
+}
+
 declare global {
   interface Window {
     nexusState?: NexusStateBridge
@@ -205,6 +210,7 @@ declare global {
       aiFeatures?: NexusAiFeatures
       nexusState?: NexusStateBridge
       cache?: NexusCacheBridge
+      diagnostics?: NexusDiagnosticsBridge
     }
   }
 }

@@ -158,6 +158,22 @@ describe('WindowTitleBar Component', () => {
     expect(cleanupMock).toHaveBeenCalledTimes(1)
   })
 
+  it('invokes onOpenDiagnostics when diagnostics button is clicked', async () => {
+    const onOpenDiagnostics = vi.fn()
+    await renderBar({
+      activeTabTitle: 'Active Chat',
+      models: DEFAULT_MODELS,
+      activeModelKey: 'gemini',
+      onSelectModel: () => {},
+      onOpenDiagnostics
+    })
+
+    const diagBtn = container.querySelector('button[aria-label="Open System Diagnostics"]') as HTMLButtonElement
+    expect(diagBtn).toBeTruthy()
+    diagBtn.click()
+    expect(onOpenDiagnostics).toHaveBeenCalledTimes(1)
+  })
+
   it('omits custom control buttons on Windows to prevent duplicate caption controls', async () => {
     ;(window as any).electron.platform = 'win32'
 
