@@ -3,13 +3,14 @@ import {
   serializeState,
   deserializeState,
   getRecentActiveTabIds,
+  getVisibleActiveTabs,
+  moveActiveTabInList,
   switchToModel,
   addNewChat,
   openHistoryTab,
   createTab,
   countModelUsage,
   isProviderHomeUrl,
-  moveTab,
   reorderTabs
 } from './lib/tabs'
 import { sfx } from './lib/soundFx'
@@ -1575,16 +1576,17 @@ Acknowledge these skills with a concise confirmation in this exact format:
         case 'navigate_tab': {
           const overlaysOpen = showHistory || showTabOverview || showSettings || showNewTab || showExport || showUrlBar || showGuide || showSkillsPalette || showBaseSkillsModal || showSkillParamsModal || showSkillEditorModal || showDiagnosticsModal
           if (!overlaysOpen) {
-            const isPinned = pinnedIds.includes(activeId || '')
-            const relevantTabs = tabs.filter((t) => pinnedIds.includes(t.id) === isPinned)
-            const idx = relevantTabs.findIndex((t) => t.id === activeId)
-            if (relevantTabs.length > 1 && idx >= 0) {
-              if (data.direction === 'prev') {
-                const prev = relevantTabs[(idx - 1 + relevantTabs.length) % relevantTabs.length]
-                switchToTab(prev.id, prev.url)
-              } else {
-                const next = relevantTabs[(idx + 1) % relevantTabs.length]
-                switchToTab(next.id, next.url)
+            const visualActive = getVisibleActiveTabs(tabs, residentTabIds, pinnedIds, tabStatuses, activeId)
+            if (visualActive.length > 1) {
+              const idx = visualActive.findIndex((t) => t.id === activeId)
+              if (idx !== -1) {
+                const target =
+                  data.direction === 'prev'
+                    ? visualActive[(idx - 1 + visualActive.length) % visualActive.length]
+                    : visualActive[(idx + 1) % visualActive.length]
+                if (target?.url) {
+                  switchToTab(target.id, target.url)
+                }
               }
             }
           }
@@ -1592,7 +1594,8 @@ Acknowledge these skills with a concise confirmation in this exact format:
         }
         case 'move_tab': {
           if (!anyOverlayOpen && activeId) {
-            setTabs((prev) => moveTab(prev, activeId, data.direction))
+            const visualActive = getVisibleActiveTabs(tabs, residentTabIds, pinnedIds, tabStatuses, activeId)
+            setTabs((prev) => moveActiveTabInList(prev, activeId, data.direction, visualActive))
           }
           break
         }

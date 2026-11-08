@@ -27,7 +27,7 @@ Nexus is a desktop cockpit for the AI tools you already use. Instead of juggling
 
 It is **not** an API client and **not** a proxy. Each provider runs its real web app inside an isolated Electron webview, so your sessions, attachments, model pickers, and features behave exactly as they do in the browser. Nexus adds the workspace around them.
 
-> **New in v1.0.5:** vertical sidebar tabs with active/sleeping session partitioning, Arc-Reactor cockpit active tabs, real-time AI status observation across providers, native Iron-Man HUD notifications, and smart MRU active tabs persistence across restarts.
+> **New in v1.0.6:** synchronized visual tab keyboard navigation (Ctrl+J / Ctrl+K strictly cycle visible active sessions without waking sleeping tabs; Ctrl+Shift+J / Ctrl+Shift+K reorder active tabs relative to visible neighbors), vertical sidebar active session partitioning, Arc-Reactor cockpit active tabs, real-time AI status observation across providers, native Iron-Man HUD notifications, and smart MRU active tabs persistence across restarts.
 
 ---
 

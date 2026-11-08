@@ -251,6 +251,53 @@ export function getRecentActiveTabIds(
   return effectiveMru.slice(0, effectiveLimit)
 }
 
+/**
+ * Returns active tabs in their exact visual layout order:
+ * 1. Pinned active tabs
+ * 2. Unpinned active tabs
+ */
+export function getVisibleActiveTabs(
+  tabs: Tab[],
+  residentTabIds: string[],
+  pinnedIds: string[],
+  tabStatuses?: Record<string, string>,
+  activeId?: string | null
+): Tab[] {
+  const activeList: Tab[] = []
+  for (const tab of tabs) {
+    const isCurrentlyActive = tab.id === activeId
+    const isWorkingOrWaiting =
+      tabStatuses && (tabStatuses[tab.id] === 'working' || tabStatuses[tab.id] === 'waiting-input')
+    const isResident = residentTabIds ? residentTabIds.includes(tab.id) : isCurrentlyActive || pinnedIds.includes(tab.id)
+    if (isCurrentlyActive || isWorkingOrWaiting || isResident) {
+      activeList.push(tab)
+    }
+  }
+
+  const pinned = activeList.filter((t) => pinnedIds.includes(t.id))
+  const unpinned = activeList.filter((t) => !pinnedIds.includes(t.id))
+  return [...pinned, ...unpinned]
+}
+
+/**
+ * Moves an active tab up or down relative to its adjacent neighbor in the visual active tabs list.
+ */
+export function moveActiveTabInList(
+  tabs: Tab[],
+  activeId: string,
+  direction: 'up' | 'down',
+  visualActiveTabs: Tab[]
+): Tab[] {
+  const currIdx = visualActiveTabs.findIndex((t) => t.id === activeId)
+  if (currIdx === -1) return tabs
+
+  const targetIdx = direction === 'up' ? currIdx - 1 : currIdx + 1
+  if (targetIdx < 0 || targetIdx >= visualActiveTabs.length) return tabs
+
+  const targetTab = visualActiveTabs[targetIdx]
+  return reorderTabs(tabs, activeId, targetTab.id)
+}
+
 function originOf(url: string): string {
   try {
     return new URL(url).origin

@@ -8,6 +8,8 @@ import {
   serializeState,
   deserializeState,
   getRecentActiveTabIds,
+  getVisibleActiveTabs,
+  moveActiveTabInList,
   isProviderHomeUrl,
   isIgnoredHistoryUrl,
   isDefaultOrGenericTitle,
@@ -195,6 +197,42 @@ describe('serializeState / deserializeState', () => {
     const active = getRecentActiveTabIds(tabs, 't5', mru, 5)
     expect(active).toEqual(['t5', 't3', 't1', 't2', 't6'])
     expect(active.length).toBe(5)
+  })
+
+  it('getVisibleActiveTabs filters to active tabs with pinned first and preserves order', () => {
+    const tabs = [
+      tab({ id: 't1' }),
+      tab({ id: 't2' }),
+      tab({ id: 't3' }),
+      tab({ id: 't4' }),
+      tab({ id: 't5' })
+    ]
+    const resident = ['t1', 't3', 't4']
+    const pinned = ['t3']
+    const visible = getVisibleActiveTabs(tabs, resident, pinned)
+    expect(visible.map((t) => t.id)).toEqual(['t3', 't1', 't4'])
+  })
+
+  it('moveActiveTabInList swaps active tab with visual neighbor', () => {
+    const tabs = [
+      tab({ id: 't1' }),
+      tab({ id: 't2' }),
+      tab({ id: 't3' }),
+      tab({ id: 't4' })
+    ]
+    const resident = ['t1', 't3', 't4']
+    const pinned: string[] = []
+    const visible = getVisibleActiveTabs(tabs, resident, pinned) // ['t1', 't3', 't4']
+
+    // Move 't3' up -> should swap with 't1'
+    const movedUp = moveActiveTabInList(tabs, 't3', 'up', visible)
+    const visibleMovedUp = getVisibleActiveTabs(movedUp, resident, pinned)
+    expect(visibleMovedUp.map((t) => t.id)).toEqual(['t3', 't1', 't4'])
+
+    // Move 't3' down -> should swap with 't4'
+    const movedDown = moveActiveTabInList(tabs, 't3', 'down', visible)
+    const visibleMovedDown = getVisibleActiveTabs(movedDown, resident, pinned)
+    expect(visibleMovedDown.map((t) => t.id)).toEqual(['t1', 't4', 't3'])
   })
 
   it('returns null on invalid JSON', () => {

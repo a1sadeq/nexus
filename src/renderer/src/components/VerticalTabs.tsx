@@ -305,13 +305,14 @@ export default function VerticalTabs({
       onKeyDown={(e) => {
         if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
           e.preventDefault()
-          const currentIdx = orderedTabs.findIndex((t) => t.id === activeId)
+          const navList = activeTabs.length > 0 ? activeTabs : orderedTabs
+          const currentIdx = navList.findIndex((t) => t.id === activeId)
           if (currentIdx === -1) return
           const nextIdx =
             e.key === 'ArrowDown'
-              ? (currentIdx + 1) % orderedTabs.length
-              : (currentIdx - 1 + orderedTabs.length) % orderedTabs.length
-          onSelect(orderedTabs[nextIdx].id)
+              ? (currentIdx + 1) % navList.length
+              : (currentIdx - 1 + navList.length) % navList.length
+          onSelect(navList[nextIdx].id)
         }
       }}
     >
