@@ -2,18 +2,24 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import {
   serializeState,
   deserializeState,
+  getRecentActiveTabIds,
   switchToModel,
   addNewChat,
   openHistoryTab,
   createTab,
   countModelUsage,
-  isProviderHomeUrl
+  isProviderHomeUrl,
+  moveTab,
+  reorderTabs
 } from './lib/tabs'
+import { sfx } from './lib/soundFx'
 import { getShortcutKeys, getShortcutMap, onShortcutsChanged } from './lib/shortcuts'
 import type { Tab, HistoryItem, ModelKey } from './lib/tabs'
 import ChatTabs from './components/ChatTabs'
+import VerticalTabs from './components/VerticalTabs'
+import { updateTabLoadingStatus, acknowledgeTabStatus, type TabAiStatus } from './lib/tabStatus'
 import { BRAND_IDS, modelLabel, modelColor } from './lib/modelVisuals'
-import { BrandIcon } from './components/BrandIcons'
+import { BrandIcon, IconPanelLeft, IconPanelLeftClose, IconSearch, IconPlus } from './components/BrandIcons'
 import { pushClosedTab, reopenClosedTab, type ClosedTabEntry } from './lib/tabs'
 import type { SkillDef } from '../../shared/skills'
 import { BaseSkillsModal } from './components/BaseSkillsModal'
@@ -25,6 +31,7 @@ import HistoryOverlay from './components/HistoryOverlay'
 import TabOverviewOverlay from './components/TabOverviewOverlay'
 import NewTabOverlay from './components/NewTabOverlay'
 import { ExportOverlay } from './components/ExportOverlay'
+import { DownloadNotificationToast } from './components/DownloadNotificationToast'
 
 import SettingsOverlay from './components/SettingsOverlay'
 import { loadThemeState, saveThemeState, applyTheme, findTheme } from './lib/themes'
@@ -108,86 +115,141 @@ function App() {
       if (parsed && typeof parsed === 'object' && Array.isArray((parsed as any).tabs) && (parsed as any).tabs.length > 0) {
         const loadedTabs = (parsed as any).tabs as Tab[]
         const loadedActiveId = (parsed as any).activeId || loadedTabs[0]?.id || null
-        return { tabs: loadedTabs, activeId: loadedActiveId }
+        const loadedMru = Array.isArray((parsed as any).mruTabIds) ? ((parsed as any).mruTabIds as string[]) : undefined
+        return { tabs: loadedTabs, activeId: loadedActiveId, mruTabIds: loadedMru }
       }
     } catch {}
     const restored = deserializeState(localStorage.getItem(TABS_STORAGE_KEY))
     if (restored && restored.tabs.length > 0) return restored
     const initial = createTab('gemini', 'New Chat', 'https://gemini.google.com')
-    return { tabs: [initial], activeId: initial.id }
+    return { tabs: [initial], activeId: initial.id, mruTabIds: [initial.id] }
   })
   const [tabs, setTabs] = useState<Tab[]>(initialTabs.tabs)
   const [activeId, setActiveId] = useState<string | null>(initialTabs.activeId)
+  const [residentTabIds, setResidentTabIds] = useState<string[]>(() =>
+    getRecentActiveTabIds(initialTabs.tabs, initialTabs.activeId, initialTabs.mruTabIds, 5)
+  )
+
+  // Listen for real-time tab discard status from main process
+  useEffect(() => {
+    // @ts-ignore
+    const cleanup = window.electron?.ipcRenderer?.on?.(
+      'tab_discard_status_updated',
+      (_event: unknown, data: { residentTabIds?: string[]; discardedTabIds?: string[] }) => {
+        const residentFromMain = Array.isArray(data?.residentTabIds) ? data.residentTabIds : []
+        const discardedFromMain = Array.isArray(data?.discardedTabIds) ? data.discardedTabIds : []
+        const discardedSet = new Set(discardedFromMain)
+        setResidentTabIds((prev) => {
+          const preserved = prev.filter((id) => !discardedSet.has(id))
+          return Array.from(new Set([...residentFromMain, ...preserved]))
+        })
+      }
+    )
+    // Initial fetch of discard status
+    // @ts-ignore
+    window.electron?.ipcRenderer?.invoke?.('get_tab_discard_status').then((res: any) => {
+      if (res?.success) {
+        const residentFromMain = Array.isArray(res.status?.residentTabIds) ? res.status.residentTabIds : []
+        const discardedFromMain = Array.isArray(res.status?.discardedTabIds) ? res.status.discardedTabIds : []
+        const discardedSet = new Set(discardedFromMain)
+        setResidentTabIds((prev) => {
+          const preserved = prev.filter((id) => !discardedSet.has(id))
+          return Array.from(new Set([...residentFromMain, ...preserved]))
+        })
+      }
+    }).catch(() => {})
+
+    return () => {
+      // @ts-ignore
+      if (typeof cleanup === 'function') cleanup()
+    }
+  }, [])
 
   // Asynchronous universal hydration from disk tabs.json
   useEffect(() => {
     let active = true
-    const timeout = new Promise<'timeout'>((resolve) => setTimeout(() => resolve('timeout'), 1500))
+    let hydrated = false
 
-    Promise.race([window.nexusState?.get('tabs'), timeout])
-      .then((result) => {
-        if (!active) return
-        let diskState = result
-        if (typeof diskState === 'string' && diskState.trim()) {
-          try {
-            diskState = JSON.parse(diskState)
-          } catch {}
+    const handleDiskResult = (result: any) => {
+      if (!active || hydrated) return
+      let diskState = result
+      if (typeof diskState === 'string' && diskState.trim()) {
+        try {
+          diskState = JSON.parse(diskState)
+        } catch {}
+      }
+
+      if (
+        diskState &&
+        typeof diskState === 'object' &&
+        Array.isArray((diskState as any).tabs) &&
+        (diskState as any).tabs.length > 0
+      ) {
+        // Disk wins: hydrate live tabs
+        hydrated = true
+        const loadedTabs = (diskState as any).tabs as Tab[]
+        const loadedActiveId = (diskState as any).activeId || loadedTabs[0]?.id || null
+        setTabs(loadedTabs)
+        setActiveId(loadedActiveId)
+        setMruTabIds(loadedTabs.map((t) => t.id))
+        try {
+          localStorage.setItem(TABS_STORAGE_KEY, serializeState(loadedTabs, loadedActiveId))
+        } catch {}
+        setTabsHydrated(true)
+        const activeTabToActivate = loadedTabs.find((t) => t.id === loadedActiveId) || loadedTabs[0]
+        if (activeTabToActivate?.url) {
+          switchToTabRef.current?.(activeTabToActivate.id, activeTabToActivate.url)
         }
-
-        if (
-          result !== 'timeout' &&
-          diskState &&
-          typeof diskState === 'object' &&
-          Array.isArray((diskState as any).tabs) &&
-          (diskState as any).tabs.length > 0
-        ) {
-          // Disk wins: hydrate live tabs
-          const loadedTabs = (diskState as any).tabs as Tab[]
-          const loadedActiveId = (diskState as any).activeId || loadedTabs[0]?.id || null
-          setTabs(loadedTabs)
-          setActiveId(loadedActiveId)
-          setMruTabIds(loadedTabs.map((t) => t.id))
-          try {
-            localStorage.setItem(TABS_STORAGE_KEY, serializeState(loadedTabs, loadedActiveId))
-          } catch {}
-          setTabsHydrated(true)
-          const activeTabToActivate = loadedTabs.find((t) => t.id === loadedActiveId) || loadedTabs[0]
-          if (activeTabToActivate?.url) {
-            switchToTabRef.current?.(activeTabToActivate.id, activeTabToActivate.url)
-          }
-        } else if (result === 'timeout') {
-          // Read-only fallback: render local storage, NEVER write back until disk resolves
-          console.warn('[state] Tabs hydration timed out; maintaining read-only local state')
-          const restored = deserializeState(localStorage.getItem(TABS_STORAGE_KEY))
-          if (restored && restored.tabs.length > 0) {
-            setTabs(restored.tabs)
-            setActiveId(restored.activeId)
-          }
+      } else {
+        // Fresh install / empty disk: initialize default or local storage tab
+        hydrated = true
+        const restored = deserializeState(localStorage.getItem(TABS_STORAGE_KEY))
+        if (restored && restored.tabs.length > 0) {
+          setTabs(restored.tabs)
+          setActiveId(restored.activeId)
         } else {
-          // Fresh install: initialize default tab
-          const restored = deserializeState(localStorage.getItem(TABS_STORAGE_KEY))
-          if (restored && restored.tabs.length > 0) {
-            setTabs(restored.tabs)
-            setActiveId(restored.activeId)
-          } else {
-            const initial = createTab('gemini', 'New Chat', 'https://gemini.google.com')
-            setTabs([initial])
-            setActiveId(initial.id)
-          }
+          const initial = createTab('gemini', 'New Chat', 'https://gemini.google.com')
+          setTabs([initial])
+          setActiveId(initial.id)
+        }
+        setTabsHydrated(true)
+      }
+    }
+
+    const diskPromise = window.nexusState?.get('tabs')
+    if (diskPromise && typeof diskPromise.then === 'function') {
+      diskPromise.then(handleDiskResult).catch((err) => {
+        console.warn('[state] Disk tabs read error:', err)
+        if (active && !hydrated) {
+          hydrated = true
           setTabsHydrated(true)
         }
       })
-      .catch((err) => {
-        console.warn('[state] Tabs hydration fallback:', err)
-      })
+    }
+
+    // Grace period timer: if disk is slow, render local storage in read-only mode until disk arrives
+    const timer = setTimeout(() => {
+      if (!active || hydrated) return
+      console.warn('[state] Tabs hydration took >1.5s; rendering temporary read-only local state')
+      const restored = deserializeState(localStorage.getItem(TABS_STORAGE_KEY))
+      if (restored && restored.tabs.length > 0) {
+        setTabs(restored.tabs)
+        setActiveId(restored.activeId)
+      }
+    }, 1500)
 
     return () => {
       active = false
+      clearTimeout(timer)
     }
   }, [])
 
   // MRU State
-  const [mruTabIds, setMruTabIds] = useState<string[]>(initialTabs.tabs.map(t => t.id))
+  const [mruTabIds, setMruTabIds] = useState<string[]>(() => {
+    return initialTabs.mruTabIds && initialTabs.mruTabIds.length > 0
+      ? initialTabs.mruTabIds
+      : initialTabs.tabs.map((t) => t.id)
+  })
   useEffect(() => {
     if (activeId) {
       setMruTabIds(prev => {
@@ -200,9 +262,11 @@ function App() {
   const switchToTabRef = useRef<((id: string, url: string) => void) | null>(null)
   const mruRef = useRef(mruTabIds)
   const tabsRef = useRef(tabs)
+  const activeIdRef = useRef(activeId)
 
   useEffect(() => { mruRef.current = mruTabIds }, [mruTabIds])
   useEffect(() => { tabsRef.current = tabs }, [tabs])
+  useEffect(() => { activeIdRef.current = activeId }, [activeId])
 
   const activeTab = tabs.find((t) => t.id === activeId)
   const resolvedActiveModelKey = useMemo(() => {
@@ -335,7 +399,7 @@ function App() {
 
   // Webview theme: persisted toggle; re-sent to main whenever theme or interface settings change
   const [webviewThemeOn, setWebviewThemeOn] = useState(
-    () => localStorage.getItem('vicinae.webviewThemeOn') === '1'
+    () => localStorage.getItem('vicinae.webviewThemeOn') !== '0'
   )
   useEffect(() => {
     localStorage.setItem('vicinae.webviewThemeOn', webviewThemeOn ? '1' : '0')
@@ -658,6 +722,66 @@ Acknowledge these skills with a concise confirmation in this exact format:
   })
 
   const [loadingTabId, setLoadingTabId] = useState<string | null>(null)
+  const [tabStatuses, setTabStatuses] = useState<Record<string, TabAiStatus>>({})
+  const isWindowFocusedRef = useRef(true)
+
+  useEffect(() => {
+    // Initial check from main process
+    // @ts-ignore
+    window.electron?.ipcRenderer?.invoke('is_app_focused').then((focused: boolean) => {
+      if (typeof focused === 'boolean') isWindowFocusedRef.current = focused
+    }).catch(() => {})
+
+    const handleMainFocus = (_e: any, focused: boolean) => {
+      isWindowFocusedRef.current = Boolean(focused)
+    }
+    // @ts-ignore
+    window.electron?.ipcRenderer?.on('window-focus-changed', handleMainFocus)
+
+    const handleSwitchToTabFromNotif = (_e: any, targetTabId: string) => {
+      const tab = tabsRef.current.find((t) => t.id === targetTabId)
+      if (tab && tab.url) {
+        switchToTabRef.current?.(targetTabId, tab.url)
+      }
+    }
+    // @ts-ignore
+    window.electron?.ipcRenderer?.on('notification_switch_to_tab', handleSwitchToTabFromNotif)
+
+    return () => {
+      // @ts-ignore
+      window.electron?.ipcRenderer?.removeListener('window-focus-changed', handleMainFocus)
+      // @ts-ignore
+      window.electron?.ipcRenderer?.removeListener('notification_switch_to_tab', handleSwitchToTabFromNotif)
+    }
+  }, [])
+
+  const statusDismissTimersRef = useRef<Map<string, NodeJS.Timeout>>(new Map())
+
+  const cancelStatusDismissal = useCallback((tabId: string) => {
+    const existing = statusDismissTimersRef.current.get(tabId)
+    if (existing) {
+      clearTimeout(existing)
+      statusDismissTimersRef.current.delete(tabId)
+    }
+  }, [])
+
+  const scheduleStatusDismissal = useCallback((tabId: string, delayMs: number = 5000) => {
+    cancelStatusDismissal(tabId)
+    const timer = setTimeout(() => {
+      statusDismissTimersRef.current.delete(tabId)
+      setTabStatuses((prev) => acknowledgeTabStatus(prev, tabId))
+    }, delayMs)
+    statusDismissTimersRef.current.set(tabId, timer)
+  }, [cancelStatusDismissal])
+
+  useEffect(() => {
+    return () => {
+      for (const timer of statusDismissTimersRef.current.values()) {
+        clearTimeout(timer)
+      }
+      statusDismissTimersRef.current.clear()
+    }
+  }, [])
 
   // Live per-tab title/URL/loading updates from the main process
   useEffect(() => {
@@ -779,19 +903,119 @@ Acknowledge these skills with a concise confirmation in this exact format:
     }
   const onLoading = (_e: unknown, tabId: string, loading: boolean) => {
       setLoadingTabId(loading ? tabId : null)
+      // NOTE: Chromium page navigation loading (did-start/stop-loading)
+      // must NOT alter AI generation status. Only live DOM observer (onLiveStatus) sets AI status.
+    }
+
+    const onLiveStatus = (
+      _e: unknown,
+      tabId: string,
+      isGenerating: boolean,
+      lastSnippet: string
+    ) => {
+      if (isGenerating) {
+        cancelStatusDismissal(tabId)
+        setLoadingTabId(tabId)
+      } else {
+        setLoadingTabId(null)
+      }
+      setTabStatuses((prev) => {
+        const isActive = tabId === activeIdRef.current
+        const updated = updateTabLoadingStatus(prev, tabId, isGenerating, isActive, lastSnippet)
+
+        // If generation stopped
+        if (!isGenerating) {
+          if (isActive) {
+            // Active tab finished: linger for 5 seconds so user has clear visual confirmation
+            scheduleStatusDismissal(tabId, 5000)
+          } else {
+            // Background tab finished: trigger sound FX
+            const status = updated[tabId]
+            if (status === 'waiting-input') {
+              sfx.aiPromptAlert()
+            } else {
+              sfx.chime()
+            }
+
+            const tabItem = tabsRef.current.find((t) => t.id === tabId)
+            const tabTitle = tabItem?.title || 'AI Session'
+            const modelKey = tabItem?.model || 'gemini'
+
+            // Trigger inside-Nexus native Iron-Man HUD notification overlay
+            // @ts-ignore
+            window.electron?.ipcRenderer?.send('show_in_app_toast', {
+              id: `${tabId}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+              tabId,
+              tabTitle,
+              model: modelKey,
+              status: status === 'waiting-input' ? 'waiting-input' : 'done',
+              snippet: lastSnippet
+            })
+
+            // System OS desktop notification ONLY if the user is truly NOT focused on Nexus app
+            const triggerSystemNotification = () => {
+              try {
+                if (typeof Notification !== 'undefined') {
+                  if (Notification.permission === 'granted') {
+                    const notif = new Notification('Nexus AI', {
+                      body:
+                        status === 'waiting-input'
+                          ? `${tabTitle}: Needs your input or choice`
+                          : `${tabTitle}: Finished generating response`,
+                      silent: true
+                    })
+                    notif.onclick = () => {
+                      window.focus()
+                      if (tabItem?.url) switchToTabRef.current?.(tabId, tabItem.url)
+                    }
+                  } else if (Notification.permission === 'default') {
+                    Notification.requestPermission().catch(() => {})
+                  }
+                }
+              } catch {}
+            }
+
+            if (!isWindowFocusedRef.current) {
+              // Double check with main process before popping an intrusive OS notification
+              // @ts-ignore
+              window.electron?.ipcRenderer?.invoke('is_app_focused').then((focused: boolean) => {
+                if (focused) {
+                  isWindowFocusedRef.current = true
+                  return
+                }
+                triggerSystemNotification()
+              }).catch(() => {
+                triggerSystemNotification()
+              })
+            }
+          }
+        }
+
+        return updated
+      })
     }
 
     ipc.on('ai-title-updated', onTitle)
     ipc.on('ai-url-updated', onUrl)
     ipc.on('ai-loading', onLoading)
+    ipc.on('ai-live-status', onLiveStatus)
     return () => {
       ipc.removeListener('ai-title-updated', onTitle)
       ipc.removeListener('ai-url-updated', onUrl)
       ipc.removeListener('ai-loading', onLoading)
+      ipc.removeListener('ai-live-status', onLiveStatus)
     }
   }, [])
 
   const closeTab = (idToClose: string) => {
+    setResidentTabIds((prev) => prev.filter((id) => id !== idToClose))
+    cancelStatusDismissal(idToClose)
+    setTabStatuses((prev) => {
+      if (!(idToClose in prev)) return prev
+      const next = { ...prev }
+      delete next[idToClose]
+      return next
+    })
     const targetTab = tabs.find(t => t.id === idToClose)
     if (targetTab) {
       const index = tabs.findIndex(t => t.id === idToClose)
@@ -877,6 +1101,12 @@ Acknowledge these skills with a concise confirmation in this exact format:
   const switchToTab = useCallback(
     (id: string, url: string) => {
       setActiveId(id)
+      setResidentTabIds((prev) => (prev.includes(id) ? prev : [...prev, id]))
+      // Dismiss in-app toast for this tab
+      // @ts-ignore
+      window.electron?.ipcRenderer?.send('dismiss_in_app_toast')
+      // Give 5 seconds grace period so completed status badge does not vanish in 0ms on click
+      scheduleStatusDismissal(id, 5000)
       const bounds = containerBounds() || { x: 0, y: 0, width: 0, height: 0 }
       if (url) {
         const modelKey = tabs.find((t) => t.id === id)?.model
@@ -885,23 +1115,14 @@ Acknowledge these skills with a concise confirmation in this exact format:
       }
       scheduleSnapshotCapture(id)
     },
-    [scheduleSnapshotCapture, tabs]
+    [scheduleSnapshotCapture, tabs, scheduleStatusDismissal]
   )
 
   const loadTabUrl = useCallback(
     (id: string, url: string) => {
-      setActiveId(id)
-      const bounds = containerBounds() || { x: 0, y: 0, width: 0, height: 0 }
-      if (url) {
-        const modelKey = tabs.find((t) => t.id === id)?.model
-        // @ts-ignore
-        window.electron?.ipcRenderer.send('navigate_to_url', id, url, bounds, modelKey)
-        // Ensure the newly loaded tab is visually targeted
-        // @ts-ignore
-        window.electron?.ipcRenderer.send('activate_tab', id, url, bounds, modelKey)
-      }
+      switchToTab(id, url)
     },
-    [tabs]
+    [switchToTab]
   )
 
   const togglePinRef = useRef(togglePin)
@@ -980,24 +1201,44 @@ Acknowledge these skills with a concise confirmation in this exact format:
     }
   }
 
-  // Restore the native webview bounds + focus (used when an overlay closes via Escape)
-  const restoreViewBounds = () => {
-    const rect = containerRef.current?.getBoundingClientRect()
-    if (rect && window.electron) {
-      // @ts-ignore
-      window.electron.ipcRenderer.send('resize_view', {
-        x: Math.max(0, Math.round(rect.x)),
-        y: Math.max(0, Math.round(rect.y)),
-        width: Math.max(0, Math.round(rect.width)),
-        height: Math.max(0, Math.round(rect.height))
-      })
-    }
-  }
+  const anyOverlayOpen = Boolean(
+    showHistory ||
+    showTabOverview ||
+    showSettings ||
+    showNewTab ||
+    showExport ||
+    showUrlBar ||
+    showGuide ||
+    showSkillsPalette ||
+    showBaseSkillsModal ||
+    showSkillParamsModal ||
+    showSkillEditorModal ||
+    showCategoryManagerModal ||
+    showBootSequence ||
+    showDiagnosticsModal ||
+    Boolean(folderUploadData)
+  )
+  const anyOverlayOpenRef = useRef(anyOverlayOpen)
+  anyOverlayOpenRef.current = anyOverlayOpen
 
-  // Recalculate webview bounds whenever chrome layout toggles (titlebar, sidebar, focus mode)
+  // Restore the native webview bounds + focus (used when an overlay closes via Escape)
+  const restoreViewBounds = useCallback(() => {
+    if (anyOverlayOpenRef.current) {
+      return
+    }
+    const bounds = containerBounds()
+    if (bounds && bounds.width > 0 && bounds.height > 0 && window.electron) {
+      // @ts-ignore
+      window.electron.ipcRenderer.send('resize_view', bounds)
+    }
+  }, [])
+
+  // Recalculate webview bounds whenever chrome layout toggles (titlebar, sidebar, focus mode, orientation)
   useEffect(() => {
     restoreViewBounds()
-  }, [interfaceSettings.showTitlebar, sidebarCollapsed, focusMode])
+    const timer = setTimeout(restoreViewBounds, 250)
+    return () => clearTimeout(timer)
+  }, [interfaceSettings.showTitlebar, interfaceSettings.tabOrientation, sidebarCollapsed, focusMode])
 
   // Activate the persisted active tab on mount (creates its view)
   // Startup rehydrate: repair tab urls that regressed to provider home (Bug A)
@@ -1119,41 +1360,18 @@ Acknowledge these skills with a concise confirmation in this exact format:
   // process stops intercepting shortcuts so the overlay keeps its own keys
   // (arrows, Ctrl+J/K navigation, Ctrl+H/L cycling, Escape) working.
   useEffect(() => {
-    const anyOverlayOpen =
-      showHistory ||
-      showTabOverview ||
-      showSettings ||
-      showNewTab ||
-      showExport ||
-      showUrlBar ||
-      showGuide ||
-      showSkillsPalette ||
-      showBaseSkillsModal ||
-      showSkillParamsModal ||
-      showSkillEditorModal ||
-      showCategoryManagerModal ||
-      showBootSequence ||
-      showDiagnosticsModal ||
-      Boolean(folderUploadData)
     // @ts-ignore
     window.electron?.ipcRenderer.send('set_overlays_open', Boolean(anyOverlayOpen))
-  }, [
-    showHistory,
-    showTabOverview,
-    showSettings,
-    showNewTab,
-    showExport,
-    showUrlBar,
-    showGuide,
-    showSkillsPalette,
-    showBaseSkillsModal,
-    showSkillParamsModal,
-    showSkillEditorModal,
-    showCategoryManagerModal,
-    showBootSequence,
-    showDiagnosticsModal,
-    folderUploadData
-  ])
+    if (anyOverlayOpen) {
+      // @ts-ignore
+      window.electron?.ipcRenderer.send('resize_view', { x: 0, y: 0, width: 0, height: 0 })
+      return undefined
+    } else {
+      restoreViewBounds()
+      const t = setTimeout(restoreViewBounds, 80)
+      return () => clearTimeout(t)
+    }
+  }, [anyOverlayOpen, restoreViewBounds])
 
   // Effective keymap → main, so its keyboard router honors user customizations
   // made in Settings → Shortcuts.
@@ -1372,6 +1590,12 @@ Acknowledge these skills with a concise confirmation in this exact format:
           }
           break
         }
+        case 'move_tab': {
+          if (!anyOverlayOpen && activeId) {
+            setTabs((prev) => moveTab(prev, activeId, data.direction))
+          }
+          break
+        }
         case 'upload_file': {
           // @ts-ignore
           window.electron?.ipcRenderer.send('trigger_active_upload')
@@ -1476,14 +1700,14 @@ Acknowledge these skills with a concise confirmation in this exact format:
   useEffect(() => {
     if (!tabsHydrated || tabs.length === 0) return
     try {
-      localStorage.setItem(TABS_STORAGE_KEY, serializeState(tabs, activeId))
+      localStorage.setItem(TABS_STORAGE_KEY, serializeState(tabs, activeId, mruTabIds))
     } catch (e) {
       console.error('Failed to persist tabs:', e)
     }
-    window.nexusState?.save('tabs', { tabs, activeId }).catch((err: Error) => {
+    window.nexusState?.save('tabs', { tabs, activeId, mruTabIds }).catch((err: Error) => {
       console.error('Failed to save tabs to disk:', err)
     })
-  }, [tabs, activeId, tabsHydrated])
+  }, [tabs, activeId, mruTabIds, tabsHydrated])
 
   useEffect(() => {
     const el = containerRef.current
@@ -1498,18 +1722,13 @@ Acknowledge these skills with a concise confirmation in this exact format:
       // the observer fires on layout changes and would otherwise
       // override the 0x0 hide sent by overlay-open handlers.
       if (showBootSequence || showHistory || showTabOverview || showSettings || showNewTab || showExport || showUrlBar || showGuide || showSkillsPalette || showBaseSkillsModal || showSkillParamsModal || showSkillEditorModal || showDiagnosticsModal) return
-      const rect = el.getBoundingClientRect()
-      if (rect.width > 0 && rect.height > 0) {
-        const payload = JSON.stringify({
-          x: Math.round(rect.x),
-          y: Math.round(rect.y),
-          width: Math.round(rect.width),
-          height: Math.round(rect.height)
-        })
+      const bounds = containerBounds()
+      if (bounds && bounds.width > 0 && bounds.height > 0) {
+        const payload = JSON.stringify(bounds)
         if (payload === lastSent) return
         lastSent = payload
         // @ts-ignore
-        window.electron?.ipcRenderer.send('resize_view', JSON.parse(payload))
+        window.electron?.ipcRenderer.send('resize_view', bounds)
       }
     }
 
@@ -1547,103 +1766,95 @@ Acknowledge these skills with a concise confirmation in this exact format:
         />
       )}
       <div className="flex flex-1 min-h-0 w-full overflow-hidden">
-        {/* 1. LEFT SIDEBAR (Pinned Chats) — visible when not in bottom mode */}
-      {!focusMode && interfaceSettings.pinnedPosition !== 'bottom' && (
+        {/* 1. LEFT SIDEBAR: Modern Workspace Navigation Sidebar */}
+      {!focusMode && (interfaceSettings.tabOrientation !== 'horizontal' || interfaceSettings.pinnedPosition !== 'bottom') && (
         <div
-          className={`${sidebarCollapsed ? 'w-16' : 'w-52 md:w-64'} bg-(--surface) border-r border-(--border) flex flex-col shadow-lg z-20 shrink-0 transition-[width] duration-300 ease-in-out overflow-hidden`}
+          className={`${sidebarCollapsed ? 'w-44' : 'w-64'} bg-(--surface) border-r border-(--border) flex flex-col shadow-lg z-20 shrink-0 transition-[width] duration-200 ease-in-out overflow-hidden select-none`}
         >
-          <button
-            onClick={toggleSidebar}
-            title={sidebarCollapsed ? 'Expand Pinned Chats' : 'Collapse Pinned Chats'}
-            className={`p-4 border-b border-(--border) text-(--text2) text-xs font-bold uppercase tracking-widest flex items-center transition-colors hover:text-(--text) ${sidebarCollapsed ? 'justify-center' : 'justify-between'}`}
-          >
-            <div className="flex items-center gap-2">
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
-                width="14"
-                height="14"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                className={sidebarCollapsed ? '' : 'text-(--accent)'}
-              >
-                <path d="m12 2 3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" />
-              </svg>
-              {!sidebarCollapsed && <span>Pinned Chats</span>}
-            </div>
-            {!sidebarCollapsed && (
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
-                width="12"
-                height="12"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                className="transition-transform duration-300"
-              >
-                <path d="m9 18 6-6-6-6" />
-              </svg>
-            )}
-          </button>
+          {/* Header: Toggle Collapse, Title, Search, New Tab */}
+          <div className="flex items-center justify-between p-2 border-b border-(--border)/80 shrink-0 gap-1 bg-(--surface)">
+            <button
+              onClick={toggleSidebar}
+              title={sidebarCollapsed ? 'Expand Sidebar' : 'Collapse Sidebar'}
+              className="p-1.5 rounded-lg text-(--text2) hover:text-(--text) hover:bg-(--surface2) transition-colors cursor-pointer"
+              aria-label={sidebarCollapsed ? 'Expand Sidebar' : 'Collapse Sidebar'}
+            >
+              {sidebarCollapsed ? <IconPanelLeft size={16} /> : <IconPanelLeftClose size={16} />}
+            </button>
 
-          <div
-            className={`flex flex-col p-2 gap-1 overflow-y-auto flex-1 sidebar-chat-tabs ${sidebarCollapsed ? 'items-center' : ''}`}
-          >
-            {tabs
-              .filter((t) => pinnedIds.includes(t.id))
-              .map((t) =>
-                sidebarCollapsed ? (
-                  <button
-                    key={t.id}
-                    className={`group relative flex items-center justify-center w-11 h-11 rounded-xl cursor-pointer transition-colors ${activeId === t.id ? 'bg-(--border) border border-(--accent)/30 shadow-sm' : 'hover:bg-(--border) border border-transparent'}`}
-                    onClick={(e) => {
-                      e.currentTarget.blur()
-                      if (t.url) switchToTab(t.id, t.url)
-                    }}
-                    onContextMenu={(e) => {
-                      e.preventDefault()
-                      togglePin(t.id)
-                    }}
-                    title={`${t.title || 'Pinned Chat'} (${modelLabel(t.model)}) — right-click to unpin`}
-                  >
-                    <div
-                      className="w-9 h-9 rounded-full flex items-center justify-center shrink-0"
-                      style={
-                        BRAND_IDS[t.model]
-                          ? { boxShadow: `0 0 8px ${colorFor(t.model)}` }
-                          : {
-                              background: colorFor(t.model),
-                              boxShadow: `0 0 8px ${colorFor(t.model)}`
-                            }
-                      }
+            {!sidebarCollapsed && (
+              <span className="text-[11px] font-bold uppercase tracking-wider text-(--text2) truncate flex-1 min-w-0 pl-1">
+                Chats ({tabs.length})
+              </span>
+            )}
+
+            <div className="flex items-center gap-1">
+              <button
+                onClick={() => {
+                  setShowUrlBar(true)
+                  captureActiveSnapshot().catch(() => {})
+                }}
+                title="Search / Omnibox (Ctrl+L)"
+                className="p-1.5 rounded-lg text-(--text2) hover:text-(--text) hover:bg-(--surface2) transition-colors cursor-pointer"
+                aria-label="Search"
+              >
+                <IconSearch size={14} />
+              </button>
+
+              <button
+                onClick={() => setShowNewTab(true)}
+                title="New Chat (Ctrl+T)"
+                className="p-1.5 rounded-lg bg-(--surface2) text-(--text) hover:bg-(--accent) hover:text-white transition-colors cursor-pointer"
+                aria-label="New Chat"
+              >
+                <IconPlus size={14} />
+              </button>
+            </div>
+          </div>
+
+          {/* Vertical Tabs Body */}
+          {interfaceSettings.tabOrientation !== 'horizontal' ? (
+            <VerticalTabs
+              tabs={tabs}
+              activeId={activeId}
+              pinnedIds={pinnedIds}
+              tabStatuses={tabStatuses}
+              residentTabIds={residentTabIds}
+              sidebarCollapsed={sidebarCollapsed}
+              onSelect={(id: string) => {
+                const t = tabs.find((x) => x.id === id)
+                if (t && t.url) switchToTab(t.id, t.url)
+              }}
+              onClose={(id: string) => closeTab(id)}
+              onTogglePin={togglePin}
+              onReorder={(sourceId: string, targetId: string) => {
+                setTabs((prev) => reorderTabs(prev, sourceId, targetId))
+              }}
+              modelColors={modelColors}
+            />
+          ) : (
+            <div
+              className={`flex flex-col p-2 gap-1 overflow-y-auto flex-1 sidebar-chat-tabs ${sidebarCollapsed ? 'items-center' : ''}`}
+            >
+              {tabs
+                .filter((t) => pinnedIds.includes(t.id))
+                .map((t) =>
+                  sidebarCollapsed ? (
+                    <button
+                      key={t.id}
+                      className={`group relative flex items-center justify-center w-11 h-11 rounded-xl cursor-pointer transition-colors ${activeId === t.id ? 'bg-(--border) border border-(--accent)/30 shadow-sm' : 'hover:bg-(--border) border border-transparent'}`}
+                      onClick={(e) => {
+                        e.currentTarget.blur()
+                        if (t.url) switchToTab(t.id, t.url)
+                      }}
+                      onContextMenu={(e) => {
+                        e.preventDefault()
+                        togglePin(t.id)
+                      }}
+                      title={`${t.title || 'Pinned Chat'} (${modelLabel(t.model)}) — right-click to unpin`}
                     >
-                      {BRAND_IDS[t.model] && (
-                        <BrandIcon id={t.model} size={20} className="text-(--text) drop-shadow" />
-                      )}
-                    </div>
-                  </button>
-                ) : (
-                  <div
-                    key={t.id}
-                    className={`group relative flex items-center gap-3 p-2 rounded-lg cursor-pointer transition-colors ${activeId === t.id ? 'bg-(--border) border border-(--accent)/30 shadow-sm' : 'hover:bg-(--border) border border-transparent'}`}
-                    onClick={() => {
-                      if (t.url) switchToTab(t.id, t.url)
-                    }}
-                    onContextMenu={(e) => {
-                      e.preventDefault()
-                      togglePin(t.id)
-                    }}
-                    title="Right-click to unpin"
-                  >
-                    <div className="flex flex-col items-center gap-1 shrink-0 w-12">
                       <div
-                        className="w-10 h-10 rounded-full flex items-center justify-center"
+                        className="w-9 h-9 rounded-full flex items-center justify-center shrink-0"
                         style={
                           BRAND_IDS[t.model]
                             ? { boxShadow: `0 0 8px ${colorFor(t.model)}` }
@@ -1654,74 +1865,276 @@ Acknowledge these skills with a concise confirmation in this exact format:
                         }
                       >
                         {BRAND_IDS[t.model] && (
-                          <BrandIcon id={t.model} size={22} className="text-(--text) drop-shadow" />
+                          <BrandIcon id={t.model} size={20} className="text-(--text) drop-shadow" />
                         )}
                       </div>
-                      <span className="text-[10px] leading-none text-(--text2) truncate max-w-[48px]">
-                        {modelLabel(t.model)}
-                      </span>
-                    </div>
-
-                    <div className="flex-1 min-w-0 pr-6">
-                      <div className="text-base font-semibold text-(--text) truncate">
-                        {t.title || 'Pinned Chat'}
-                      </div>
-                      <div className="text-xs text-(--text2) uppercase tracking-wider mt-0.5">
-                        {modelLabel(t.model)}
-                      </div>
-                    </div>
-
-                    <button
-                      className="absolute right-2 opacity-0 group-hover:opacity-100 text-(--text2) hover:text-(--accent) transition-opacity p-1"
-                      onClick={(e) => {
-                        e.stopPropagation()
+                    </button>
+                  ) : (
+                    <div
+                      key={t.id}
+                      className={`group relative flex items-center gap-3 p-2 rounded-lg cursor-pointer transition-colors ${activeId === t.id ? 'bg-(--border) border border-(--accent)/30 shadow-sm' : 'hover:bg-(--border) border border-transparent'}`}
+                      onClick={() => {
+                        if (t.url) switchToTab(t.id, t.url)
+                      }}
+                      onContextMenu={(e) => {
+                        e.preventDefault()
                         togglePin(t.id)
                       }}
-                      title="Unpin"
+                      title="Right-click to unpin"
                     >
-                      <svg
-                        xmlns="http://www.w3.org/2000/svg"
-                        width="14"
-                        height="14"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="2"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
+                      <div className="flex flex-col items-center gap-1 shrink-0 w-12">
+                        <div
+                          className="w-10 h-10 rounded-full flex items-center justify-center"
+                          style={
+                            BRAND_IDS[t.model]
+                              ? { boxShadow: `0 0 8px ${colorFor(t.model)}` }
+                              : {
+                                  background: colorFor(t.model),
+                                  boxShadow: `0 0 8px ${colorFor(t.model)}`
+                                }
+                          }
+                        >
+                          {BRAND_IDS[t.model] && (
+                            <BrandIcon id={t.model} size={22} className="text-(--text) drop-shadow" />
+                          )}
+                        </div>
+                        <span className="text-[10px] leading-none text-(--text2) truncate max-w-[48px]">
+                          {modelLabel(t.model)}
+                        </span>
+                      </div>
+
+                      <div className="flex-1 min-w-0 pr-6">
+                        <div className="text-base font-semibold text-(--text) truncate">
+                          {t.title || 'Pinned Chat'}
+                        </div>
+                        <div className="text-xs text-(--text2) uppercase tracking-wider mt-0.5">
+                          {modelLabel(t.model)}
+                        </div>
+                      </div>
+
+                      <button
+                        className="absolute right-2 opacity-0 group-hover:opacity-100 text-(--text2) hover:text-(--accent) transition-opacity p-1"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          togglePin(t.id)
+                        }}
+                        title="Unpin"
                       >
-                        <path d="m3 3 18 18" />
-                        <path d="M15 9.5V5a2 2 0 0 0-2-2h-2a2 2 0 0 0-2 2v4.5M10.14 10.14 6 13h12l-1.39 2.78M12 18v3" />
-                      </svg>
-                    </button>
-                  </div>
-                )
+                        <svg
+                          xmlns="http://www.w3.org/2000/svg"
+                          width="14"
+                          height="14"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        >
+                          <path d="m3 3 18 18" />
+                          <path d="M15 9.5V5a2 2 0 0 0-2-2h-2a2 2 0 0 0-2 2v4.5M10.14 10.14 6 13h12l-1.39 2.78M12 18v3" />
+                        </svg>
+                      </button>
+                    </div>
+                  )
+                )}
+              {tabs.filter((t) => pinnedIds.includes(t.id)).length === 0 && !sidebarCollapsed && (
+                <div className="flex flex-col items-center justify-center gap-2 px-3 py-6 text-center">
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    width="20"
+                    height="20"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    className="text-(--text2)/50"
+                  >
+                    <path d="m12 2 3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" />
+                  </svg>
+                  <p className="text-[11px] text-(--text2)/70 leading-relaxed">No pinned chats</p>
+                  <p className="text-[10px] text-(--text2)/50 leading-relaxed">
+                    Right-click a tab
+                    <br />
+                    to pin it here
+                  </p>
+                </div>
               )}
-            {tabs.filter((t) => pinnedIds.includes(t.id)).length === 0 && !sidebarCollapsed && (
-              <div className="flex flex-col items-center justify-center gap-2 px-3 py-6 text-center">
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  width="20"
-                  height="20"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.5"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  className="text-(--text2)/50"
-                >
-                  <path d="m12 2 3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" />
-                </svg>
-                <p className="text-[11px] text-(--text2)/70 leading-relaxed">No pinned chats</p>
-                <p className="text-[10px] text-(--text2)/50 leading-relaxed">
-                  Right-click a tab
-                  <br />
-                  to pin it here
-                </p>
+            </div>
+          )}
+
+          {/* Sidebar Footer: HUD Status, Agent Handoff, Tools */}
+          {interfaceSettings.tabOrientation !== 'horizontal' && (
+            <div className="p-2 border-t border-(--border)/80 flex flex-col gap-2 shrink-0 bg-(--surface)">
+              {/* HUD Status Header */}
+              <div className={`flex items-center ${sidebarCollapsed ? 'justify-center' : 'justify-between px-1'}`}>
+                <HudStatusHeader onTriggerBoot={() => setShowBootSequence(true)} />
               </div>
-            )}
-          </div>
+
+              {/* Agent Handoff Export Button */}
+              <button
+                className={`history-btn w-full px-2.5 py-1.5 rounded-lg transition-all flex items-center gap-2 border shadow-xs cursor-pointer ${
+                  showExport
+                    ? 'bg-amber-500/25 border-amber-500/50 text-amber-300'
+                    : 'bg-(--surface2) hover:bg-(--border) border-white/10 text-(--text) hover:border-amber-500/40 hover:text-amber-200'
+                } ${sidebarCollapsed ? 'justify-center' : ''}`}
+                onClick={() => {
+                  const nextState = !showExport
+                  setShowExport(nextState)
+                  if (nextState) {
+                    setShowHistory(false)
+                    setShowSettings(false)
+                    setShowNewTab(false)
+                    // @ts-ignore
+                    window.electron?.ipcRenderer.send('resize_view', { x: 0, y: 0, width: 0, height: 0 })
+                  } else {
+                    restoreViewBounds()
+                  }
+                }}
+                title="Export Compressed Agent Handoff Context (Ctrl+Shift+E)"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className="text-amber-400 shrink-0">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                  <polyline points="7 10 12 15 17 10"/>
+                  <line x1="12" x2="12" y1="15" y2="3"/>
+                </svg>
+                {!sidebarCollapsed && (
+                  <>
+                    <span className="text-xs font-semibold flex-1 text-left truncate">Agent Handoff</span>
+                    <span className="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                      Export
+                    </span>
+                  </>
+                )}
+              </button>
+
+              {/* Navigation Tools Row */}
+              <div className={`flex items-center gap-1.5 ${sidebarCollapsed ? 'justify-center' : 'justify-between'}`}>
+                <button
+                  className="flex-1 bg-(--surface2) hover:bg-(--border) text-(--text) p-1.5 rounded-lg transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+                  onClick={async () => {
+                    const nextState = !showTabOverview
+                    if (nextState) {
+                      await captureActiveSnapshot()
+                    }
+                    setShowTabOverview(nextState)
+                    if (nextState) {
+                      setShowHistory(false)
+                      setShowSettings(false)
+                      setShowNewTab(false)
+                      // @ts-ignore
+                      window.electron?.ipcRenderer.send('resize_view', { x: 0, y: 0, width: 0, height: 0 })
+                    } else {
+                      restoreViewBounds()
+                    }
+                  }}
+                  title={`Tab Overview (${getShortcutKeys('tab-overview').join('+')})`}
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/>
+                    <line x1="8" x2="22" y1="21" y2="21"/>
+                    <line x1="12" x2="12" y1="17" y2="21"/>
+                  </svg>
+                  {!sidebarCollapsed && <span className="text-xs">Tabs</span>}
+                </button>
+
+                <button
+                  className="flex-1 bg-(--surface2) hover:bg-(--border) text-(--text) p-1.5 rounded-lg transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+                  onClick={async () => {
+                    const nextState = !showHistory
+
+                    // @ts-ignore
+                    if (nextState && activeId && window.electron && window.electron.ipcRenderer) {
+                      try {
+                        // @ts-ignore
+                        const snap = await window.electron.ipcRenderer.invoke('capture_tab_snapshot')
+                        if (snap) {
+                          setTabs((prev) =>
+                            prev.map((t) => (t.id === activeId ? { ...t, thumbnail: snap } : t))
+                          )
+                          setHistory((prev) => {
+                            const updated = prev.map((h) =>
+                              h.id === activeId || h.url === tabs.find((t) => t.id === activeId)?.url
+                                ? { ...h, thumbnail: snap }
+                                : h
+                            )
+                            // @ts-ignore
+                            window.electron.ipcRenderer
+                              .invoke('save_history', JSON.stringify(updated))
+                              .catch(() => {})
+                            return updated
+                          })
+                        }
+                      } catch (e) {
+                        console.error(e)
+                      }
+                    }
+
+                    setShowHistory(nextState)
+                    if (nextState) {
+                      setShowSettings(false)
+                      setShowNewTab(false)
+                      // @ts-ignore
+                      window.electron?.ipcRenderer.send('resize_view', {
+                        x: 0,
+                        y: 0,
+                        width: 0,
+                        height: 0
+                      })
+                    } else {
+                      restoreViewBounds()
+                    }
+                  }}
+                  title="History"
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="12" cy="12" r="10" />
+                    <polyline points="12 6 12 12 16 14" />
+                  </svg>
+                  {!sidebarCollapsed && <span className="text-xs">History</span>}
+                </button>
+
+                <button
+                  className="bg-(--surface2) hover:bg-(--border) text-(--text) p-1.5 rounded-lg transition-colors flex items-center justify-center cursor-pointer"
+                  onClick={() => {
+                    const nextState = !showSettings
+                    setShowSettings(nextState)
+                    if (nextState) {
+                      setShowHistory(false)
+                      setShowNewTab(false)
+                      // @ts-ignore
+                      window.electron?.ipcRenderer.send('resize_view', {
+                        x: 0,
+                        y: 0,
+                        width: 0,
+                        height: 0
+                      })
+                    } else {
+                      restoreViewBounds()
+                    }
+                  }}
+                  title="Manage AI Models"
+                >
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    width="14"
+                    height="14"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
+                    <circle cx="12" cy="12" r="3" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -1741,7 +2154,8 @@ Acknowledge these skills with a concise confirmation in this exact format:
           </button>
         )}
 
-        {!focusMode && (
+        {/* Top Navbar ONLY rendered when tabOrientation is explicitly 'horizontal' */}
+        {!focusMode && interfaceSettings.tabOrientation === 'horizontal' && (
           <div
             className="top-navbar flex w-full justify-between items-center bg-(--surface) px-4 py-2 border-b border-(--border) relative z-20 shrink-0 drag-region"
             style={{
@@ -1876,16 +2290,7 @@ Acknowledge these skills with a concise confirmation in this exact format:
                       height: 0
                     })
                   } else {
-                    const rect = containerRef.current?.getBoundingClientRect()
-                    if (rect) {
-                      // @ts-ignore
-                      window.electron?.ipcRenderer.send('resize_view', {
-                        x: Math.round(rect.x),
-                        y: Math.round(rect.y),
-                        width: Math.round(rect.width),
-                        height: Math.round(rect.height)
-                      })
-                    }
+                    restoreViewBounds()
                   }
                 }}
               >
@@ -1907,16 +2312,7 @@ Acknowledge these skills with a concise confirmation in this exact format:
                       height: 0
                     })
                   } else {
-                    const rect = containerRef.current?.getBoundingClientRect()
-                    if (rect) {
-                      // @ts-ignore
-                      window.electron?.ipcRenderer.send('resize_view', {
-                        x: Math.round(rect.x),
-                        y: Math.round(rect.y),
-                        width: Math.round(rect.width),
-                        height: Math.round(rect.height)
-                      })
-                    }
+                    restoreViewBounds()
                   }
                 }}
                 title="Manage AI Models"
@@ -1942,60 +2338,60 @@ Acknowledge these skills with a concise confirmation in this exact format:
 
         {loadingTabId && <div className="ai-loading-bar" />}
 
-        {/* The Native Box Content Bounds */}
+        {/* The Native Box Content Bounds: flush against bottom pinned dock */}
         <div className="flex-1 w-full h-full relative">
           <div className="absolute inset-0" ref={containerRef} />
         </div>
+      </div>
+      </div>
 
-        {/* BOTTOM PINNED CHATS DOCK (Full ChatTabs Parity) */}
-        {!focusMode && interfaceSettings.pinnedPosition === 'bottom' && (
-          <div className="h-14 border-t border-(--border) bg-(--bg) flex items-center px-3 gap-2 shrink-0 select-none z-20 shadow-md">
-            <div className="flex items-center gap-1.5 text-[11px] font-mono uppercase tracking-wider text-(--text2) shrink-0 pr-3 border-r border-(--border)/60">
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
-                width="13"
-                height="13"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                className="text-(--accent)"
-              >
-                <path d="m12 2 3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" />
-              </svg>
-              <span className="hidden sm:inline font-bold text-xs">PINNED</span>
-              <span className="text-[10px] opacity-70 font-mono bg-(--surface2) px-1.5 py-0.5 rounded text-(--accent)">
-                {tabs.filter((t) => pinnedIds.includes(t.id)).length}
-              </span>
-            </div>
-
-            <div className="flex-1 min-w-0">
-              {tabs.filter((t) => pinnedIds.includes(t.id)).length > 0 ? (
-                <ChatTabs
-                  tabs={tabs.filter((t) => pinnedIds.includes(t.id))}
-                  activeId={activeId}
-                  pinnedIds={pinnedIds}
-                  modelColors={modelColors}
-                  onSelect={(id: string) => {
-                    const t = tabs.find((x) => x.id === id)
-                    if (t && t.url) switchToTab(t.id, t.url)
-                  }}
-                  onClose={(id: string) => closeTab(id)}
-                  onTogglePin={togglePin}
-                  alwaysShowTitles={true}
-                />
-              ) : (
-                <span className="text-xs text-(--text2)/50 italic px-2">
-                  No pinned chats (Right-click any tab in the top bar to pin it here)
-                </span>
-              )}
-            </div>
+      {/* BOTTOM PINNED CHATS DOCK (Full Window Width, Undercutting Sidebar) */}
+      {!focusMode && interfaceSettings.pinnedPosition === 'bottom' && (
+        <div className="w-full h-14 border-t border-(--border) bg-(--bg) flex items-center px-3 gap-2 shrink-0 select-none z-20 shadow-md">
+          <div className="flex items-center gap-1.5 text-[11px] font-mono uppercase tracking-wider text-(--text2) shrink-0 pr-3 border-r border-(--border)/60">
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              width="13"
+              height="13"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="text-(--accent)"
+            >
+              <path d="m12 2 3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" />
+            </svg>
+            <span className="hidden sm:inline font-bold text-xs">PINNED</span>
+            <span className="text-[10px] opacity-70 font-mono bg-(--surface2) px-1.5 py-0.5 rounded text-(--accent)">
+              {tabs.filter((t) => pinnedIds.includes(t.id)).length}
+            </span>
           </div>
-        )}
-      </div>
-      </div>
+
+          <div className="flex-1 min-w-0">
+            {tabs.filter((t) => pinnedIds.includes(t.id)).length > 0 ? (
+              <ChatTabs
+                tabs={tabs.filter((t) => pinnedIds.includes(t.id))}
+                activeId={activeId}
+                pinnedIds={pinnedIds}
+                modelColors={modelColors}
+                onSelect={(id: string) => {
+                  const t = tabs.find((x) => x.id === id)
+                  if (t && t.url) switchToTab(t.id, t.url)
+                }}
+                onClose={(id: string) => closeTab(id)}
+                onTogglePin={togglePin}
+                alwaysShowTitles={true}
+              />
+            ) : (
+              <span className="text-xs text-(--text2)/50 italic px-2">
+                No pinned chats (Right-click any tab in the top bar to pin it here)
+              </span>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* OVERLAYS */}
       {showExport && (
@@ -2285,10 +2681,12 @@ Acknowledge these skills with a concise confirmation in this exact format:
           isReady={!loadingTabId}
           onComplete={() => {
             setShowBootSequence(false)
-            restoreViewBounds()
           }}
         />
       )}
+
+      {/* Downloads native toast notification */}
+      <DownloadNotificationToast />
     </div>
   )
 }

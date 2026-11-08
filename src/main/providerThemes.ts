@@ -1641,6 +1641,86 @@ export const PROVIDER_THEMES: ProviderTheme[] = [
         background-color: ${v.accent} !important; color: ${v.bg} !important;
       }
     `
+  },
+  {
+    // Z.ai / GLM-4 — chat.z.ai & bigmodel.cn
+    hosts: ['chat.z.ai', 'z.ai', 'bigmodel.cn'],
+    css: (v) => `
+      ${base(v)}
+      /* Pure themed background for Z.ai outer containers */
+      html, body, #root, #__next, .app, main {
+        background-color: ${v.bg} !important;
+        color: ${v.text} !important;
+      }
+      aside, [class*="sidebar" i], nav {
+        background-color: var(--nexus-code-bg) !important;
+        border-color: ${v.border} !important;
+      }
+      header, [class*="header" i] {
+        background-color: var(--nexus-code-bg) !important;
+        border-color: ${v.border} !important;
+      }
+      /* User message bubble */
+      div[class*="user-message" i], div[class*="userBubble" i], .user-message {
+        ${userBubbleRules(v)}
+        padding: 10px 16px !important;
+      }
+      /* Assistant message */
+      div[class*="assistant" i], div[class*="markdown" i] {
+        color: ${v.text} !important;
+      }
+      /* Composer and inputs */
+      [class*="composer" i], [class*="chat-input" i], [class*="input-box" i], form {
+        background-color: var(--nexus-code-bg) !important;
+        ${composerRules(v)}
+      }
+      textarea, [contenteditable="true"] {
+        background-color: var(--nexus-code-bg) !important;
+        color: ${v.text} !important;
+        caret-color: ${v.accent} !important;
+      }
+      [class*="send"] {
+        background-color: ${v.accent} !important;
+        color: ${v.bg} !important;
+      }
+    `
+  },
+  {
+    // Chatbot Arena — lmarena.ai & chat.lmsys.org
+    hosts: ['lmarena.ai', 'chat.lmsys.org', 'arena.ai'],
+    css: (v) => `
+      ${base(v)}
+      /* Arena / Gradio container theming */
+      html, body, .gradio-container, #component-0, main {
+        background-color: ${v.bg} !important;
+        color: ${v.text} !important;
+      }
+      .dark, body.dark {
+        background-color: ${v.bg} !important;
+      }
+      /* Chatbot conversation bubbles */
+      .message.user, div[data-testid="user"] {
+        ${userBubbleRules(v)}
+        padding: 10px 16px !important;
+      }
+      .message.bot, div[data-testid="bot"] {
+        background-color: var(--nexus-code-bg) !important;
+        color: ${v.text} !important;
+        border: 1px solid ${v.border} !important;
+        border-radius: ${v.radius ?? 8}px !important;
+      }
+      /* Text input & buttons */
+      textarea, input {
+        background-color: var(--nexus-code-bg) !important;
+        color: ${v.text} !important;
+        border-color: ${v.border} !important;
+        caret-color: ${v.accent} !important;
+      }
+      button.primary {
+        background-color: ${v.accent} !important;
+        color: ${v.bg} !important;
+      }
+    `
   }
 ]
 

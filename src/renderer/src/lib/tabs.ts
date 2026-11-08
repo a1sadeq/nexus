@@ -97,6 +97,39 @@ export function addNewChat(
   return { tabs: [...tabs, created], activeId: created.id }
 }
 
+/**
+ * Moves a tab up or down in the array.
+ * Direction 'up' (Ctrl+Shift+K): moves tab toward index 0.
+ * Direction 'down' (Ctrl+Shift+J): moves tab toward index length - 1.
+ */
+export function moveTab(tabs: Tab[], id: string, direction: 'up' | 'down'): Tab[] {
+  const idx = tabs.findIndex((t) => t.id === id)
+  if (idx === -1) return tabs
+
+  const targetIdx = direction === 'up' ? idx - 1 : idx + 1
+  if (targetIdx < 0 || targetIdx >= tabs.length) return tabs
+
+  const next = [...tabs]
+  const [removed] = next.splice(idx, 1)
+  next.splice(targetIdx, 0, removed)
+  return next
+}
+
+/**
+ * Reorders tabs by moving sourceId before or after targetId (for mouse drag and drop).
+ */
+export function reorderTabs(tabs: Tab[], sourceId: string, targetId: string): Tab[] {
+  if (sourceId === targetId) return tabs
+  const sourceIdx = tabs.findIndex((t) => t.id === sourceId)
+  const targetIdx = tabs.findIndex((t) => t.id === targetId)
+  if (sourceIdx === -1 || targetIdx === -1) return tabs
+
+  const next = [...tabs]
+  const [removed] = next.splice(sourceIdx, 1)
+  next.splice(targetIdx, 0, removed)
+  return next
+}
+
 export interface ClosedTabEntry {
   tab: Tab
   index: number
@@ -153,13 +186,13 @@ export function countModelUsage(tabs: Tab[], history: HistoryItem[]): Record<str
   return counts
 }
 
-export function serializeState(tabs: Tab[], activeId: string | null): string {
-  return JSON.stringify({ tabs, activeId })
+export function serializeState(tabs: Tab[], activeId: string | null, mruTabIds?: string[]): string {
+  return JSON.stringify({ tabs, activeId, mruTabIds })
 }
 
 export function deserializeState(
   raw: string | null
-): { tabs: Tab[]; activeId: string | null } | null {
+): { tabs: Tab[]; activeId: string | null; mruTabIds?: string[] } | null {
   if (!raw) return null
   try {
     const parsed = JSON.parse(raw)
@@ -178,10 +211,44 @@ export function deserializeState(
       typeof parsed?.activeId === 'string' && tabs.some((t) => t.id === parsed.activeId)
         ? parsed.activeId
         : tabs[0].id
-    return { tabs, activeId }
+    const mruTabIds = Array.isArray(parsed?.mruTabIds)
+      ? (parsed.mruTabIds as unknown[]).filter((id): id is string => typeof id === 'string' && tabs.some((t) => t.id === id))
+      : undefined
+    return { tabs, activeId, mruTabIds }
   } catch {
     return null
   }
+}
+
+export function getRecentActiveTabIds(
+  tabs: Tab[],
+  activeId: string | null,
+  mruTabIds?: string[],
+  limit = 5
+): string[] {
+  const allIds = tabs.map((t) => t.id)
+  if (allIds.length === 0) return []
+
+  const order = mruTabIds && mruTabIds.length > 0 ? mruTabIds : allIds
+  const orderedValid = order.filter((id) => allIds.includes(id))
+
+  const effectiveMru: string[] = []
+  if (activeId && allIds.includes(activeId)) {
+    effectiveMru.push(activeId)
+  }
+  for (const id of orderedValid) {
+    if (!effectiveMru.includes(id)) {
+      effectiveMru.push(id)
+    }
+  }
+  for (const id of allIds) {
+    if (!effectiveMru.includes(id)) {
+      effectiveMru.push(id)
+    }
+  }
+
+  const effectiveLimit = limit > 0 ? limit : allIds.length
+  return effectiveMru.slice(0, effectiveLimit)
 }
 
 function originOf(url: string): string {

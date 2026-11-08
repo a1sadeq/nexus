@@ -44,6 +44,7 @@ export interface EvictedTabState {
 export interface TabDiscardManagerOptions {
   getUserDataDir: () => string
   isPinned?: (tabId: string) => boolean
+  isBusy?: (tabId: string) => boolean
   onTeardown?: (tabId: string, view: DiscardableView, contents: DiscardableWebContents) => void | Promise<void>
   snapshotTimeoutMs?: number
   idleCheckIntervalMs?: number
@@ -75,6 +76,7 @@ export class TabDiscardManager {
 
   private readonly getUserDataDir: () => string
   private readonly isPinned: (tabId: string) => boolean
+  private readonly isBusy: (tabId: string) => boolean
   private readonly onTeardown: (tabId: string, view: DiscardableView, contents: DiscardableWebContents) => void | Promise<void>
   private readonly snapshotTimeoutMs: number
   private readonly clock: () => number
@@ -86,13 +88,35 @@ export class TabDiscardManager {
 
   private idleIntervalTimer: NodeJS.Timeout | null = null
 
+  private statusListeners: Array<(status: TabDiscardStatus) => void> = []
+
   constructor(options: TabDiscardManagerOptions) {
     this.getUserDataDir = options.getUserDataDir
     this.isPinned = options.isPinned || (() => false)
+    this.isBusy = options.isBusy || (() => false)
     this.onTeardown = options.onTeardown || ((_id, _view, contents) => closeWebContents(contents))
     this.idleCheckIntervalMs = Math.max(1000, options.idleCheckIntervalMs ?? 30000)
     this.snapshotTimeoutMs = options.snapshotTimeoutMs ?? 1500
     this.clock = options.clock || (() => Date.now())
+  }
+
+  public onStatusChange(listener: (status: TabDiscardStatus) => void): () => void {
+    this.statusListeners.push(listener)
+    return () => {
+      this.statusListeners = this.statusListeners.filter((l) => l !== listener)
+    }
+  }
+
+  public notifyStatusChange(): void {
+    if (this.statusListeners.length === 0) return
+    const status = this.getStatus()
+    for (const listener of this.statusListeners) {
+      try {
+        listener(status)
+      } catch (err) {
+        console.error('[tabDiscardManager] Status listener error:', err)
+      }
+    }
   }
 
   public getPolicyFilePath(): string {
@@ -254,6 +278,8 @@ export class TabDiscardManager {
     return {
       residentCount,
       discardedCount,
+      residentTabIds: Array.from(this.views.keys()),
+      discardedTabIds: Array.from(this.evictedTabStates.keys()),
       pendingCount,
       protectedCount,
       effectiveCapExceeded,
@@ -300,6 +326,7 @@ export class TabDiscardManager {
     if (this.policy.maxActiveTabs > 0) {
       this.reconcileCapacity()
     }
+    this.notifyStatusChange()
   }
 
   public activateTab(tabId: string): void {
@@ -363,6 +390,7 @@ export class TabDiscardManager {
       if (!await this.teardown(tabId, view, forget)) return false
     } else forget()
     this.reconcileCapacity()
+    this.notifyStatusChange()
     return true
   }
 
@@ -429,10 +457,16 @@ export class TabDiscardManager {
   }
 
   private protectedFromEviction(tabId: string, view: DiscardableView | undefined): boolean {
-    return tabId === this.activeViewId || this.pendingTickets.has(tabId) ||
-      this.closing.has(tabId) || this.isPinned(tabId) || this.loadingOrUnavailable(tabId, view) ||
+    return (
+      tabId === this.activeViewId ||
+      this.pendingTickets.has(tabId) ||
+      this.closing.has(tabId) ||
+      this.isPinned(tabId) ||
+      this.isBusy(tabId) ||
+      this.loadingOrUnavailable(tabId, view) ||
       !this.hasUsableRestoreUrl(tabId, view) ||
       (this.retryAfter.get(tabId) ?? 0) > this.clock()
+    )
   }
 
   public getUsableRestoreUrl(tabId: string, fallbackUrl?: string | null): string | null {
@@ -461,6 +495,14 @@ export class TabDiscardManager {
 
   public isTabEvicted(tabId: string): boolean {
     return this.evictedTabStates.has(tabId)
+  }
+
+  public getResidentTabIds(): string[] {
+    return Array.from(this.views.keys())
+  }
+
+  public getDiscardedTabIds(): string[] {
+    return Array.from(this.evictedTabStates.keys())
   }
 
   public getView(tabId: string): DiscardableView | undefined {
@@ -644,6 +686,7 @@ export class TabDiscardManager {
       this.retryAfter.delete(tabId)
       this.lastEviction = { tabId, reason: ticket.reason, timestamp: this.clock() }
       this.reconcileCapacity()
+      this.notifyStatusChange()
     })
 
     return true

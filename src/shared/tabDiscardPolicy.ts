@@ -10,6 +10,8 @@ export interface TabDiscardStatus {
   lastTeardownError?: string | null
   residentCount: number
   discardedCount: number
+  residentTabIds?: string[]
+  discardedTabIds?: string[]
   pendingCount: number
   protectedCount: number
   effectiveCapExceeded: boolean
@@ -26,7 +28,7 @@ export interface TabDiscardStatus {
 export const DEFAULT_TAB_DISCARD_POLICY: TabDiscardPolicy = {
   version: 1,
   tabDiscardMinutes: 10,
-  maxActiveTabs: 3
+  maxActiveTabs: 10
 }
 
 export const VALID_DISCARD_MINUTES = [0, 5, 10, 30, 60] as const

@@ -124,7 +124,7 @@ const ZAI_FEATURES: ProviderFeatureConfig = {
   newChatSelector:
     'button[aria-label*="new" i], button[aria-label*="新建" i], button[aria-label*="新对话" i], button[data-testid*="new-chat" i]',
   stopGenerationSelector:
-    'button[aria-label*="stop" i], button[aria-label*="停止" i], button[data-testid*="stop" i], button[class*="stop" i]',
+    'button[aria-label*="stop" i], button[aria-label*="停止" i], button[title*="停止" i], button[data-testid*="stop" i], button:has(svg.lucide-square), button:has(rect), button[class*="stop" i]',
   virtualizationSelector:
     '[id^="message-"], [data-message-id], [data-message-author-role], div[class*="message-id" i], div[class*="conversation-turn" i], article[class*="message" i]',
   enableSlashFocus: true,
@@ -275,7 +275,7 @@ export const DEFAULT_PROVIDER_FEATURES: Record<string, ProviderFeatureConfig> = 
     sendButtonSelector: 'button[aria-label*="Send"], button[type="submit"], button[data-testid*="send"], .send-button',
     autoSubmitSkillPrompt: true,
     newChatSelector: 'a[href*="new"], a[href*="chat"], button[aria-label*="New"], button[class*="new"]',
-    stopGenerationSelector: 'button[aria-label*="Stop"], button[class*="stop"]',
+    stopGenerationSelector: 'button[aria-label*="Stop" i], button[aria-label*="停止" i], button[data-testid*="stop" i], button:has(svg.lucide-square), button:has(rect), button[class*="stop" i]',
     virtualizationSelector: '[class*="user"], [class*="assistant"], [class*="message"]',
     enableSlashFocus: true,
     enableFocusRetention: true,

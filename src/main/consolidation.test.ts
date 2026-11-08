@@ -11,7 +11,7 @@ import {
 import { join } from 'node:path'
 import { consolidateLegacyConfigDir } from './migrations/consolidateLegacyConfigDir'
 
-const testRoot = join('/tmp', `nexus-consolidation-test-${Date.now()}`)
+const testRoot = join('/tmp', `nexus-consolidation-test-${Date.now()}-${Math.random().toString(36).slice(2)}`)
 
 vi.mock('electron', () => ({
   app: {
@@ -95,5 +95,26 @@ describe('Legacy Config Directory Archive Consolidation (T-A4, T-A5, T-A6)', () 
 
     // Second run does nothing and doesn't throw
     expect(() => consolidateLegacyConfigDir(testRoot)).not.toThrow()
+  })
+
+  it('T-A7: skips migration safely if legacy and live point to the exact same directory', () => {
+    const customRoot = join(testRoot, 'case-alias')
+    mkdirSync(customRoot, { recursive: true })
+    const singleDir = join(customRoot, 'nexus')
+    mkdirSync(singleDir, { recursive: true })
+    writeFileSync(join(singleDir, 'active_profile.json'), '{"live":true}', 'utf-8')
+
+    // If Nexus points to nexus (via symlink or same dir), it must be an immediate no-op
+    const symlinkLegacy = join(customRoot, 'Nexus')
+    try {
+      const { symlinkSync } = require('node:fs')
+      symlinkSync(singleDir, symlinkLegacy, 'dir')
+    } catch {}
+
+    consolidateLegacyConfigDir(customRoot)
+
+    expect(existsSync(join(singleDir, 'active_profile.json'))).toBe(true)
+    const archives = readdirSync(customRoot).filter((d) => d.startsWith('Nexus.archived-'))
+    expect(archives.length).toBe(0)
   })
 })

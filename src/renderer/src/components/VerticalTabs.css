@@ -1,0 +1,92 @@
+/* VerticalTabs — Spatial Cockpit Arc-Reactor & Session Separation Styling */
+
+.vertical-tab-active-core-dot {
+  position: relative;
+  width: 6px;
+  height: 6px;
+  border-radius: 9999px;
+  background: radial-gradient(
+    circle at 35% 35%,
+    #ffffff 0%,
+    var(--provider-gradient-start, #00e5ff) 65%,
+    var(--provider-gradient-end, #4f46e5) 100%
+  );
+  box-shadow: 0 0 10px var(--provider-gradient-start, #00e5ff);
+  flex-shrink: 0;
+}
+
+.vertical-tab-active-core-dot::after {
+  content: "";
+  position: absolute;
+  inset: -2px;
+  border-radius: 9999px;
+  border: 1.5px solid var(--provider-gradient-start, #00e5ff);
+  opacity: 0.8;
+  pointer-events: none;
+  animation: verticalTabRadarRipple 2.6s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+  will-change: transform, opacity;
+}
+
+@keyframes verticalTabRadarRipple {
+  0% {
+    transform: scale(0.9);
+    opacity: 0.85;
+  }
+  60% {
+    transform: scale(2.6);
+    opacity: 0;
+  }
+  100% {
+    transform: scale(2.6);
+    opacity: 0;
+  }
+}
+
+.vertical-tab-arc-reactor {
+  position: relative;
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--provider-gradient-start, #00e5ff) 36%, rgba(12, 18, 32, 0.96)),
+    color-mix(in srgb, var(--provider-gradient-end, #4f46e5) 28%, rgba(6, 10, 18, 0.98))
+  ) !important;
+  border-color: color-mix(in srgb, var(--provider-gradient-start, #00e5ff) 80%, #ffffff 20%) !important;
+  box-shadow:
+    0 0 16px color-mix(in srgb, var(--provider-gradient-start, #00e5ff) 40%, transparent),
+    0 0 32px color-mix(in srgb, var(--provider-gradient-end, #4f46e5) 22%, transparent),
+    inset 0 1px 0 rgba(255, 255, 255, 0.4);
+}
+
+.vertical-tab-arc-reactor::before {
+  content: "";
+  position: absolute;
+  inset: -2px;
+  border-radius: inherit;
+  pointer-events: none;
+  opacity: 0;
+  box-shadow:
+    0 0 14px color-mix(in srgb, var(--provider-gradient-start, var(--provider-color, #00e5ff)) 65%, transparent),
+    0 0 28px color-mix(in srgb, var(--provider-gradient-end, var(--provider-color, #00e5ff)) 30%, transparent),
+    inset 0 0 10px color-mix(in srgb, var(--provider-gradient-start, var(--provider-color, #00e5ff)) 50%, transparent);
+  animation: verticalTabArcBreathe 2.6s ease-in-out infinite;
+  will-change: opacity, transform;
+}
+
+@keyframes verticalTabArcBreathe {
+  0%, 100% {
+    opacity: 0.65;
+    transform: scale(0.98);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.02);
+  }
+}
+
+.vertical-tab-sleeping {
+  opacity: 0.72;
+  transition: opacity 0.2s ease, background 0.2s ease, border-color 0.2s ease;
+}
+
+.vertical-tab-sleeping:hover {
+  opacity: 1;
+}

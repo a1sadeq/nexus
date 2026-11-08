@@ -2,11 +2,11 @@
 // command execution, project directory scoping, and dynamic variable templating.
 import fs from 'fs'
 import path from 'path'
-import { exec } from 'child_process'
+import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { app } from 'electron'
 
-const execP = promisify(exec)
+const execFileP = promisify(execFile)
 
 export interface SkillVariable {
   name: string
@@ -334,6 +334,21 @@ Refactor the following code for maximum readability, maintainability, and type s
 3. **Preserve Behavior**: Ensure 100% backward compatibility and test coverage.`
   }
 ]
+
+const DANGEROUS_SHELL_PATTERN = /[;&|><$`\n\r\\]/
+
+function tokenizeCommand(cmdStr: string): string[] | null {
+  const trimmed = cmdStr.trim()
+  if (!trimmed) return null
+  const matches = trimmed.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g)
+  if (!matches || matches.length === 0) return null
+  return matches.map((token) => {
+    if ((token.startsWith('"') && token.endsWith('"')) || (token.startsWith("'") && token.endsWith("'"))) {
+      return token.slice(1, -1)
+    }
+    return token
+  })
+}
 
 export class SkillsEngine {
   private skillsDir: string
@@ -814,20 +829,51 @@ export class SkillsEngine {
     try {
       let resolved = filePath.trim()
       if (!path.isAbsolute(resolved)) {
-        const base = projectDir && fs.existsSync(projectDir) ? projectDir : process.cwd()
+        const base = projectDir && fs.existsSync(projectDir) ? projectDir : this.getSkillsDirectory()
         resolved = path.resolve(base, resolved)
+      } else {
+        resolved = path.resolve(resolved)
+      }
+
+      // Block reading sensitive credential and secret files immediately
+      const baseName = path.basename(resolved)
+      if (
+        baseName.startsWith('.env') ||
+        /\.(pem|key|pfx|pkcs12)$/i.test(baseName) ||
+        /id_rsa|id_ed25519/i.test(baseName)
+      ) {
+        return { success: false, error: 'Access denied: cannot read sensitive or secret credential files.' }
       }
 
       if (!fs.existsSync(resolved)) {
         return { success: false, error: `File not found: ${resolved}` }
       }
 
-      const stats = fs.statSync(resolved)
+      // Canonical path containment verification
+      const realTarget = fs.realpathSync(resolved)
+      const allowedRoots: string[] = []
+      if (projectDir && fs.existsSync(projectDir)) {
+        try { allowedRoots.push(fs.realpathSync(projectDir)) } catch {}
+      }
+      const skillsDir = this.getSkillsDirectory()
+      if (skillsDir && fs.existsSync(skillsDir)) {
+        try { allowedRoots.push(fs.realpathSync(skillsDir)) } catch {}
+      }
+
+      const isContained = allowedRoots.some((root) => {
+        return realTarget === root || realTarget.startsWith(root + path.sep)
+      })
+
+      if (allowedRoots.length > 0 && !isContained) {
+        return { success: false, error: 'Access denied: path is outside allowed project or skills directory.' }
+      }
+
+      const stats = fs.statSync(realTarget)
       if (stats.size > 2 * 1024 * 1024) {
         return { success: false, error: `File too large (${(stats.size / 1024 / 1024).toFixed(1)}MB). Max supported size is 2MB.` }
       }
 
-      const content = fs.readFileSync(resolved, 'utf8')
+      const content = fs.readFileSync(realTarget, 'utf8')
       return { success: true, content }
     } catch (err) {
       return { success: false, error: (err as Error).message }
@@ -869,7 +915,7 @@ export class SkillsEngine {
     try {
       const current = this.getSafeCommands()
       const normalized = cmd.trim()
-      if (!normalized) return false
+      if (!normalized || DANGEROUS_SHELL_PATTERN.test(normalized)) return false
       if (!current.includes(normalized)) {
         current.push(normalized)
         fs.writeFileSync(this.safeCommandsFile, JSON.stringify(current, null, 2), 'utf8')
@@ -892,6 +938,9 @@ export class SkillsEngine {
 
   public isSafeCommand(cmd: string): boolean {
     const trimmed = cmd.trim()
+    if (!trimmed || DANGEROUS_SHELL_PATTERN.test(trimmed)) {
+      return false
+    }
     const allowed = this.getSafeCommands()
     return allowed.some((safe) => trimmed === safe || trimmed.startsWith(`${safe} `))
   }
@@ -899,14 +948,20 @@ export class SkillsEngine {
   public async executeSkillCommand(
     command: string,
     projectDir?: string,
-    requireSecurityCheck: boolean = true
+    _requireSecurityCheck: boolean = true
   ): Promise<{ success: boolean; stdout?: string; stderr?: string; error?: string; needsApproval?: boolean }> {
     try {
-      if (requireSecurityCheck && !this.isSafeCommand(command)) {
+      if (!this.isSafeCommand(command)) {
         return { success: false, needsApproval: true, error: `Command "${command}" requires user approval.` }
       }
+      const tokens = tokenizeCommand(command)
+      if (!tokens || tokens.length === 0) {
+        return { success: false, error: 'Empty command' }
+      }
+      const file = tokens[0]
+      const args = tokens.slice(1)
       const cwd = projectDir && fs.existsSync(projectDir) ? projectDir : process.cwd()
-      const { stdout, stderr } = await execP(command, { cwd, timeout: 15000, maxBuffer: 1024 * 1024 })
+      const { stdout, stderr } = await execFileP(file, args, { cwd, timeout: 15000, maxBuffer: 1024 * 1024 })
       return { success: true, stdout, stderr }
     } catch (err) {
       return { success: false, error: (err as Error).message }
@@ -924,7 +979,9 @@ export class SkillsEngine {
         const entries = fs.readdirSync(currentDir, { withFileTypes: true })
         for (const entry of entries) {
           if (results.length >= maxResults) break
-          if (entry.name.startsWith('.') && entry.name !== '.env') continue
+          if (entry.name.startsWith('.')) continue
+          if (/\.(pem|key|pfx|pkcs12|crt)$/i.test(entry.name)) continue
+          if (/id_rsa|id_ed25519/i.test(entry.name)) continue
           if (entry.isDirectory()) {
             if (ignoreDirs.has(entry.name)) continue
             traverse(path.join(currentDir, entry.name), path.join(relativeRoot, entry.name))

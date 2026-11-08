@@ -12,3 +12,4 @@ nohup.out
 .env.*
 .vscode
 *.tsbuildinfo
+AI-DEEP-REVIEW-PACKAGE*

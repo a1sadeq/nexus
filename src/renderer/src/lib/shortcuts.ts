@@ -76,17 +76,31 @@ export const DEFAULT_SHORTCUTS: ShortcutDef[] = [
   },
   {
     id: 'tab-prev',
-    action: 'Previous Tab',
-    desc: 'Switch to the left adjacent tab',
+    action: 'Previous Tab (Up)',
+    desc: 'Switch to the tab above',
+    category: 'tabs',
+    defaultKeys: ['Ctrl', 'K']
+  },
+  {
+    id: 'tab-next',
+    action: 'Next Tab (Down)',
+    desc: 'Switch to the tab below',
     category: 'tabs',
     defaultKeys: ['Ctrl', 'J']
   },
   {
-    id: 'tab-next',
-    action: 'Next Tab',
-    desc: 'Switch to the right adjacent tab',
+    id: 'tab-move-up',
+    action: 'Move Tab Up',
+    desc: 'Move the active tab upward in the list',
     category: 'tabs',
-    defaultKeys: ['Ctrl', 'K']
+    defaultKeys: ['Ctrl', 'Shift', 'K']
+  },
+  {
+    id: 'tab-move-down',
+    action: 'Move Tab Down',
+    desc: 'Move the active tab downward in the list',
+    category: 'tabs',
+    defaultKeys: ['Ctrl', 'Shift', 'J']
   },
   {
     id: 'tab-cycle',

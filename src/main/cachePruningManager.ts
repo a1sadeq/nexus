@@ -97,7 +97,7 @@ export function cleanOrphanedTempFiles(userDataDir: string = app.getPath('userDa
         const fullPath = join(userDataDir, file)
         try {
           const st = statSync(fullPath)
-          if (now - st.mtimeMs >= maxAgeMs) {
+          if (maxAgeMs === 0 || now - st.mtimeMs >= maxAgeMs) {
             rmSync(fullPath, { recursive: true, force: true })
           }
         } catch {

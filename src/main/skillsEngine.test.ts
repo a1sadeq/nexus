@@ -103,4 +103,23 @@ describe('skillsEngine command safety & whitelist', () => {
     expect(res.success).toBe(false)
     expect(res.needsApproval).toBe(true)
   })
+
+  it('rejects commands containing shell metacharacters even if starting with safe command', async () => {
+    const { skillsEngine } = await import('./skillsEngine')
+    expect(skillsEngine.isSafeCommand('git status; rm -rf /')).toBe(false)
+    expect(skillsEngine.isSafeCommand('git status && echo evil')).toBe(false)
+    expect(skillsEngine.isSafeCommand('git diff | cat /etc/passwd')).toBe(false)
+    expect(skillsEngine.isSafeCommand('ls `id`')).toBe(false)
+    expect(skillsEngine.isSafeCommand('pwd $(whoami)')).toBe(false)
+  })
+
+  it('rejects reading secret files (.env, .pem, id_rsa) in readSkillFile', async () => {
+    const { skillsEngine } = await import('./skillsEngine')
+    const res1 = await skillsEngine.readSkillFile('.env', process.cwd())
+    expect(res1.success).toBe(false)
+    expect(res1.error).toContain('Access denied')
+
+    const res2 = await skillsEngine.readSkillFile('server.key', process.cwd())
+    expect(res2.success).toBe(false)
+  })
 })

@@ -7,12 +7,15 @@ import {
   addNewChat,
   serializeState,
   deserializeState,
+  getRecentActiveTabIds,
   isProviderHomeUrl,
   isIgnoredHistoryUrl,
   isDefaultOrGenericTitle,
   sanitizeHistory,
   pushClosedTab,
   reopenClosedTab,
+  moveTab,
+  reorderTabs,
   type Tab,
   type ModelKey,
   type HistoryItem
@@ -166,6 +169,34 @@ describe('serializeState / deserializeState', () => {
     expect(res.activeId).toBe('g1')
   })
 
+  it('round-trips tabs and activeId with mruTabIds', () => {
+    const tabs = [
+      tab({ id: 'g1', model: 'gemini' }),
+      tab({ id: 'g2', model: 'chatgpt' }),
+      tab({ id: 'g3', model: 'claude' })
+    ]
+    const raw = serializeState(tabs, 'g2', ['g2', 'g3', 'g1'])
+    const res = deserializeState(raw)!
+    expect(res.tabs).toEqual(tabs)
+    expect(res.activeId).toBe('g2')
+    expect(res.mruTabIds).toEqual(['g2', 'g3', 'g1'])
+  })
+
+  it('getRecentActiveTabIds prioritizes activeId and respects limit', () => {
+    const tabs = [
+      tab({ id: 't1' }),
+      tab({ id: 't2' }),
+      tab({ id: 't3' }),
+      tab({ id: 't4' }),
+      tab({ id: 't5' }),
+      tab({ id: 't6' })
+    ]
+    const mru = ['t3', 't1', 't5', 't2', 't6', 't4']
+    const active = getRecentActiveTabIds(tabs, 't5', mru, 5)
+    expect(active).toEqual(['t5', 't3', 't1', 't2', 't6'])
+    expect(active.length).toBe(5)
+  })
+
   it('returns null on invalid JSON', () => {
     expect(deserializeState('not json')).toBeNull()
   })
@@ -279,5 +310,53 @@ describe('sanitizeHistory', () => {
     expect(clean[0].title).toBe('Real Chat 1')
     expect(clean[1].title).toBe('Real Chat 2')
     expect(clean[0].id).not.toBe(clean[1].id)
+  })
+})
+
+describe('moveTab (Vim Tab Reordering)', () => {
+  const t1 = tab({ id: 't1', title: 'First' })
+  const t2 = tab({ id: 't2', title: 'Second' })
+  const t3 = tab({ id: 't3', title: 'Third' })
+
+  it('moves tab up toward index 0 (Ctrl+Shift+K)', () => {
+    const list = [t1, t2, t3]
+    const updated = moveTab(list, 't2', 'up')
+    expect(updated.map((t) => t.id)).toEqual(['t2', 't1', 't3'])
+  })
+
+  it('does not move past top boundary', () => {
+    const list = [t1, t2, t3]
+    const updated = moveTab(list, 't1', 'up')
+    expect(updated.map((t) => t.id)).toEqual(['t1', 't2', 't3'])
+  })
+
+  it('moves tab down toward end (Ctrl+Shift+J)', () => {
+    const list = [t1, t2, t3]
+    const updated = moveTab(list, 't2', 'down')
+    expect(updated.map((t) => t.id)).toEqual(['t1', 't3', 't2'])
+  })
+
+  it('does not move past bottom boundary', () => {
+    const list = [t1, t2, t3]
+    const updated = moveTab(list, 't3', 'down')
+    expect(updated.map((t) => t.id)).toEqual(['t1', 't2', 't3'])
+  })
+})
+
+describe('reorderTabs (Mouse Drag and Drop)', () => {
+  const t1 = tab({ id: 't1', title: 'First' })
+  const t2 = tab({ id: 't2', title: 'Second' })
+  const t3 = tab({ id: 't3', title: 'Third' })
+
+  it('reorders sourceId to targetId position', () => {
+    const list = [t1, t2, t3]
+    const reordered = reorderTabs(list, 't3', 't1')
+    expect(reordered.map((t) => t.id)).toEqual(['t3', 't1', 't2'])
+  })
+
+  it('returns original list if sourceId equals targetId or is not found', () => {
+    const list = [t1, t2, t3]
+    expect(reorderTabs(list, 't2', 't2')).toBe(list)
+    expect(reorderTabs(list, 't999', 't1')).toBe(list)
   })
 })

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { sfx } from '../lib/soundFx'
 import type { AppTheme, ThemeColors, ThemeState } from '../lib/themes'
 import { PRESET_THEMES, DEFAULT_THEME_ID, applyTheme } from '../lib/themes'
 import type { ModelDef } from '../App'
@@ -90,103 +91,6 @@ const COLOR_LABELS: { key: keyof AppTheme['colors']; label: string }[] = [
 
 const COLOR_KEYS = ['bg', 'surface', 'surface2', 'accent', 'text', 'text2', 'border'] as const
 type ColorKey = (typeof COLOR_KEYS)[number]
-
-// ============================================================================
-// Web Audio API Synthesizer (Zero dependencies, crisp haptic-like sound)
-// ============================================================================
-class SoundFX {
-  private ctx: AudioContext | null = null
-  private enabled = true
-
-  constructor() {
-    try {
-      const saved = localStorage.getItem('nexus.settings_sfx')
-      this.enabled = saved !== 'false'
-    } catch {}
-  }
-
-  get isEnabled() {
-    return this.enabled
-  }
-
-  toggle() {
-    this.enabled = !this.enabled
-    try {
-      localStorage.setItem('nexus.settings_sfx', String(this.enabled))
-    } catch {}
-    if (this.enabled) this.pop()
-    return this.enabled
-  }
-
-  private initCtx() {
-    if (!this.ctx && typeof window !== 'undefined') {
-      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext
-      if (AudioCtx) this.ctx = new AudioCtx()
-    }
-    if (this.ctx && this.ctx.state === 'suspended') {
-      this.ctx.resume().catch(() => {})
-    }
-  }
-
-  click() {
-    if (!this.enabled) return
-    try {
-      this.initCtx()
-      if (!this.ctx) return
-      const osc = this.ctx.createOscillator()
-      const gain = this.ctx.createGain()
-      osc.type = 'sine'
-      osc.frequency.setValueAtTime(800, this.ctx.currentTime)
-      osc.frequency.exponentialRampToValueAtTime(300, this.ctx.currentTime + 0.035)
-      gain.gain.setValueAtTime(0.05, this.ctx.currentTime)
-      gain.gain.linearRampToValueAtTime(0.001, this.ctx.currentTime + 0.035)
-      osc.connect(gain)
-      gain.connect(this.ctx.destination)
-      osc.start()
-      osc.stop(this.ctx.currentTime + 0.04)
-    } catch {}
-  }
-
-  pop() {
-    if (!this.enabled) return
-    try {
-      this.initCtx()
-      if (!this.ctx) return
-      const osc = this.ctx.createOscillator()
-      const gain = this.ctx.createGain()
-      osc.type = 'triangle'
-      osc.frequency.setValueAtTime(520, this.ctx.currentTime)
-      osc.frequency.exponentialRampToValueAtTime(1040, this.ctx.currentTime + 0.06)
-      gain.gain.setValueAtTime(0.06, this.ctx.currentTime)
-      gain.gain.linearRampToValueAtTime(0.001, this.ctx.currentTime + 0.06)
-      osc.connect(gain)
-      gain.connect(this.ctx.destination)
-      osc.start()
-      osc.stop(this.ctx.currentTime + 0.065)
-    } catch {}
-  }
-
-  chime() {
-    if (!this.enabled) return
-    try {
-      this.initCtx()
-      if (!this.ctx) return
-      ;[523.25, 659.25, 783.99].forEach((freq, i) => {
-        const osc = this.ctx!.createOscillator()
-        const gain = this.ctx!.createGain()
-        osc.type = 'sine'
-        osc.frequency.setValueAtTime(freq, this.ctx!.currentTime + i * 0.04)
-        gain.gain.setValueAtTime(0.04, this.ctx!.currentTime + i * 0.04)
-        gain.gain.exponentialRampToValueAtTime(0.0001, this.ctx!.currentTime + i * 0.04 + 0.15)
-        osc.connect(gain)
-        gain.connect(this.ctx!.destination)
-        osc.start(this.ctx!.currentTime + i * 0.04)
-        osc.stop(this.ctx!.currentTime + i * 0.04 + 0.16)
-      })
-    } catch {}
-  }
-}
-const sfx = new SoundFX()
 
 // ============================================================================
 // Universal Settings Search Index (Instant search across all 9 tabs)
@@ -1995,6 +1899,45 @@ export default function SettingsOverlay({
                         <option value="15">15 tabs</option>
                         <option value="999">Show All</option>
                       </select>
+                    </div>
+                  </div>
+                </Card>
+
+                <Card>
+                  <div className="flex flex-col gap-1.5">
+                    <span className="font-bold text-xs text-white">Tab Orientation & Layout</span>
+                    <p className="text-[11px] opacity-75 leading-relaxed" style={{ color: 'var(--text2)' }}>
+                      Choose between modern browser vertical tabs (Arc / Edge / Zen style with Herdr AI session alerts) or traditional horizontal tabs.
+                    </p>
+                    <div className="grid grid-cols-2 gap-2 pt-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          sfx.pop()
+                          updateInterfaceSetting('tabOrientation', 'vertical')
+                        }}
+                        className={`p-2.5 rounded-xl border text-xs font-semibold flex items-center justify-center gap-2 transition-all cursor-pointer ${
+                          (interfaceSettings?.tabOrientation || 'vertical') === 'vertical'
+                            ? 'bg-indigo-500/20 border-indigo-500/50 text-white shadow-sm'
+                            : 'bg-white/5 border-white/10 text-(--text2) hover:bg-white/10'
+                        }`}
+                      >
+                        <span>⫤ Vertical Sidebar</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          sfx.pop()
+                          updateInterfaceSetting('tabOrientation', 'horizontal')
+                        }}
+                        className={`p-2.5 rounded-xl border text-xs font-semibold flex items-center justify-center gap-2 transition-all cursor-pointer ${
+                          interfaceSettings?.tabOrientation === 'horizontal'
+                            ? 'bg-indigo-500/20 border-indigo-500/50 text-white shadow-sm'
+                            : 'bg-white/5 border-white/10 text-(--text2) hover:bg-white/10'
+                        }`}
+                      >
+                        <span>⬒ Horizontal Tabs</span>
+                      </button>
                     </div>
                   </div>
                 </Card>

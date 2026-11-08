@@ -73,7 +73,7 @@ describe('TabDiscardManager', () => {
     expect(manager.getPolicy().policy).toEqual({
       version: 1,
       tabDiscardMinutes: 10,
-      maxActiveTabs: 3
+      maxActiveTabs: 10
     })
 
     // Set new policy: 60 minutes, max 5 tabs

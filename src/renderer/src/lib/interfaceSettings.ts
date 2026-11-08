@@ -57,6 +57,7 @@ export interface InterfaceSettings {
   pinnedPosition?: 'sidebar' | 'bottom'
   showTitlebar?: boolean
   maskTitlebarTitle?: boolean
+  tabOrientation?: 'vertical' | 'horizontal'
 }
 
 export const DEFAULT_INTERFACE_SETTINGS: InterfaceSettings = {
@@ -98,7 +99,8 @@ export const DEFAULT_INTERFACE_SETTINGS: InterfaceSettings = {
   globalCustomJs: '',
   pinnedPosition: 'bottom',
   showTitlebar: true,
-  maskTitlebarTitle: false
+  maskTitlebarTitle: false,
+  tabOrientation: 'vertical'
 }
 
 export const PRESET_CONFIGS: Record<Exclude<AestheticPreset, 'custom'>, Partial<InterfaceSettings>> = {

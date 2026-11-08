@@ -7,6 +7,7 @@ import {
   lstatSync,
   mkdirSync,
   readdirSync,
+  realpathSync,
   renameSync,
   statSync
 } from 'node:fs'
@@ -15,18 +16,46 @@ import { join } from 'node:path'
 const SINGLETON = new Set(['SingletonLock', 'SingletonCookie', 'SingletonSocket'])
 
 /**
+ * Checks whether two paths refer to the exact same filesystem directory or file.
+ * Handles case-insensitive filesystems (Windows, macOS) and hardlink/symlink aliases.
+ */
+export function isSameDirectory(p1: string, p2: string): boolean {
+  if (p1 === p2) return true
+  try {
+    const s1 = statSync(p1)
+    const s2 = statSync(p2)
+    if (s1.dev === s2.dev && s1.ino === s2.ino && s1.ino !== 0) {
+      return true
+    }
+  } catch {}
+  try {
+    const r1 = realpathSync.native ? realpathSync.native(p1) : realpathSync(p1)
+    const r2 = realpathSync.native ? realpathSync.native(p2) : realpathSync(p2)
+    if (r1 === r2) return true
+    if (process.platform === 'win32' || process.platform === 'darwin') {
+      if (r1.toLowerCase() === r2.toLowerCase()) return true
+    }
+  } catch {}
+  return false
+}
+
+/**
  * Consolidates legacy ~/.config/Nexus into ~/.config/nexus safely:
  * - Archives dead singleton symlinks and stale August partitions without overwriting the live cookie jar.
  * - Migrates unique files (e.g. shortcuts.json).
  * - On conflict, keeps the newer mtime and archives the loser (never deletes).
  * - Archives the legacy directory as Nexus.archived-<stamp> (reversible, zero data loss).
  * - Writes an audit trail to ~/.config/nexus/migration-v1.log.
+ * - Idempotently skips if legacy and live refer to the same physical directory (e.g. on Windows/macOS case-insensitive volumes).
  */
 export function consolidateLegacyConfigDir(customAppData?: string): void {
   const appData = customAppData || app.getPath('appData')
   const legacy = join(appData, 'Nexus')
   const live = join(appData, 'nexus')
-  if (!existsSync(legacy) || legacy === live) return // Idempotent no-op
+  if (!existsSync(legacy)) return // Idempotent no-op
+
+  // Prevent archiving live profile on case-insensitive filesystems or symlinked setups
+  if (isSameDirectory(legacy, live)) return
 
   try {
     if (lstatSync(legacy).isSymbolicLink()) {

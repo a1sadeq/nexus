@@ -35,8 +35,10 @@ import { splitSelectorList } from '../shared/selectorUtils'
 import { cleanConversationTitle, isDefaultConversationTitle } from '../shared/titleUtils'
 import { consolidateLegacyConfigDir } from './migrations/consolidateLegacyConfigDir'
 import { registerStateIpc, trustWindow } from './stateIpc'
+import { atomicWriteJson } from './atomicWrite'
 import { scheduleStartupAndExitPruning, getCacheStats, pruneAppCaches } from './cachePruningManager'
 import { captureDiagnosticReport, saveDiagnosticsToFile, type ViewContextInfo } from './diagnosticsManager'
+import { injectAiStatusObserver, attachAiStatusListener } from './aiStatusObserver'
 
 // Page-side helpers embedded into every injected script. Built from the tested
 // shared source via toString() — self-contained, no closures.
@@ -118,6 +120,294 @@ let activeViewVisible = true
 const viewTitles = new Map<string, string>()
 const viewModelKeys = new Map<string, string>()
 let providerConfig: import('../shared/providerConfig').ProviderConfigMap = {}
+
+let aiNotificationView: Electron.WebContentsView | null = null
+let isAiNotificationVisible = false
+let aiNotificationDismissTimer: NodeJS.Timeout | null = null
+let currentNotificationData: {
+  id: string
+  tabId: string
+  tabTitle: string
+  model: string
+  status: 'done' | 'waiting-input'
+  snippet?: string
+} | null = null
+
+function buildNotificationHtml(data: {
+  id: string
+  tabId: string
+  tabTitle: string
+  model: string
+  status: 'done' | 'waiting-input'
+  snippet?: string
+}): string {
+  const isWaitingInput = data.status === 'waiting-input'
+  const accentColor = isWaitingInput ? '#ef4444' : '#10b981'
+  const glowColor = isWaitingInput ? 'rgba(239, 68, 68, 0.4)' : 'rgba(16, 185, 129, 0.3)'
+  const statusLabel = isWaitingInput ? 'Needs Input' : 'Response Ready'
+  const safeTitle = data.tabTitle.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  const safeSnippet = (data.snippet || (isWaitingInput ? 'Waiting for your choice or confirmation' : 'Generation completed.'))
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  const safeTabId = JSON.stringify(data.tabId)
+
+  return `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif; user-select: none; }
+    body { background: transparent; overflow: hidden; padding: 6px 8px; }
+    .toast {
+      position: relative;
+      background: linear-gradient(135deg, rgba(14, 18, 30, 0.96) 0%, rgba(8, 12, 22, 0.98) 100%);
+      backdrop-filter: blur(24px) saturate(180%);
+      -webkit-backdrop-filter: blur(24px) saturate(180%);
+      border: 1px solid ${isWaitingInput ? 'rgba(239, 68, 68, 0.6)' : 'rgba(16, 185, 129, 0.45)'};
+      border-radius: 12px;
+      padding: 12px 14px 10px;
+      box-shadow: 0 16px 36px rgba(0, 0, 0, 0.75), 0 0 24px ${glowColor}, inset 0 1px 0 rgba(255, 255, 255, 0.15);
+      color: #f1f5f9;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      cursor: pointer;
+      transition: transform 0.15s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.2s ease;
+    }
+    .toast:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 20px 42px rgba(0, 0, 0, 0.85), 0 0 32px ${glowColor};
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .title-box {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      min-width: 0;
+      flex: 1;
+    }
+    .status-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 9999px;
+      background: ${accentColor};
+      box-shadow: 0 0 8px ${accentColor};
+      flex-shrink: 0;
+      ${isWaitingInput ? 'animation: pulse 1.5s infinite;' : ''}
+    }
+    @keyframes pulse {
+      0%, 100% { transform: scale(1); opacity: 1; }
+      50% { transform: scale(1.3); opacity: 0.7; }
+    }
+    .tab-title {
+      font-size: 12.5px;
+      font-weight: 700;
+      color: #ffffff;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      letter-spacing: -0.2px;
+    }
+    .badge {
+      font-size: 9.5px;
+      font-weight: 700;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      text-transform: uppercase;
+      padding: 2px 7px;
+      border-radius: 9999px;
+      background: ${isWaitingInput ? 'rgba(239, 68, 68, 0.22)' : 'rgba(16, 185, 129, 0.2)'};
+      color: ${isWaitingInput ? '#fca5a5' : '#6ee7b7'};
+      border: 1px solid ${isWaitingInput ? 'rgba(239, 68, 68, 0.5)' : 'rgba(16, 185, 129, 0.4)'};
+      flex-shrink: 0;
+      letter-spacing: 0.3px;
+    }
+    .close-btn {
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      color: #94a3b8;
+      cursor: pointer;
+      padding: 2px 6px;
+      font-size: 11px;
+      border-radius: 6px;
+      line-height: 1;
+      transition: all 0.15s ease;
+    }
+    .close-btn:hover {
+      background: rgba(255, 255, 255, 0.15);
+      color: #ffffff;
+    }
+    .snippet {
+      font-size: 11px;
+      color: #cbd5e1;
+      line-height: 1.35;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+      opacity: 0.88;
+      margin-top: 1px;
+    }
+    .actions {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-top: 4px;
+      padding-top: 5px;
+      border-top: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    .switch-cta {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 11px;
+      font-weight: 600;
+      color: ${accentColor};
+    }
+    .switch-btn {
+      background: ${isWaitingInput ? 'rgba(239, 68, 68, 0.28)' : 'rgba(16, 185, 129, 0.22)'};
+      border: 1px solid ${accentColor};
+      color: #ffffff;
+      font-size: 10.5px;
+      font-weight: 700;
+      padding: 3px 10px;
+      border-radius: 6px;
+      cursor: pointer;
+      box-shadow: 0 0 10px ${glowColor};
+      transition: all 0.15s ease;
+    }
+    .switch-btn:hover {
+      background: ${accentColor};
+      color: #0b0f19;
+    }
+    .progress-track {
+      position: absolute;
+      bottom: 0;
+      left: 12px;
+      right: 12px;
+      height: 2px;
+      background: rgba(255, 255, 255, 0.08);
+      border-radius: 2px;
+      overflow: hidden;
+    }
+    .progress-fill {
+      height: 100%;
+      background: ${accentColor};
+      width: 100%;
+      animation: shrinkProgress 7s linear forwards;
+    }
+    @keyframes shrinkProgress {
+      from { width: 100%; }
+      to { width: 0%; }
+    }
+  </style>
+</head>
+<body>
+  <div class="toast" id="toastCard">
+    <div class="header">
+      <div class="title-box">
+        <span class="status-dot"></span>
+        <span class="tab-title">${safeTitle}</span>
+      </div>
+      <span class="badge">${statusLabel}</span>
+      <button type="button" class="close-btn" id="closeBtn" title="Dismiss">✕</button>
+    </div>
+    <div class="snippet">${safeSnippet}</div>
+    <div class="actions">
+      <span class="switch-cta">
+        <span>Click to switch</span>
+        <span>→</span>
+      </span>
+      <button type="button" class="switch-btn" id="switchBtn">View Tab</button>
+    </div>
+    <div class="progress-track">
+      <div class="progress-fill"></div>
+    </div>
+  </div>
+  <script>
+    const switchTab = () => {
+      window.electron?.ipcRenderer?.send('notification_click_switch_tab', ${safeTabId});
+    };
+    document.getElementById('toastCard').addEventListener('click', (e) => {
+      if (e.target.id === 'closeBtn') return;
+      switchTab();
+    });
+    document.getElementById('switchBtn').addEventListener('click', (e) => {
+      e.stopPropagation();
+      switchTab();
+    });
+    document.getElementById('closeBtn').addEventListener('click', (e) => {
+      e.stopPropagation();
+      window.electron?.ipcRenderer?.send('dismiss_in_app_toast');
+    });
+  </script>
+</body>
+</html>`
+}
+
+function showInAppToast(data: {
+  id: string
+  tabId: string
+  tabTitle: string
+  model: string
+  status: 'done' | 'waiting-input'
+  snippet?: string
+}) {
+  if (!mainWindow || mainWindow.isDestroyed() || !aiNotificationView) return
+  if (overlaysOpen) return
+
+  // If user is already on this tab and mainWindow has focus, no need to show toast
+  if (activeViewId === data.tabId && mainWindow.isFocused()) {
+    dismissInAppToast()
+    return
+  }
+
+  currentNotificationData = data
+  if (aiNotificationDismissTimer) {
+    clearTimeout(aiNotificationDismissTimer)
+    aiNotificationDismissTimer = null
+  }
+
+  const html = buildNotificationHtml(data)
+  aiNotificationView.webContents.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html))
+
+  try {
+    mainWindow.contentView.removeChildView(aiNotificationView)
+    mainWindow.contentView.addChildView(aiNotificationView)
+  } catch {}
+
+  const winBounds = mainWindow.getContentBounds()
+  aiNotificationView.setBounds({
+    x: Math.max(0, winBounds.width - 395),
+    y: 44,
+    width: 380,
+    height: 125
+  })
+  aiNotificationView.setVisible(true)
+  isAiNotificationVisible = true
+
+  aiNotificationDismissTimer = setTimeout(() => {
+    dismissInAppToast()
+  }, 7000)
+}
+
+function dismissInAppToast() {
+  if (aiNotificationDismissTimer) {
+    clearTimeout(aiNotificationDismissTimer)
+    aiNotificationDismissTimer = null
+  }
+  currentNotificationData = null
+  isAiNotificationVisible = false
+  if (aiNotificationView && !aiNotificationView.webContents.isDestroyed()) {
+    try {
+      aiNotificationView.setVisible(false)
+      aiNotificationView.setBounds({ x: 0, y: 0, width: 0, height: 0 })
+    } catch {}
+  }
+}
 // Match the actual OS and bundled Chromium version; do not impersonate Linux on Windows.
 // Strip Electron/product tokens by constructing a regular Chrome-compatible UA.
 const AI_UA = chromeCompatibleUserAgent(process.platform, process.arch, process.versions.chrome)
@@ -164,9 +454,15 @@ export function loadInitialPinnedState(): void {
 }
 loadInitialPinnedState()
 
+const activeAiStatuses = new Map<string, string>()
+
 export const tabDiscardManager = new TabDiscardManager({
   getUserDataDir: () => getFinalUserDataDir(),
   isPinned: (tabId: string) => pinnedTabIds.has(tabId),
+  isBusy: (tabId: string) => {
+    const status = activeAiStatuses.get(tabId)
+    return status === 'working' || status === 'waiting-input'
+  },
   onTeardown: async (tabId, view, contents) => {
     await closeWebContents(contents)
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -179,6 +475,7 @@ export const tabDiscardManager = new TabDiscardManager({
     viewModelKeys.delete(tabId)
     lastRealBounds.delete(tabId)
     viewTitles.delete(tabId)
+    activeAiStatuses.delete(tabId)
 
     // Cleanup orphaned thumbnails
     const safeId = tabId.replace(/[^a-zA-Z0-9._-]/g, '')
@@ -312,6 +609,28 @@ ipcMain.handle('get_resource_diagnostics', (event) => {
     preview: previewLoop.getStatus(), contents, processes: app.getAppMetrics() }
 })
 
+// IPC endpoints for in-app notification toasts & app focus detection
+ipcMain.handle('is_app_focused', () => {
+  return Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isFocused())
+})
+
+ipcMain.on('show_in_app_toast', (event, data) => {
+  if (!mainWindow || event.sender !== mainWindow.webContents) return
+  showInAppToast(data)
+})
+
+ipcMain.on('dismiss_in_app_toast', () => {
+  dismissInAppToast()
+})
+
+ipcMain.on('notification_click_switch_tab', (_event, tabId) => {
+  dismissInAppToast()
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.focus()
+    sendToMainWindow('notification_switch_to_tab', tabId)
+  }
+})
+
 ipcMain.on('set_tab_discard_time', (_event, minutes) => {
   if (typeof minutes === 'number' && Number.isInteger(minutes) && minutes >= 0) {
     tabDiscardManager.setPolicy({ tabDiscardMinutes: minutes })
@@ -417,7 +736,8 @@ ipcMain.on('open_active_devtools', () => {
   }
 })
 
-ipcMain.on('trigger_active_upload_folder', async () => {
+ipcMain.on('trigger_active_upload_folder', async (event) => {
+  if (!isValidMainWindowSender(event)) return
   if (activeViewId && mainWindow && !mainWindow.isDestroyed()) {
     const view = aiViews.get(activeViewId)
     if (view && !view.webContents.isDestroyed()) {
@@ -426,7 +746,8 @@ ipcMain.on('trigger_active_upload_folder', async () => {
   }
 })
 
-ipcMain.on('confirm_folder_upload', async (_event, payload: ConfirmFolderUploadPayload) => {
+ipcMain.on('confirm_folder_upload', async (event, payload: ConfirmFolderUploadPayload) => {
+  if (!isValidMainWindowSender(event)) return
   if (
     activeViewId &&
     mainWindow &&
@@ -443,14 +764,16 @@ ipcMain.on('confirm_folder_upload', async (_event, payload: ConfirmFolderUploadP
   }
 })
 
-ipcMain.handle('preview_folder_bundle', async (_event, payload: ConfirmFolderUploadPayload) => {
+ipcMain.handle('preview_folder_bundle', async (event, payload: ConfirmFolderUploadPayload) => {
+  if (!isValidMainWindowSender(event)) return { text: '', fileCount: 0, byteSize: 0, filesIncluded: [] }
   if (!payload || !Array.isArray(payload.selectedPaths) || payload.selectedPaths.length === 0) {
     return { text: '', fileCount: 0, byteSize: 0, filesIncluded: [] }
   }
   return generateBundleText(payload.folderPath, payload.selectedPaths)
 })
 
-ipcMain.handle('save_folder_bundle_to_disk', async (_event, payload: ConfirmFolderUploadPayload & { useDialog?: boolean }) => {
+ipcMain.handle('save_folder_bundle_to_disk', async (event, payload: ConfirmFolderUploadPayload & { useDialog?: boolean }) => {
+  if (!isValidMainWindowSender(event)) return { success: false, error: 'Unauthorized sender' }
   if (!payload || !Array.isArray(payload.selectedPaths) || payload.selectedPaths.length === 0) {
     return { success: false, error: 'No files selected to bundle.' }
   }
@@ -625,7 +948,8 @@ ipcMain.on('trigger_active_upload', async () => {
   }
 })
 
-ipcMain.handle('shell_open', async (_event, url: string) => {
+ipcMain.handle('shell_open', async (event, url: string) => {
+  if (!isValidMainWindowSender(event)) return
   if (!url || typeof url !== 'string') return
   try {
     const parsed = new URL(url)
@@ -720,6 +1044,9 @@ ipcMain.handle('ai_site_new_chat', () => clickActiveViewFeature('newChatSelector
 function isValidMainWindowSender(event: Electron.IpcMainEvent | Electron.IpcMainInvokeEvent): boolean {
   if (!mainWindow || mainWindow.isDestroyed()) return false
   if (event.sender !== mainWindow.webContents) return false
+  if (event.senderFrame && event.senderFrame !== mainWindow.webContents.mainFrame) {
+    return false
+  }
   return true
 }
 
@@ -781,24 +1108,28 @@ ipcMain.handle('get_platform', () => {
 // Active project directory for intelligent download routing
 let activeProjectDir: string | null = null
 
-ipcMain.on('downloads_set_active_project_dir', (_event, dir: string | null) => {
+ipcMain.on('downloads_set_active_project_dir', (event, dir: string | null) => {
+  if (!isValidMainWindowSender(event)) return
   activeProjectDir = dir && typeof dir === 'string' && dir.trim() ? dir.trim() : null
 })
 
-ipcMain.handle('downloads_show_item_in_folder', async (_event, fullPath: string) => {
+ipcMain.handle('downloads_show_item_in_folder', async (event, fullPath: string) => {
+  if (!isValidMainWindowSender(event)) return
   if (fullPath && typeof fullPath === 'string' && existsSync(fullPath)) {
     shell.showItemInFolder(fullPath)
   }
 })
 
-ipcMain.handle('downloads_open_path', async (_event, fullPath: string) => {
+ipcMain.handle('downloads_open_path', async (event, fullPath: string) => {
+  if (!isValidMainWindowSender(event)) return 'Unauthorized'
   if (fullPath && typeof fullPath === 'string' && existsSync(fullPath)) {
     return await shell.openPath(fullPath)
   }
   return 'File not found'
 })
 
-ipcMain.on('downloads_copy_path', (_event, fullPath: string) => {
+ipcMain.on('downloads_copy_path', (event, fullPath: string) => {
+  if (!isValidMainWindowSender(event)) return
   if (fullPath && typeof fullPath === 'string') {
     clipboard.writeText(fullPath)
   }
@@ -809,149 +1140,6 @@ ipcMain.handle('downloads_get_default_dir', async () => {
 })
 
 const registeredSessions = new WeakSet<Electron.Session>()
-
-function injectDownloadToastIntoWebviews(info: {
-  id: string
-  filename: string
-  fullPath: string
-  directory: string
-  fileSize: number
-  mimeType?: string
-  isProjectDir: boolean
-  timestamp: number
-}) {
-  const jsonStr = JSON.stringify(info)
-  const script = `
-    (() => {
-      try {
-        const info = ${jsonStr};
-        let host = document.getElementById('nexus-download-host');
-        if (!host) {
-          host = document.createElement('div');
-          host.id = 'nexus-download-host';
-          host.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:2147483647;display:flex;flex-direction:column;gap:12px;max-width:410px;width:calc(100vw - 40px);pointer-events:none;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;';
-          document.body.appendChild(host);
-        }
-
-        const formatSize = (bytes) => {
-          if (!bytes || bytes === 0) return '0 B';
-          const k = 1024;
-          const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-          const i = Math.floor(Math.log(bytes) / Math.log(k));
-          return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
-        };
-
-        const ext = (info.filename.split('.').pop() || 'FILE').toUpperCase();
-        const shortDir = info.directory.split(/[\\/\\\\]/).filter(Boolean).pop() || info.directory;
-
-        const toast = document.createElement('div');
-        toast.id = 'nexus-download-' + info.id;
-        toast.style.cssText = 'pointer-events:auto;background:linear-gradient(135deg,rgba(18,22,34,0.96) 0%,rgba(10,12,20,0.98) 100%);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);border:1px solid ' + (info.isProjectDir ? 'rgba(34,211,238,0.45)' : 'rgba(99,102,241,0.45)') + ';border-radius:16px;box-shadow:0 16px 36px rgba(0,0,0,0.7),0 0 24px ' + (info.isProjectDir ? 'rgba(34,211,238,0.2)' : 'rgba(99,102,241,0.2)') + ';padding:14px 16px;color:#f8fafc;display:flex;flex-direction:column;gap:10px;animation:nexusToastIn 0.25s cubic-bezier(0.16,1,0.3,1) forwards;';
-
-        if (!document.getElementById('nexus-download-styles')) {
-          const style = document.createElement('style');
-          style.id = 'nexus-download-styles';
-          style.textContent = '@keyframes nexusToastIn{from{opacity:0;transform:translateY(16px) scale(0.96);}to{opacity:1;transform:translateY(0) scale(1);}} @keyframes nexusToastOut{from{opacity:1;transform:translateY(0) scale(1);}to{opacity:0;transform:translateY(16px) scale(0.96);}}';
-          document.head.appendChild(style);
-        }
-
-        toast.innerHTML = \`
-          <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px;">
-            <div style="display:flex;align-items:center;gap:10px;min-width:0;">
-              <div style="width:36px;height:36px;border-radius:10px;background:\${info.isProjectDir ? 'rgba(34,211,238,0.15)' : 'rgba(99,102,241,0.15)'};border:1px solid \${info.isProjectDir ? 'rgba(34,211,238,0.35)' : 'rgba(99,102,241,0.35)'};display:flex;align-items:center;justify-content:center;color:\${info.isProjectDir ? '#22d3ee' : '#818cf8'};font-size:16px;flex-shrink:0;">
-                📥
-              </div>
-              <div style="display:flex;flex-direction:column;min-width:0;">
-                <div style="display:flex;align-items:center;gap:6px;">
-                  <span style="font-weight:700;font-size:13px;color:#ffffff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:210px;" title="\${info.filename}">\${info.filename}</span>
-                  <span style="font-size:9px;font-family:monospace;font-weight:700;padding:1px 5px;border-radius:4px;background:rgba(255,255,255,0.12);color:rgba(255,255,255,0.9);flex-shrink:0;">\${ext}</span>
-                </div>
-                <div style="display:flex;align-items:center;gap:6px;font-size:11px;color:#94a3b8;margin-top:2px;">
-                  <span>\${formatSize(info.fileSize)}</span>
-                  <span>•</span>
-                  <span style="color:#34d399;font-weight:600;">✓ Downloaded</span>
-                </div>
-              </div>
-            </div>
-            <button id="nexus-close-\${info.id}" style="background:transparent;border:none;color:#94a3b8;font-size:15px;cursor:pointer;padding:2px 6px;border-radius:6px;line-height:1;" title="Dismiss">✕</button>
-          </div>
-
-          <div style="background:rgba(0,0,0,0.45);border:1px solid rgba(255,255,255,0.08);border-radius:8px;padding:6px 10px;font-size:11px;font-family:monospace;color:#cbd5e1;display:flex;align-items:center;justify-content:space-between;gap:8px;">
-            <div style="display:flex;align-items:center;gap:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
-              <span style="color:\${info.isProjectDir ? '#22d3ee' : '#818cf8'};">📁</span>
-              <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="\${info.directory}">\${info.isProjectDir ? 'Project: ' + shortDir : 'downloads/nexus'}</span>
-            </div>
-            \${info.isProjectDir ? '<span style="font-size:9px;padding:1px 5px;border-radius:4px;background:rgba(34,211,238,0.2);color:#22d3ee;font-weight:700;">PROJECT</span>' : ''}
-          </div>
-
-          <div style="display:flex;align-items:center;gap:6px;margin-top:2px;">
-            <button id="nexus-open-loc-\${info.id}" style="flex:1.2;background:\${info.isProjectDir ? 'linear-gradient(135deg,#0891b2,#0284c7)' : 'linear-gradient(135deg,#4f46e5,#6366f1)'};border:none;border-radius:8px;padding:7px 10px;color:#ffffff;font-size:11px;font-weight:600;display:flex;align-items:center;justify-content:center;gap:5px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,0.3);transition:all 0.15s;">
-              📂 Open Location
-            </button>
-            <button id="nexus-open-file-\${info.id}" style="flex:1;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.15);border-radius:8px;padding:7px 10px;color:#ffffff;font-size:11px;font-weight:500;display:flex;align-items:center;justify-content:center;gap:5px;cursor:pointer;transition:all 0.15s;">
-              ⚡ Open File
-            </button>
-            <button id="nexus-copy-path-\${info.id}" style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:7px 9px;color:#94a3b8;font-size:11px;font-weight:500;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:all 0.15s;" title="Copy Full Path">
-              📋
-            </button>
-          </div>
-        \`;
-
-        host.appendChild(toast);
-
-        let dismissTimer;
-        const removeWithAnim = () => {
-          if (toast.parentElement) {
-            toast.style.animation = 'nexusToastOut 0.2s cubic-bezier(0.16,1,0.3,1) forwards';
-            setTimeout(() => { if (toast.parentElement) toast.remove(); }, 200);
-          }
-        };
-
-        const startTimer = () => {
-          clearTimeout(dismissTimer);
-          dismissTimer = setTimeout(removeWithAnim, 8000);
-        };
-
-        toast.addEventListener('mouseenter', () => clearTimeout(dismissTimer));
-        toast.addEventListener('mouseleave', startTimer);
-        startTimer();
-
-        document.getElementById('nexus-close-' + info.id)?.addEventListener('click', removeWithAnim);
-
-        document.getElementById('nexus-open-loc-' + info.id)?.addEventListener('click', () => {
-          console.log('__nexus_download_action__:' + JSON.stringify({ action: 'showItemInFolder', fullPath: info.fullPath }));
-        });
-
-        document.getElementById('nexus-open-file-' + info.id)?.addEventListener('click', () => {
-          console.log('__nexus_download_action__:' + JSON.stringify({ action: 'openPath', fullPath: info.fullPath }));
-        });
-
-        const copyBtn = document.getElementById('nexus-copy-path-' + info.id);
-        copyBtn?.addEventListener('click', () => {
-          console.log('__nexus_download_action__:' + JSON.stringify({ action: 'copyPath', fullPath: info.fullPath }));
-          if (copyBtn) {
-            copyBtn.textContent = '✓';
-            copyBtn.style.color = '#34d399';
-            setTimeout(() => {
-              if (copyBtn) {
-                copyBtn.textContent = '📋';
-                copyBtn.style.color = '#94a3b8';
-              }
-            }, 2000);
-          }
-        });
-      } catch (err) {
-        console.error('[Nexus Injected Toast Error]', err);
-      }
-    })();
-  `
-
-  for (const view of aiViews.values()) {
-    if (view && !view.webContents.isDestroyed()) {
-      view.webContents.executeJavaScript(script).catch(() => {})
-    }
-  }
-}
 
 function registerDownloadHandler(targetSession: Electron.Session) {
   if (registeredSessions.has(targetSession)) return
@@ -997,7 +1185,6 @@ function registerDownloadHandler(targetSession: Electron.Session) {
         }
 
         sendToMainWindow('download_completed', downloadInfo)
-        injectDownloadToastIntoWebviews(downloadInfo)
       } else if (state === 'interrupted' || state === 'cancelled') {
         console.warn(`[Nexus Downloads] Download ${state}: ${rawFilename}`)
       }
@@ -1133,55 +1320,93 @@ ipcMain.handle('switch_to_tauri', () => {
   }, 200)
 })
 
-ipcMain.handle('skills_list', () => skillsEngine.listSkills())
-ipcMain.handle('skills_save', (_event, skill: SkillDef) => skillsEngine.saveSkill(skill))
-ipcMain.handle('skills_delete', (_event, skillId: string) => skillsEngine.deleteSkill(skillId))
-ipcMain.handle('skills_toggle_pin', (_event, skillId: string) => skillsEngine.togglePin(skillId))
-ipcMain.handle('skills_increment_usage', (_event, skillId: string) => skillsEngine.incrementUsage(skillId))
+ipcMain.handle('skills_list', (event) => {
+  if (!isValidMainWindowSender(event)) return []
+  return skillsEngine.listSkills()
+})
+ipcMain.handle('skills_save', (event, skill: SkillDef) => {
+  if (!isValidMainWindowSender(event)) return { success: false, error: 'Unauthorized sender' }
+  return skillsEngine.saveSkill(skill)
+})
+ipcMain.handle('skills_delete', (event, skillId: string) => {
+  if (!isValidMainWindowSender(event)) return { success: false, error: 'Unauthorized sender' }
+  return skillsEngine.deleteSkill(skillId)
+})
+ipcMain.handle('skills_toggle_pin', (event, skillId: string) => {
+  if (!isValidMainWindowSender(event)) return { success: false, error: 'Unauthorized sender' }
+  return skillsEngine.togglePin(skillId)
+})
+ipcMain.handle('skills_increment_usage', (event, skillId: string) => {
+  if (!isValidMainWindowSender(event)) return
+  return skillsEngine.incrementUsage(skillId)
+})
 
-ipcMain.handle('skills_get_pinned_categories', () => {
+ipcMain.handle('skills_get_pinned_categories', (event) => {
+  if (!isValidMainWindowSender(event)) return []
   return skillsEngine.getPinnedCategories()
 })
-ipcMain.handle('skills_toggle_category_pin', async (_e, cat) => {
+ipcMain.handle('skills_toggle_category_pin', async (event, cat) => {
+  if (!isValidMainWindowSender(event)) return false
   return await skillsEngine.toggleCategoryPin(cat)
 })
-ipcMain.handle('skills_rename_category', async (_e, oldName, newName) => {
+ipcMain.handle('skills_rename_category', async (event, oldName, newName) => {
+  if (!isValidMainWindowSender(event)) return false
   return await skillsEngine.renameCategory(oldName, newName)
 })
-ipcMain.handle('skills_delete_category', async (_e, cat) => {
+ipcMain.handle('skills_delete_category', async (event, cat) => {
+  if (!isValidMainWindowSender(event)) return false
   return await skillsEngine.deleteCategory(cat)
 })
-ipcMain.handle('skills_assign_category', async (_e, cat, ids) => {
+ipcMain.handle('skills_assign_category', async (event, cat, ids) => {
+  if (!isValidMainWindowSender(event)) return false
   return await skillsEngine.assignSkillsToCategory(cat, ids)
 })
-ipcMain.handle('skills_read_file', (_event, filePath: string, projectDir?: string) =>
-  skillsEngine.readSkillFile(filePath, projectDir)
-)
-ipcMain.handle('skills_execute_command', (_event, command: string, projectDir?: string, requireSecurityCheck: boolean = true) =>
-  skillsEngine.executeSkillCommand(command, projectDir, requireSecurityCheck)
-)
-ipcMain.handle('skills_scan_project_files', (_event, projectDir: string) =>
-  skillsEngine.scanProjectFiles(projectDir)
-)
-ipcMain.handle('skills_choose_project_dir', async () => {
+ipcMain.handle('skills_read_file', (event, filePath: string, projectDir?: string) => {
+  if (!isValidMainWindowSender(event)) return { success: false, error: 'Unauthorized sender' }
+  return skillsEngine.readSkillFile(filePath, projectDir)
+})
+ipcMain.handle('skills_execute_command', (event, command: string, projectDir?: string) => {
+  if (!isValidMainWindowSender(event)) return { success: false, error: 'Unauthorized sender' }
+  return skillsEngine.executeSkillCommand(command, projectDir)
+})
+ipcMain.handle('skills_scan_project_files', (event, projectDir: string) => {
+  if (!isValidMainWindowSender(event)) return []
+  return skillsEngine.scanProjectFiles(projectDir)
+})
+ipcMain.handle('skills_choose_project_dir', async (event) => {
+  if (!isValidMainWindowSender(event)) return null
   if (!mainWindow || mainWindow.isDestroyed()) return null
   const res = await dialog.showOpenDialog(mainWindow, {
     properties: ['openDirectory', 'createDirectory']
   })
   return res.filePaths[0] || null
 })
-ipcMain.handle('skills_get_skills_dir', () => skillsEngine.getSkillsDirectory())
-ipcMain.handle('skills_open_skills_dir', async () => {
+ipcMain.handle('skills_get_skills_dir', (event) => {
+  if (!isValidMainWindowSender(event)) return ''
+  return skillsEngine.getSkillsDirectory()
+})
+ipcMain.handle('skills_open_skills_dir', async (event) => {
+  if (!isValidMainWindowSender(event)) return false
   const dir = skillsEngine.getSkillsDirectory()
   if (dir) await shell.openPath(dir)
   return true
 })
-ipcMain.handle('skills_get_safe_commands', () => skillsEngine.getSafeCommands())
-ipcMain.handle('skills_add_safe_command', (_event, cmd: string) => skillsEngine.addSafeCommand(cmd))
-ipcMain.handle('skills_remove_safe_command', (_event, cmd: string) => skillsEngine.removeSafeCommand(cmd))
+ipcMain.handle('skills_get_safe_commands', (event) => {
+  if (!isValidMainWindowSender(event)) return []
+  return skillsEngine.getSafeCommands()
+})
+ipcMain.handle('skills_add_safe_command', (event, cmd: string) => {
+  if (!isValidMainWindowSender(event)) return false
+  return skillsEngine.addSafeCommand(cmd)
+})
+ipcMain.handle('skills_remove_safe_command', (event, cmd: string) => {
+  if (!isValidMainWindowSender(event)) return false
+  return skillsEngine.removeSafeCommand(cmd)
+})
 ipcMain.handle(
   'skills_inject_prompt',
-  async (_event, tabId: string, promptText: string, autoSend: boolean = false) => {
+  async (event, tabId: string, promptText: string, autoSend: boolean = false) => {
+    if (!isValidMainWindowSender(event)) return false
     const targetId = tabId || activeViewId
     if (!targetId) return false
     return injectSkillPromptIntoWebview(targetId, promptText, autoSend)
@@ -1253,7 +1478,11 @@ const DEFAULT_ACTION_KEYS: Record<string, string[]> = {
   'model-prev': ['Ctrl', '['],
   'guide-open': ['F1'],
   'stop-generation': ['Ctrl', '.'],
-  'site-new-chat': ['Ctrl', 'Shift', 'N']
+  'site-new-chat': ['Ctrl', 'Shift', 'N'],
+  'tab-prev': ['Ctrl', 'K'],
+  'tab-next': ['Ctrl', 'J'],
+  'tab-move-up': ['Ctrl', 'Shift', 'K'],
+  'tab-move-down': ['Ctrl', 'Shift', 'J']
 }
 
 let customKeymap: Record<string, string[]> = {}
@@ -1278,6 +1507,37 @@ ipcMain.on('set_overlays_open', (_event, open: boolean) => {
   if (overlaysOpen === next) return
   overlaysOpen = next
   restartActiveArenaTitleSync()
+
+  if (overlaysOpen) {
+    if (typeof dismissInAppToast === 'function') dismissInAppToast()
+    for (const [, view] of aiViews) {
+      try {
+        if (typeof view?.setVisible === 'function') {
+          view.setVisible(false)
+        }
+        if (view?.webContents && !view.webContents.isDestroyed?.()) {
+          view.webContents.setBackgroundThrottling?.(true)
+          view.webContents.setAudioMuted?.(true)
+        }
+      } catch {}
+    }
+  } else if (activeViewId) {
+    const activeView = aiViews.get(activeViewId)
+    const realBounds = lastRealBounds.get(activeViewId)
+    try {
+      if (activeView && !activeView.webContents.isDestroyed?.()) {
+        if (realBounds && realBounds.width > 0 && realBounds.height > 0) {
+          activeView.setBounds(realBounds)
+          activeViewVisible = true
+        }
+        if (typeof activeView.setVisible === 'function' && activeViewVisible) {
+          activeView.setVisible(true)
+        }
+        activeView.webContents.setBackgroundThrottling?.(!activeViewVisible)
+        activeView.webContents.setAudioMuted?.(!activeViewVisible)
+      }
+    } catch {}
+  }
 })
 
 ipcMain.on('set_shortcut_map', (_event, map: unknown) => {
@@ -1486,11 +1746,19 @@ export function routeGlobalShortcut(event: Electron.Event, input: Electron.Input
     }
   }
 
-  // Ctrl+J / Ctrl+K -> Previous / Next tab
+  // Ctrl+J / Ctrl+K -> Down (next) / Up (prev)
   if (matchesAction(input, 'tab-prev') || matchesAction(input, 'tab-next')) {
     event.preventDefault()
     const prev = matchesAction(input, 'tab-prev')
     sendToMainWindow('execute-global-action', { action: 'navigate_tab', direction: prev ? 'prev' : 'next' })
+    return true
+  }
+
+  // Ctrl+Shift+J / Ctrl+Shift+K -> Move Tab Down / Move Tab Up
+  if (matchesAction(input, 'tab-move-up') || matchesAction(input, 'tab-move-down')) {
+    event.preventDefault()
+    const up = matchesAction(input, 'tab-move-up')
+    sendToMainWindow('execute-global-action', { action: 'move_tab', direction: up ? 'up' : 'down' })
     return true
   }
 
@@ -1594,9 +1862,37 @@ function createWindow() {
     }
   })
 
+  mainWindow.webContents.setMaxListeners(50)
+
   trustWindow(mainWindow)
 
   mainWindow.setMenu(null)
+
+  aiNotificationView = new WebContentsView({
+    webPreferences: {
+      preload: join(__dirname, '../preload/index.js'),
+      nodeIntegration: false,
+      contextIsolation: true
+    }
+  })
+  aiNotificationView.setBackgroundColor('#00000000')
+  aiNotificationView.setVisible(false)
+  aiNotificationView.setBounds({ x: 0, y: 0, width: 0, height: 0 })
+  mainWindow.contentView.addChildView(aiNotificationView)
+
+  mainWindow.on('resize', () => {
+    if (aiNotificationView && currentNotificationData && isAiNotificationVisible) {
+      const winBounds = mainWindow?.getContentBounds()
+      if (winBounds) {
+        aiNotificationView.setBounds({
+          x: Math.max(0, winBounds.width - 395),
+          y: 44,
+          width: 380,
+          height: 125
+        })
+      }
+    }
+  })
 
   mainWindow.on('ready-to-show', () => {
     if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible()) {
@@ -1610,6 +1906,7 @@ function createWindow() {
   //  - webview hidden (overlay open) → React renderer so overlay shortcuts work
   mainWindow.on('focus', () => {
     if (!mainWindow || mainWindow.isDestroyed()) return
+    sendToMainWindow('window-focus-changed', true)
     if (activeViewVisible && !overlaysOpen && activeViewId) {
       const view = aiViews.get(activeViewId)
       if (view && !view.webContents.isDestroyed()) {
@@ -1620,6 +1917,11 @@ function createWindow() {
       mainWindow.focusOnWebView()
       mainWindow.webContents.focus()
     }
+  })
+
+  mainWindow.on('blur', () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return
+    sendToMainWindow('window-focus-changed', false)
   })
 
   mainWindow.on('close', (e) => {
@@ -1757,6 +2059,12 @@ app.whenReady().then(() => {
   loadThemeFromDisk()
   loadProviderConfigFromDisk()
   tabDiscardManager.init()
+  tabDiscardManager.onStatusChange((status) => {
+    sendToMainWindow('tab_discard_status_updated', {
+      residentTabIds: status.residentTabIds,
+      discardedTabIds: status.discardedTabIds
+    })
+  })
   scheduleStartupAndExitPruning(getFinalUserDataDir())
   // Retain persistent partition cache across launches to avoid cold-load network re-download penalties.
 
@@ -1906,6 +2214,27 @@ app.whenReady().then(() => {
     }
   }
 
+  // Block webview notifications so AI provider websites (Gemini, ChatGPT, Claude) never trigger duplicate OS notifications
+  const blockNotifications = (sess: Electron.Session) => {
+    try {
+      sess.setPermissionRequestHandler((_webContents, permission, callback) => {
+        if (permission === 'notifications') {
+          return callback(false)
+        }
+        callback(true)
+      })
+      sess.setPermissionCheckHandler((_webContents, permission) => {
+        if (permission === 'notifications') {
+          return false
+        }
+        return true
+      })
+    } catch {}
+  }
+
+  blockNotifications(session.fromPartition('persist:ai-shared'))
+  blockNotifications(session.defaultSession)
+
   setupWebAuthnCancellation(session.fromPartition('persist:ai-shared'))
   setupWebAuthnCancellation(session.defaultSession)
 
@@ -1913,6 +2242,7 @@ app.whenReady().then(() => {
     if (contents && contents.session) {
       registerDownloadHandler(contents.session)
       setupWebAuthnCancellation(contents.session)
+      blockNotifications(contents.session)
     }
   })
 
@@ -2097,6 +2427,37 @@ if (!window.__nexusShiftScrollInjected) {
   }, { capture: true, passive: false });
   window.__nexusShiftScrollInjected = true;
 }
+
+// 0b. Disable provider webview notifications so AI web pages never trigger duplicate OS notifications
+try {
+  if (typeof window !== 'undefined') {
+    var DummyNotification = function(title, options) {
+      this.title = title;
+      this.options = options;
+      this.close = function() {};
+      this.addEventListener = function() {};
+      this.removeEventListener = function() {};
+      this.dispatchEvent = function() { return false; };
+    };
+    DummyNotification.permission = 'denied';
+    DummyNotification.requestPermission = function() { return Promise.resolve('denied'); };
+    DummyNotification.maxActions = 0;
+    try {
+      window.Notification = DummyNotification;
+    } catch (e) {
+      if (window.Notification) {
+        window.Notification.requestPermission = function() { return Promise.resolve('denied'); };
+        try {
+          Object.defineProperty(window.Notification, 'permission', {
+            get: function() { return 'denied'; },
+            configurable: true
+          });
+        } catch (err) {}
+        window.Notification.prototype.show = function() {};
+      }
+    }
+  }
+} catch (e) {}
 
 // 1. Global '/' shortcut to focus chat prompt
 if (!window.__slashFocusInjected && ${enableSlash}) {
@@ -2308,6 +2669,7 @@ function ensureAiView(tabId: string): Electron.WebContentsView {
       backgroundThrottling: true
     }
   })
+  view.webContents.setMaxListeners(50)
 
   view.webContents.userAgent = AI_UA
   view.webContents.setZoomFactor(currentWebviewZoom);
@@ -2366,41 +2728,65 @@ function ensureAiView(tabId: string): Electron.WebContentsView {
           frame: false,
           transparent: true,
           webPreferences: {
-            nodeIntegration: true,
-            contextIsolation: false
+            nodeIntegration: false,
+            contextIsolation: true,
+            preload: join(__dirname, '../preload/index.js')
           }
         });
 
+        const safeUrlJson = JSON.stringify(currentUrl || '');
         const html = `
+          <!DOCTYPE html>
           <html>
+          <head>
+            <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
+          </head>
           <body style="margin:0;padding:0;background:transparent;display:flex;justify-content:center;align-items:center;height:100vh;">
             <div style="width:100%;height:100%;background:#1e293b;border:1px solid #334155;border-radius:8px;display:flex;align-items:center;padding:0 12px;box-shadow:0 10px 25px rgba(0,0,0,0.5);box-sizing:border-box;">
-              <input id="u" value="${currentUrl}" style="flex:1;background:#0f172a;color:#f8fafc;padding:10px 14px;border:1px solid #475569;border-radius:6px;font-size:14px;outline:none;font-family:sans-serif;" />
+              <input id="u" style="flex:1;background:#0f172a;color:#f8fafc;padding:10px 14px;border:1px solid #475569;border-radius:6px;font-size:14px;outline:none;font-family:sans-serif;" />
               <button id="c" style="background:none;border:none;color:#94a3b8;cursor:pointer;font-size:16px;padding:8px 12px;margin-left:4px;">✕</button>
             </div>
             <script>
-              const { ipcRenderer } = require('electron');
               const u = document.getElementById('u');
+              u.value = ${safeUrlJson};
               u.select();
               u.focus();
               u.onkeydown = (e) => {
-                if (e.key === 'Enter') ipcRenderer.send('popup-nav-' + ${win.id}, u.value);
-                if (e.key === 'Escape') ipcRenderer.send('popup-close-' + ${win.id});
+                if (e.key === 'Enter') {
+                  window.electron?.ipcRenderer?.send('popup-nav-' + ${win.id}, u.value);
+                }
+                if (e.key === 'Escape') {
+                  window.electron?.ipcRenderer?.send('popup-close-' + ${win.id});
+                }
               };
-              document.getElementById('c').onclick = () => ipcRenderer.send('popup-close-' + ${win.id});
+              document.getElementById('c').onclick = () => {
+                window.electron?.ipcRenderer?.send('popup-close-' + ${win.id});
+              };
             </script>
           </body>
           </html>
         `;
 
-        // using global ipcMain
-        const navHandler = (_e, url) => {
-          let finalUrl = url.trim();
-          if (!finalUrl.startsWith('http')) finalUrl = 'https://' + finalUrl;
-          popupWindow.webContents.loadURL(finalUrl);
-          win.close();
+        const navHandler = (e: Electron.IpcMainEvent, url: string) => {
+          if (e.sender !== win.webContents) return;
+          if (typeof url === 'string' && url.trim()) {
+            let finalUrl = url.trim();
+            if (!/^https?:\/\//i.test(finalUrl)) {
+              finalUrl = 'https://' + finalUrl;
+            }
+            try {
+              const parsed = new URL(finalUrl);
+              if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+                popupWindow.webContents.loadURL(parsed.href);
+              }
+            } catch {}
+          }
+          if (!win.isDestroyed()) win.close();
         };
-        const closeHandler = () => win.close();
+        const closeHandler = (e: Electron.IpcMainEvent) => {
+          if (e.sender !== win.webContents) return;
+          if (!win.isDestroyed()) win.close();
+        };
 
         ipcMain.once('popup-nav-' + win.id, navHandler);
         ipcMain.once('popup-close-' + win.id, closeHandler);
@@ -2464,15 +2850,16 @@ function ensureAiView(tabId: string): Electron.WebContentsView {
   })
 
   view.webContents.on('dom-ready', () => {
-    const modelKey = viewModelKeys.get(tabId) || ''
+    const modelKey = viewModelKeys.get(tabId) || resolveModelKey(tabId, view.webContents.getURL()) || ''
     applyWebviewTheme(view, modelKey)
     injectVirtualizationCss(view, modelKey)
     applyProviderMotionMode(view, modelKey)
     executeCustomInitScript(view, modelKey)
+    injectAiStatusObserver(view, modelKey)
   })
 
   view.webContents.on('did-finish-load', () => {
-    const modelKey = viewModelKeys.get(tabId) || ''
+    const modelKey = viewModelKeys.get(tabId) || resolveModelKey(tabId, view.webContents.getURL()) || ''
     applyWebviewTheme(view, modelKey)
     if (activeViewId === tabId && activeViewVisible && !overlaysOpen) {
       focusPromptInView(view, modelKey)
@@ -2480,14 +2867,18 @@ function ensureAiView(tabId: string): Electron.WebContentsView {
 
     const script = buildWebviewRuntimeJs(modelKey)
     view.webContents.executeJavaScript(script).catch((err) => console.error(err))
+    injectAiStatusObserver(view, modelKey)
   })
 
   view.webContents.on('did-navigate', (_event, url) => {
     viewCssState.delete(view.webContents)
+    resolveModelKey(tabId, url)
     sendToMainWindow('ai-url-updated', tabId, url)
   })
   view.webContents.on('did-navigate-in-page', (_event, url) => {
     sendToMainWindow('ai-url-updated', tabId, url)
+    const modelKey = viewModelKeys.get(tabId) || resolveModelKey(tabId, url) || ''
+    injectAiStatusObserver(view, modelKey)
   })
   view.webContents.on('did-start-loading', () => {
     sendToMainWindow('ai-loading', tabId, true)
@@ -2511,34 +2902,22 @@ function ensureAiView(tabId: string): Electron.WebContentsView {
     }
   })
 
-  // Console message interceptor for in-webview download action buttons
-  view.webContents.on('console-message', (_event, _level, message) => {
-    if (typeof message === 'string' && message.startsWith('__nexus_download_action__:')) {
-      try {
-        const payload = JSON.parse(message.slice('__nexus_download_action__:'.length))
-        if (payload.action === 'showItemInFolder' && payload.fullPath) {
-          if (existsSync(payload.fullPath)) {
-            shell.showItemInFolder(payload.fullPath)
-          }
-        } else if (payload.action === 'openPath' && payload.fullPath) {
-          if (existsSync(payload.fullPath)) {
-            shell.openPath(payload.fullPath)
-          }
-        } else if (payload.action === 'copyPath' && payload.fullPath) {
-          clipboard.writeText(payload.fullPath)
-        }
-      } catch (err) {
-        console.error('[Nexus Download Action Console Error]', err)
-      }
-    }
-  })
 
   // Transactional registration: register with TabDiscardManager BEFORE adding to window or setting in aiViews
   tabDiscardManager.registerView(tabId, view as unknown as DiscardableView)
 
+  attachAiStatusListener(view.webContents, tabId, (id, isGenerating, lastSnippet) => {
+    activeAiStatuses.set(id, isGenerating ? 'working' : 'done')
+    sendToMainWindow('ai-live-status', id, isGenerating, lastSnippet)
+  })
+
   if (mainWindow && !mainWindow.isDestroyed()) {
     try {
       mainWindow.contentView.addChildView(view)
+      if (aiNotificationView) {
+        mainWindow.contentView.removeChildView(aiNotificationView)
+        mainWindow.contentView.addChildView(aiNotificationView)
+      }
     } catch {}
   }
 
@@ -2567,9 +2946,13 @@ ipcMain.on('navigate_to_url', async (_event, tabId, url, bounds, modelKey) => {
   applyWebviewTheme(view, viewModelKeys.get(tabId))
   view.setBounds(bounds)
   if (bounds.width > 0) lastRealBounds.set(tabId, bounds)
-  void view.webContents.loadURL(url).catch((err) => {
-    console.warn(`[navigate_to_url] Failed to load URL for ${tabId}:`, err)
-  })
+  const currentUrl = view.webContents.getURL()
+  if (currentUrl !== url && !view.webContents.isLoading()) {
+    void view.webContents.loadURL(url).catch((err) => {
+      if (err?.code === 'ERR_ABORTED' || err?.errno === -3) return
+      console.warn(`[navigate_to_url] Failed to load URL for ${tabId}:`, err)
+    })
+  }
 })
 
 // Webview theming: inject the active app theme's own colors into AI pages.
@@ -2579,16 +2962,55 @@ let webviewTheme: { on: boolean; colors: Record<string, string> | null; radius?:
   null
 
 function themeFile() {
-  return join(app.getPath('userData'), 'theme.json')
+  return join(app.getPath('userData'), 'webview-theme.json')
 }
 
 function loadThemeFromDisk() {
   try {
-    const raw = readFileSync(themeFile(), 'utf-8')
-    const parsed = JSON.parse(raw)
-    if (parsed && typeof parsed === 'object' && 'colors' in parsed) webviewTheme = parsed
+    const file = themeFile()
+    if (existsSync(file)) {
+      const raw = readFileSync(file, 'utf-8')
+      const parsed = JSON.parse(raw)
+      if (parsed && typeof parsed === 'object' && 'colors' in parsed) {
+        webviewTheme = parsed
+        return
+      }
+    }
+    // Migration: if legacy theme.json contains webview-theme data (has colors/on and lacks activeId)
+    const legacy = join(app.getPath('userData'), 'theme.json')
+    if (existsSync(legacy)) {
+      const legacyRaw = readFileSync(legacy, 'utf-8')
+      const legacyParsed = JSON.parse(legacyRaw)
+      if (
+        legacyParsed &&
+        typeof legacyParsed === 'object' &&
+        ('colors' in legacyParsed || 'on' in legacyParsed) &&
+        !('activeId' in legacyParsed)
+      ) {
+        webviewTheme = legacyParsed
+        persistTheme()
+        return
+      }
+    }
   } catch {
     // first run: no theme file yet
+  } finally {
+    // Ensure webviewTheme has default fallback colors on startup so views are born themed
+    if (!webviewTheme || !webviewTheme.colors) {
+      webviewTheme = {
+        on: true,
+        colors: {
+          bg: '#050f14',
+          surface: '#07101e',
+          surface2: '#0b192e',
+          accent: '#00e5ff',
+          text: '#e0f7fa',
+          text2: '#4dd0e1',
+          border: '#0d47a1'
+        },
+        radius: 4
+      }
+    }
   }
 }
 
@@ -2596,7 +3018,7 @@ function persistTheme() {
   try {
     const dir = app.getPath('userData')
     mkdirSync(dir, { recursive: true })
-    writeFileSync(themeFile(), JSON.stringify(webviewTheme ?? null))
+    atomicWriteJson(themeFile(), webviewTheme ?? null)
   } catch {
     // non-fatal: theme still applies in-session
   }
@@ -3232,6 +3654,8 @@ function resolveModelKey(tabId: string, url?: string, explicitModelKey?: string)
       else if (host.includes('qwen') || host.includes('aliyun')) inferredKey = 'qwen'
       else if (host.includes('mistral')) inferredKey = 'mistral'
       else if (host.includes('grok') || host.includes('x.ai')) inferredKey = 'grok'
+      else if (host.includes('z.ai') || host.includes('bigmodel')) inferredKey = 'glm'
+      else if (host.includes('arena') || host.includes('lmarena')) inferredKey = 'arena'
 
       // Dynamic fallback: match against user-configured models from models.json
       if (!inferredKey) {
@@ -3288,7 +3712,7 @@ function applyWebviewTheme(view, modelKey?: string) {
   // blocks every later apply — theme never lands. Skip only while there is no
   // committed URL; isLoading() is too aggressive (SPAs stay "loading" for
   // minutes via long-poll) and would suppress all applies.
-  if (!wc.getURL()) return
+  if (!wc.getURL() || wc.getURL() === 'about:blank' || wc.getURL() === 'about:srcdoc') return
   const prevChain = viewCssChains.get(wc) ?? Promise.resolve()
   const nextChain = prevChain.then(async () => {
     const decision = nextThemeSwap(viewCssState.get(wc) ?? null, css)
@@ -3362,7 +3786,8 @@ ipcMain.handle('get_full_provider_js', (_event, modelKey?: string) => {
   return buildWebviewRuntimeJs(keyToUse)
 })
 
-ipcMain.handle('execute_live_provider_js', async (_event, modelKey: string, code: string) => {
+ipcMain.handle('execute_live_provider_js', async (event, modelKey: string, code: string) => {
+  if (!isValidMainWindowSender(event)) return { success: false, error: 'Unauthorized sender' }
   const targetKey = (modelKey || '').toLowerCase()
   let targetView: Electron.WebContentsView | null = null
 
@@ -3793,16 +4218,20 @@ ipcMain.on('activate_tab', async (_event, tabId, url, bounds, modelKey) => {
   }
 
   activeViewId = tabId
+  if (currentNotificationData?.tabId === tabId) {
+    dismissInAppToast()
+  }
   activeViewVisible = !isHidden
   try {
     if (bounds) {
       view.setBounds(bounds)
       if (!isHidden) lastRealBounds.set(tabId, bounds)
     }
-    view.setVisible(!isHidden)
-    if (!view.webContents?.isDestroyed?.()) {
-      view.webContents.setBackgroundThrottling(isHidden)
-      view.webContents.setAudioMuted(isHidden)
+    const shouldBeVisible = !isHidden && !overlaysOpen
+    if (typeof view?.setVisible === 'function') view.setVisible(shouldBeVisible)
+    if (view?.webContents && !view.webContents.isDestroyed?.()) {
+      view.webContents.setBackgroundThrottling?.(!shouldBeVisible)
+      view.webContents.setAudioMuted?.(!shouldBeVisible)
     }
   } catch (err) {
     console.error(`[activate_tab] Failed to set active view bounds/visibility for ${tabId}:`, err)
@@ -3886,12 +4315,28 @@ ipcMain.on('activate_tab', async (_event, tabId, url, bounds, modelKey) => {
       })()
     }
   } else if (url && !currentUrl && isUsableRestoreUrl(url)) {
-    console.log('[activate_tab] LOADING empty view:', url)
-    const myWakeToken = (wakeTokens.get(tabId) || 0) + 1
-    wakeTokens.set(tabId, myWakeToken)
-    void view.webContents.loadURL(url).catch((err) => {
-      console.warn(`[activate_tab] Failed to load empty view for ${tabId}:`, err)
-    })
+    const existingWake = activeWakeOperations.get(tabId)
+    if (existingWake && existingWake.targetUrl === url) {
+      console.log('[activate_tab] In-flight load already in progress for empty view:', tabId)
+    } else if (view.webContents.isLoading()) {
+      console.log('[activate_tab] View is already loading, skipping duplicate loadURL:', tabId)
+    } else {
+      console.log('[activate_tab] LOADING empty view:', url)
+      const myWakeToken = (wakeTokens.get(tabId) || 0) + 1
+      wakeTokens.set(tabId, myWakeToken)
+      activeWakeOperations.set(tabId, {
+        token: myWakeToken,
+        targetUrl: url
+      })
+      void view.webContents.loadURL(url).catch((err) => {
+        if (err?.code === 'ERR_ABORTED' || err?.errno === -3) return
+        console.warn(`[activate_tab] Failed to load empty view for ${tabId}:`, err)
+      }).finally(() => {
+        if (activeWakeOperations.get(tabId)?.token === myWakeToken) {
+          activeWakeOperations.delete(tabId)
+        }
+      })
+    }
   }
 
   // Immediate focus for tabs that are already resident/loaded
@@ -4033,7 +4478,8 @@ ipcMain.handle('provider_clear_session', async (event, providerKey: string, prov
   }
 })
 
-ipcMain.handle('sessions_sync_all', async () => {
+ipcMain.handle('sessions_sync_all', async (event) => {
+  if (!isValidMainWindowSender(event)) return { success: false, message: 'Unauthorized' }
   const result = await syncAllSessionsFromBrowsers()
   if (result.success) {
     for (const view of aiViews.values()) {
@@ -4045,7 +4491,8 @@ ipcMain.handle('sessions_sync_all', async () => {
   return result
 })
 
-ipcMain.handle('sessions_sync_profile', async (_event, profileId: string) => {
+ipcMain.handle('sessions_sync_profile', async (event, profileId: string) => {
+  if (!isValidMainWindowSender(event)) return { success: false, message: 'Unauthorized' }
   const result = await syncSessionFromProfile(profileId)
   if (result.success) {
     for (const view of aiViews.values()) {
@@ -4057,9 +4504,13 @@ ipcMain.handle('sessions_sync_profile', async (_event, profileId: string) => {
   return result
 })
 
-ipcMain.handle('sessions_get_profiles', () => listProfiles())
+ipcMain.handle('sessions_get_profiles', (event) => {
+  if (!isValidMainWindowSender(event)) return []
+  return listProfiles()
+})
 
-ipcMain.handle('sessions_pick_custom_folder', async () => {
+ipcMain.handle('sessions_pick_custom_folder', async (event) => {
+  if (!isValidMainWindowSender(event)) return { success: false, message: 'Unauthorized' }
   if (!mainWindow || mainWindow.isDestroyed()) return { success: false, message: 'Window unavailable' }
   const res = await dialog.showOpenDialog(mainWindow, {
     title: 'Select Browser Profile Folder',
@@ -4092,7 +4543,8 @@ ipcMain.handle('sessions_pick_custom_folder', async () => {
   }
 })
 
-ipcMain.handle('cookies_import_json', async (_event, jsonStr: string) => {
+ipcMain.handle('cookies_import_json', async (event, jsonStr: string) => {
+  if (!isValidMainWindowSender(event)) return { success: false, message: 'Unauthorized' }
   const result = await importCookiesFromJson(jsonStr)
   if (result.success) {
     for (const view of aiViews.values()) {
@@ -4150,9 +4602,12 @@ ipcMain.on('resize_view', (_event, bounds) => {
     if (prev.x !== bounds.x || prev.y !== bounds.y || prev.width !== bounds.width || prev.height !== bounds.height) {
       activeView.setBounds(bounds)
     }
-    activeView.setVisible(true)
-    activeView.webContents.setBackgroundThrottling(false)
-    activeView.webContents.setAudioMuted(false)
+    const shouldBeVisible = !hidden && !overlaysOpen
+    if (typeof activeView?.setVisible === 'function') activeView.setVisible(shouldBeVisible)
+    if (activeView?.webContents && !activeView.webContents.isDestroyed?.()) {
+      activeView.webContents.setBackgroundThrottling?.(!shouldBeVisible)
+      activeView.webContents.setAudioMuted?.(!shouldBeVisible)
+    }
 
     // Re-theme only when active view width or height actually changed.
     // Debounced: window resize fires ~60 events/sec; settle once at the end.
@@ -4458,35 +4913,60 @@ if (fs.existsSync(legacyDataDir)) {
 }
 
 const historyFile = path.join(dataDir, 'history.json')
-
-ipcMain.handle('read_history', () => {
-  try {
-    return fs.readFileSync(historyFile, 'utf-8')
-  } catch {
-    return '[]'
-  }
-})
-
-ipcMain.handle('get_history', () => {
-  try {
-    return fs.readFileSync(historyFile, 'utf-8')
-  } catch {
-    return '[]'
-  }
-})
-
+let pendingHistoryData: string | null = null
 let historySaveTimer: NodeJS.Timeout | null = null
 
-ipcMain.handle('save_history', (_event, dataStr) => {
-  if (historySaveTimer) clearTimeout(historySaveTimer)
-  historySaveTimer = setTimeout(() => {
-    fs.promises.writeFile(historyFile, dataStr).catch((err) => {
-      console.error('History save error:', err)
-    })
-  }, 2000)
+function flushPendingHistorySync(): void {
+  if (historySaveTimer) {
+    clearTimeout(historySaveTimer)
+    historySaveTimer = null
+  }
+  if (pendingHistoryData !== null) {
+    try {
+      const parsed = JSON.parse(pendingHistoryData)
+      atomicWriteJson(historyFile, parsed)
+      pendingHistoryData = null
+    } catch (err) {
+      console.error('[History] Failed to flush history atomically:', err)
+    }
+  }
+}
+
+app.on('before-quit', () => {
+  flushPendingHistorySync()
 })
 
-ipcMain.handle('list_history', () => {
+ipcMain.handle('read_history', (event) => {
+  if (!isValidMainWindowSender(event)) return '[]'
+  try {
+    return fs.readFileSync(historyFile, 'utf-8')
+  } catch {
+    return '[]'
+  }
+})
+
+ipcMain.handle('get_history', (event) => {
+  if (!isValidMainWindowSender(event)) return '[]'
+  try {
+    return fs.readFileSync(historyFile, 'utf-8')
+  } catch {
+    return '[]'
+  }
+})
+
+ipcMain.handle('save_history', (event, dataStr: string) => {
+  if (!isValidMainWindowSender(event)) return false
+  if (typeof dataStr !== 'string') return false
+  pendingHistoryData = dataStr
+  if (historySaveTimer) clearTimeout(historySaveTimer)
+  historySaveTimer = setTimeout(() => {
+    flushPendingHistorySync()
+  }, 1000)
+  return true
+})
+
+ipcMain.handle('list_history', (event) => {
+  if (!isValidMainWindowSender(event)) return []
   try {
     return JSON.parse(fs.readFileSync(historyFile, 'utf-8'))
   } catch {
