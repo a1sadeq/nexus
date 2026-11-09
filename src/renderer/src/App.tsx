@@ -4,6 +4,8 @@ import {
   deserializeState,
   getRecentActiveTabIds,
   getVisibleActiveTabs,
+  getOrderedVisualTabs,
+  getNextVisualTab,
   moveActiveTabInList,
   switchToModel,
   addNewChat,
@@ -271,10 +273,13 @@ function App() {
   const mruRef = useRef(mruTabIds)
   const tabsRef = useRef(tabs)
   const activeIdRef = useRef(activeId)
+  const pinnedIdsRef = useRef<string[]>([])
+  const residentTabIdsRef = useRef<string[]>([])
 
   useEffect(() => { mruRef.current = mruTabIds }, [mruTabIds])
   useEffect(() => { tabsRef.current = tabs }, [tabs])
   useEffect(() => { activeIdRef.current = activeId }, [activeId])
+  useEffect(() => { residentTabIdsRef.current = residentTabIds }, [residentTabIds])
 
   const activeTab = tabs.find((t) => t.id === activeId)
   const resolvedActiveModelKey = useMemo(() => {
@@ -688,6 +693,7 @@ Acknowledge these skills with a concise confirmation in this exact format:
       return []
     }
   })
+  useEffect(() => { pinnedIdsRef.current = pinnedIds }, [pinnedIds])
 
   // Reconcile pinned tabs on mount. A one-time non-destructive migration merges legacy
   // localStorage with backend pinned.json; subsequent boots treat the backend as authoritative.
@@ -1127,16 +1133,22 @@ Acknowledge these skills with a concise confirmation in this exact format:
 
   useEffect(() => {
     const handleTabCycleIPC = (_event: any, data: { shift: boolean }) => {
-      const currentMru = mruRef.current.filter((id) => tabsRef.current.some((t) => t.id === id && t.url))
-      const len = currentMru.length
-      if (len <= 1) return
+      const visualTabs = getOrderedVisualTabs(
+        tabsRef.current,
+        activeIdRef.current,
+        pinnedIdsRef.current,
+        tabStatusesRef.current,
+        residentTabIdsRef.current
+      )
+      if (visualTabs.length <= 1) return
 
-      const targetIdx = data.shift ? len - 1 : 1
-      const targetId = currentMru[targetIdx]
-      const targetTab = tabsRef.current.find((t) => t.id === targetId)
-
-      if (targetTab && targetTab.url) {
-        switchToTabRef.current?.(targetTab.id, targetTab.url)
+      const nextTab = getNextVisualTab(visualTabs, activeIdRef.current, Boolean(data?.shift))
+      if (nextTab && nextTab.url) {
+        setShowUrlBar(false)
+        setShowTabOverview(false)
+        setShowNewTab(false)
+        sfx.pop()
+        switchToTabRef.current?.(nextTab.id, nextTab.url)
       }
     }
 
@@ -1559,12 +1571,24 @@ Acknowledge these skills with a concise confirmation in this exact format:
           const { index, isPinned } = data
           if (isPinned) {
             const pinned = tabs.filter((t) => pinnedIds.includes(t.id))
-            const target = pinned[index]
-            if (target?.url) switchToTab(target.id, target.url)
+            const target = index === -1 ? pinned[pinned.length - 1] : pinned[index]
+            if (target?.url) {
+              setShowUrlBar(false)
+              setShowTabOverview(false)
+              setShowNewTab(false)
+              sfx.pop()
+              switchToTab(target.id, target.url)
+            }
           } else {
-            const regular = tabs.filter((t) => !pinnedIds.includes(t.id))
-            const target = regular[index]
-            if (target?.url) switchToTab(target.id, target.url)
+            const visualTabs = getOrderedVisualTabs(tabs, activeId, pinnedIds, tabStatuses, residentTabIds)
+            const target = index === -1 ? visualTabs[visualTabs.length - 1] : visualTabs[index]
+            if (target?.url) {
+              setShowUrlBar(false)
+              setShowTabOverview(false)
+              setShowNewTab(false)
+              sfx.pop()
+              switchToTab(target.id, target.url)
+            }
           }
           break
         }

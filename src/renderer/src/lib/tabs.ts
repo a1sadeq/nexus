@@ -470,3 +470,64 @@ export function sanitizeHistory(
 
   return result
 }
+
+/**
+ * Produces the exact ordered sequence of tabs visually displayed in the vertical tabs list.
+ * 1. Active group (pinned first, then unpinned)
+ * 2. Discarded/sleeping group (pinned first, then unpinned)
+ */
+export function getOrderedVisualTabs(
+  tabs: Tab[],
+  activeId: string | null | undefined,
+  pinnedIds: string[] = [],
+  tabStatuses: Record<string, string> = {},
+  residentTabIds?: string[]
+): Tab[] {
+  const activeList: Tab[] = []
+  const discardedList: Tab[] = []
+
+  for (const tab of tabs) {
+    const isCurrentlyActive = tab.id === activeId
+    const isWorkingOrWaiting =
+      tabStatuses[tab.id] === 'working' || tabStatuses[tab.id] === 'waiting-input'
+    const isResident = residentTabIds
+      ? residentTabIds.includes(tab.id)
+      : isCurrentlyActive || pinnedIds.includes(tab.id)
+
+    if (isCurrentlyActive || isWorkingOrWaiting || isResident) {
+      activeList.push(tab)
+    } else {
+      discardedList.push(tab)
+    }
+  }
+
+  const sortGroup = (list: Tab[]) => {
+    const pinned = list.filter((t) => pinnedIds.includes(t.id))
+    const unpinned = list.filter((t) => !pinnedIds.includes(t.id))
+    return [...pinned, ...unpinned]
+  }
+
+  return [...sortGroup(activeList), ...sortGroup(discardedList)]
+}
+
+/**
+ * Calculates the next tab to cycle to in visual sequence.
+ * Handles forward (Ctrl+Tab) and backward (Ctrl+Shift+Tab) cycling.
+ */
+export function getNextVisualTab(
+  orderedVisualTabs: Tab[],
+  activeId: string | null | undefined,
+  reverse: boolean = false
+): Tab | null {
+  if (orderedVisualTabs.length === 0) return null
+  if (orderedVisualTabs.length === 1) return orderedVisualTabs[0]
+
+  const currIdx = orderedVisualTabs.findIndex((t) => t.id === activeId)
+  if (currIdx === -1) {
+    return orderedVisualTabs[0]
+  }
+
+  const len = orderedVisualTabs.length
+  const nextIdx = reverse ? (currIdx - 1 + len) % len : (currIdx + 1) % len
+  return orderedVisualTabs[nextIdx]
+}

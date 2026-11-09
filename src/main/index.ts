@@ -1721,9 +1721,10 @@ export function routeGlobalShortcut(event: Electron.Event, input: Electron.Input
   }
 
   // Ctrl+Tab / Ctrl+Shift+Tab -> Cycle tabs
-  if (matchesAction(input, 'tab-cycle')) {
+  const isTab = keyLower === 'tab' || code === 'Tab'
+  if (isCtrlOrMeta && !input.alt && isTab) {
     event.preventDefault()
-    sendToMainWindow('trigger_tab_cycle', { shift: input.shift })
+    sendToMainWindow('trigger_tab_cycle', { shift: Boolean(input.shift) })
     return true
   }
 
@@ -1858,17 +1859,22 @@ export function routeGlobalShortcut(event: Electron.Event, input: Electron.Input
     return true
   }
 
-  // Digits 1..9: Ctrl+1..9 (regular tab) or Alt+1..9 (pinned tab)
-  const digitMatch = keyLower.match(/^[1-9]$/)
-  if (digitMatch && !input.shift) {
-    const digit = parseInt(digitMatch[0], 10)
+  // Digits 1..9: Ctrl+1..9 (regular/visual tab) or Alt+1..9 (pinned tab)
+  const digitCodeMatch = code ? code.match(/^(?:Digit|Numpad)([1-9])$/) : null
+  const digitKeyMatch = keyLower.match(/^[1-9]$/)
+  const digitNum = digitCodeMatch
+    ? parseInt(digitCodeMatch[1], 10)
+    : (digitKeyMatch ? parseInt(digitKeyMatch[0], 10) : null)
+
+  if (digitNum !== null && !input.shift) {
+    const targetIndex = digitNum === 9 ? -1 : digitNum - 1
     if (isCtrlOrMeta && !input.alt) {
       event.preventDefault()
-      sendToMainWindow('execute-global-action', { action: 'switch_tab_index', index: digit - 1, isPinned: false })
+      sendToMainWindow('execute-global-action', { action: 'switch_tab_index', index: targetIndex, isPinned: false })
       return true
     } else if (input.alt && !isCtrlOrMeta) {
       event.preventDefault()
-      sendToMainWindow('execute-global-action', { action: 'switch_tab_index', index: digit - 1, isPinned: true })
+      sendToMainWindow('execute-global-action', { action: 'switch_tab_index', index: targetIndex, isPinned: true })
       return true
     }
   }
