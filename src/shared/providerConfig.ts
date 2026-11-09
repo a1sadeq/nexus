@@ -8,6 +8,8 @@ export interface ProviderFeatureConfig {
   autoSubmitSkillPrompt?: boolean       // Whether skill prompt auto-clicks send
   newChatSelector?: string              // Site's "+ New Chat" button selector
   stopGenerationSelector?: string       // Site's "Stop generating" button selector
+  assistantMessageSelector?: string     // Assistant message container for text growth and completion detection
+  streamingSelector?: string            // Active streaming / thinking indicator selector
   virtualizationSelector?: string       // Selector for content-visibility: auto memory optimization
   enableSlashFocus?: boolean            // Whether '/' hotkey focuses prompt
   enableFocusRetention?: boolean        // Whether caret position is remembered on blur

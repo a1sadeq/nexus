@@ -4,10 +4,27 @@ import {
   hasQuestionOrChoice,
   updateTabLoadingStatus,
   acknowledgeTabStatus,
+  isCompletedStatus,
+  ACTIVE_TAB_LINGER_MS,
+  SWITCH_TAB_LINGER_MS,
   type TabAiStatus
 } from './tabStatus'
 
 describe('tabStatus', () => {
+  describe('lifecycle linger constants and completion predicates', () => {
+    it('defines 6000ms linger for active tab and 4000ms linger upon switching to finished tab', () => {
+      expect(ACTIVE_TAB_LINGER_MS).toBe(6000)
+      expect(SWITCH_TAB_LINGER_MS).toBe(4000)
+    })
+
+    it('identifies completed statuses accurately', () => {
+      expect(isCompletedStatus('done')).toBe(true)
+      expect(isCompletedStatus('waiting-input')).toBe(true)
+      expect(isCompletedStatus('working')).toBe(false)
+      expect(isCompletedStatus('idle')).toBe(false)
+      expect(isCompletedStatus(undefined)).toBe(false)
+    })
+  })
   describe('formatCollapsedTitle', () => {
     it('returns "New Chat" when title is undefined, null, or empty', () => {
       expect(formatCollapsedTitle(undefined)).toBe('New Chat')

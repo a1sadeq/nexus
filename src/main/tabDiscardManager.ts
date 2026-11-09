@@ -48,6 +48,7 @@ export interface TabDiscardManagerOptions {
   onTeardown?: (tabId: string, view: DiscardableView, contents: DiscardableWebContents) => void | Promise<void>
   snapshotTimeoutMs?: number
   idleCheckIntervalMs?: number
+  retentionGraceMs?: number
   clock?: () => number
 }
 
@@ -79,6 +80,7 @@ export class TabDiscardManager {
   private readonly isBusy: (tabId: string) => boolean
   private readonly onTeardown: (tabId: string, view: DiscardableView, contents: DiscardableWebContents) => void | Promise<void>
   private readonly snapshotTimeoutMs: number
+  private readonly retentionGraceMs: number
   private readonly clock: () => number
 
   private readonly idleCheckIntervalMs: number
@@ -97,6 +99,7 @@ export class TabDiscardManager {
     this.onTeardown = options.onTeardown || ((_id, _view, contents) => closeWebContents(contents))
     this.idleCheckIntervalMs = Math.max(1000, options.idleCheckIntervalMs ?? 30000)
     this.snapshotTimeoutMs = options.snapshotTimeoutMs ?? 1500
+    this.retentionGraceMs = options.retentionGraceMs ?? 0
     this.clock = options.clock || (() => Date.now())
   }
 
@@ -526,13 +529,20 @@ export class TabDiscardManager {
 
     // Find candidates
     const eligible: Array<{ tabId: string; ts: number }> = []
+    const now = this.clock()
 
     for (const [tabId, view] of this.views) {
       if (this.protectedFromEviction(tabId, view)) continue
 
+      const activatedAt = this.lastActivatedAt.get(tabId) || 0
+      // 15-minute immunity grace period: protect recently used tabs from capacity evictions
+      if (this.retentionGraceMs > 0 && now - activatedAt < this.retentionGraceMs) {
+        continue
+      }
+
       eligible.push({
         tabId,
-        ts: this.lastActivatedAt.get(tabId) || 0
+        ts: activatedAt
       })
     }
 

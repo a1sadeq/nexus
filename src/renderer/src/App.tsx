@@ -18,7 +18,14 @@ import { getShortcutKeys, getShortcutMap, onShortcutsChanged } from './lib/short
 import type { Tab, HistoryItem, ModelKey } from './lib/tabs'
 import ChatTabs from './components/ChatTabs'
 import VerticalTabs from './components/VerticalTabs'
-import { updateTabLoadingStatus, acknowledgeTabStatus, type TabAiStatus } from './lib/tabStatus'
+import {
+  updateTabLoadingStatus,
+  acknowledgeTabStatus,
+  isCompletedStatus,
+  ACTIVE_TAB_LINGER_MS,
+  SWITCH_TAB_LINGER_MS,
+  type TabAiStatus
+} from './lib/tabStatus'
 import { BRAND_IDS, modelLabel, modelColor } from './lib/modelVisuals'
 import { BrandIcon, IconPanelLeft, IconPanelLeftClose, IconSearch, IconPlus } from './components/BrandIcons'
 import { pushClosedTab, reopenClosedTab, type ClosedTabEntry } from './lib/tabs'
@@ -128,7 +135,7 @@ function App() {
   const [tabs, setTabs] = useState<Tab[]>(initialTabs.tabs)
   const [activeId, setActiveId] = useState<string | null>(initialTabs.activeId)
   const [residentTabIds, setResidentTabIds] = useState<string[]>(() =>
-    getRecentActiveTabIds(initialTabs.tabs, initialTabs.activeId, initialTabs.mruTabIds, 5)
+    getRecentActiveTabIds(initialTabs.tabs, initialTabs.activeId, initialTabs.mruTabIds, 7)
   )
 
   // Listen for real-time tab discard status from main process
@@ -724,6 +731,10 @@ Acknowledge these skills with a concise confirmation in this exact format:
 
   const [loadingTabId, setLoadingTabId] = useState<string | null>(null)
   const [tabStatuses, setTabStatuses] = useState<Record<string, TabAiStatus>>({})
+  const tabStatusesRef = useRef<Record<string, TabAiStatus>>({})
+  useEffect(() => {
+    tabStatusesRef.current = tabStatuses
+  }, [tabStatuses])
   const isWindowFocusedRef = useRef(true)
 
   useEffect(() => {
@@ -766,7 +777,7 @@ Acknowledge these skills with a concise confirmation in this exact format:
     }
   }, [])
 
-  const scheduleStatusDismissal = useCallback((tabId: string, delayMs: number = 5000) => {
+  const scheduleStatusDismissal = useCallback((tabId: string, delayMs: number = ACTIVE_TAB_LINGER_MS) => {
     cancelStatusDismissal(tabId)
     const timer = setTimeout(() => {
       statusDismissTimersRef.current.delete(tabId)
@@ -927,8 +938,8 @@ Acknowledge these skills with a concise confirmation in this exact format:
         // If generation stopped
         if (!isGenerating) {
           if (isActive) {
-            // Active tab finished: linger for 5 seconds so user has clear visual confirmation
-            scheduleStatusDismissal(tabId, 5000)
+            // Active tab finished: linger for 6 seconds so user has clear visual confirmation, then transition to idle
+            scheduleStatusDismissal(tabId, ACTIVE_TAB_LINGER_MS)
           } else {
             // Background tab finished: trigger sound FX
             const status = updated[tabId]
@@ -1106,8 +1117,18 @@ Acknowledge these skills with a concise confirmation in this exact format:
       // Dismiss in-app toast for this tab
       // @ts-ignore
       window.electron?.ipcRenderer?.send('dismiss_in_app_toast')
-      // Give 5 seconds grace period so completed status badge does not vanish in 0ms on click
-      scheduleStatusDismissal(id, 5000)
+
+      // Context-Aware Hybrid Linger:
+      // If the selected tab was waiting with completed status ('done' or 'waiting-input'),
+      // retain the badge for 4 seconds so the user has immediate visual confirmation of the completed answer,
+      // then smoothly fade back to idle.
+      const currentStatus = tabStatusesRef.current[id]
+      if (isCompletedStatus(currentStatus)) {
+        scheduleStatusDismissal(id, SWITCH_TAB_LINGER_MS)
+      } else {
+        cancelStatusDismissal(id)
+      }
+
       const bounds = containerBounds() || { x: 0, y: 0, width: 0, height: 0 }
       if (url) {
         const modelKey = tabs.find((t) => t.id === id)?.model
@@ -1116,7 +1137,7 @@ Acknowledge these skills with a concise confirmation in this exact format:
       }
       scheduleSnapshotCapture(id)
     },
-    [scheduleSnapshotCapture, tabs, scheduleStatusDismissal]
+    [scheduleSnapshotCapture, tabs, scheduleStatusDismissal, cancelStatusDismissal]
   )
 
   const loadTabUrl = useCallback(

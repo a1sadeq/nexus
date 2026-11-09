@@ -1,6 +1,22 @@
 export type TabAiStatus = 'idle' | 'working' | 'waiting-input' | 'done'
 
 /**
+ * Context-Aware Hybrid Linger Durations (in milliseconds):
+ * - Active tab completed: 6000ms visual confirmation before smoothly transitioning to idle.
+ * - Background tab switched to: 4000ms acknowledgment window before transitioning to idle.
+ */
+export const ACTIVE_TAB_LINGER_MS = 6000
+export const SWITCH_TAB_LINGER_MS = 4000
+
+/**
+ * Determines whether a given tab status represents a completed AI state
+ * (either standard completion 'done' or action-required 'waiting-input').
+ */
+export function isCompletedStatus(status?: TabAiStatus | null): boolean {
+  return status === 'done' || status === 'waiting-input'
+}
+
+/**
  * Format a tab title for the collapsed vertical sidebar state.
  * Extracts the first 3 to 5 words (default 4) so the tab's topic
  * is immediately readable without requiring sidebar expansion.

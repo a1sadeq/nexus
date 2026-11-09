@@ -395,10 +395,10 @@ Target URL: **${url}**
 - Return an empty string for every unverified hook. Do NOT return null, preserve an unverified existing value, or invent a fallback. Nexus ignores empty selector strings and skips live zero-match fields on import, leaving existing settings unchanged; review those existing settings separately.
 - Evidence counts are totals before sampling; missing counts or budget-exhausted measurements are UNKNOWN, not zero. inViewport is a bounded geometric clipping approximation, not paint or occlusion verification.
 - The import workflow validates CSS and live counts, previews them, and rechecks before applying matched fields. This does not prove semantic correctness.
-- Output is limited to these eight string selector keys. Do not output JavaScript, customInitScript, new feature flags, or diagnostic fields.
+- Output is limited to these ten string selector keys. Do not output JavaScript, customInitScript, new feature flags, or diagnostic fields.
 
 ## 🎯 OBJECTIVE
-Analyze the DOM structure of **"${name}"** (${url}) and provide evidence-backed CSS selectors where available (empty strings otherwise) required for the following 8 automation features:
+Analyze the DOM structure of **"${name}"** (${url}) and provide evidence-backed CSS selectors where available (empty strings otherwise) required for the following 10 automation & intelligence features:
 
 ### 1. File Upload / Attachment Input (\`attachmentSelector\`)
 - **Purpose**: Powers native file upload (\`Ctrl+O\`) and codebase folder upload (\`Ctrl+Shift+O\`) with review modal & CDP injection.
@@ -431,11 +431,21 @@ Analyze the DOM structure of **"${name}"** (${url}) and provide evidence-backed 
 - **Examples**: \`a[href="/"]\`, \`button[aria-label*="New chat"]\`, \`[data-testid="new-chat-button"]\`
 
 ### 7. Stop Generation Button (\`stopGenerationSelector\`)
-- **Purpose**: Stops streaming output when requested.
-- **Targets**: The square stop button that appears while the model is responding.
-- **Examples**: \`button[aria-label*="Stop"]\`, \`button.stop-btn\`
+- **Purpose**: Identifies when the model is generating and enables stop streaming control.
+- **Targets**: The square stop button that appears inside the composer while responding.
+- **Examples**: \`button[aria-label*="Stop"]\`, \`button[data-testid*="stop"]\`, \`button.stop-btn\`
 
-### 8. Memory Virtualization (\`virtualizationSelector\`)
+### 8. AI Response Message Container (\`assistantMessageSelector\`)
+- **Purpose**: Tracks assistant message growth and extracts completed answer snippet for Iron-Man notifications and smart choice detection.
+- **Targets**: The wrapper element for the ASSISTANT's message turn.
+- **Examples**: \`[data-message-author-role="assistant"]\`, \`model-response\`, \`.bot.message\`, \`div[class*="ds-message"]\`
+
+### 9. Live Streaming / Thinking Indicator (\`streamingSelector\`)
+- **Purpose**: Powers real-time AI status observation beacon (turns purple while thinking/generating, green when finished).
+- **Targets**: The active streaming cursor, pulsing indicator, or thinking accordion.
+- **Examples**: \`.result-streaming\`, \`model-response.is-streaming\`, \`[class*="cursor-blink"]\`, \`.ds-thinking\`
+
+### 10. Memory Virtualization (\`virtualizationSelector\`)
 - **Purpose**: Applies \`content-visibility: auto\` to off-screen messages to reduce RAM footprint in long threads.
 - **Targets**: Repeated chat message container elements.
 - **Examples**: \`[data-message-id]\`, \`.conversation-turn\`, \`.chat-message\`
@@ -457,6 +467,8 @@ IMPORTANT: Return ONLY a valid JSON object with EXACTLY the known keys shown bel
   "chatTitleSelector": "...",
   "newChatSelector": "...",
   "stopGenerationSelector": "...",
+  "assistantMessageSelector": "...",
+  "streamingSelector": "...",
   "virtualizationSelector": "..."
 }
 \`\`\`

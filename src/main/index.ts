@@ -463,6 +463,7 @@ export const tabDiscardManager = new TabDiscardManager({
     const status = activeAiStatuses.get(tabId)
     return status === 'working' || status === 'waiting-input'
   },
+  retentionGraceMs: 15 * 60 * 1000,
   onTeardown: async (tabId, view, contents) => {
     await closeWebContents(contents)
     if (mainWindow && !mainWindow.isDestroyed()) {

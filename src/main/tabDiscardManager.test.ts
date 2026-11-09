@@ -73,7 +73,7 @@ describe('TabDiscardManager', () => {
     expect(manager.getPolicy().policy).toEqual({
       version: 1,
       tabDiscardMinutes: 10,
-      maxActiveTabs: 10
+      maxActiveTabs: 7
     })
 
     // Set new policy: 60 minutes, max 5 tabs
@@ -282,6 +282,47 @@ describe('TabDiscardManager', () => {
     manager.onExplicitNavigation('tabA')
     expect(manager.isTabEvicted('tabA')).toBe(false)
     expect(manager.getEvictedTabState('tabA')).toBeUndefined()
+  })
+
+  it('D15: protects tabs activated within retentionGraceMs (15 min) from capacity eviction', async () => {
+    const mockA = createMockView('tabA')
+    const mockB = createMockView('tabB')
+
+    const manager = new TabDiscardManager({
+      getUserDataDir: () => tempDir,
+      clock: () => simulatedTime,
+      retentionGraceMs: 15 * 60 * 1000,
+      onTeardown: (_id, v) => v.webContents.close()
+    })
+    manager.init()
+    manager.setPolicy({ maxActiveTabs: 1 })
+
+    manager.registerView('tabA', mockA.view)
+    manager.activateTab('tabA')
+
+    // 2 minutes later, user activates tabB
+    simulatedTime += 2 * 60 * 1000
+    manager.registerView('tabB', mockB.view)
+    manager.activateTab('tabB')
+
+    // Reconcile capacity runs: totalResident (2) > maxActiveTabs (1)
+    // But tabA was activated only 2 minutes ago (< 15 min grace period)
+    manager.reconcileCapacity()
+    await new Promise((r) => setTimeout(r, 20))
+
+    // tabA MUST NOT be evicted because of the 15-minute grace period!
+    expect(mockA.destroyed).toBe(false)
+    expect(manager.hasView('tabA')).toBe(true)
+    expect(manager.getStatus().pendingCount).toBe(0)
+
+    // Advance simulated time past 15 minutes (e.g. 16 minutes after tabA was active)
+    simulatedTime += 14 * 60 * 1000 + 1
+    manager.reconcileCapacity()
+    await new Promise((r) => setTimeout(r, 20))
+
+    // Now tabA is past 15 minutes and gets evicted for capacity
+    expect(mockA.destroyed).toBe(true)
+    expect(manager.isTabEvicted('tabA')).toBe(true)
   })
 })
 

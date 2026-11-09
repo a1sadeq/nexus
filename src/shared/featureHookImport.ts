@@ -2,7 +2,8 @@ import type { ProviderFeatureConfig } from './providerConfig'
 
 export const FEATURE_HOOK_KEYS = [
   'attachmentSelector', 'promptNavSelector', 'composerSelector', 'sendButtonSelector',
-  'chatTitleSelector', 'newChatSelector', 'stopGenerationSelector', 'virtualizationSelector'
+  'chatTitleSelector', 'newChatSelector', 'stopGenerationSelector', 'virtualizationSelector',
+  'assistantMessageSelector', 'streamingSelector'
 ] as const
 export type FeatureHookKey = typeof FEATURE_HOOK_KEYS[number]
 export type HookSelectors = Partial<Record<FeatureHookKey, string>>
@@ -15,7 +16,7 @@ export function parseFeatureHookImport(input: string): { selectors: HookSelector
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Expected a JSON object of selector strings')
   const selectors: HookSelectors = {}, ignored: string[] = []
   for (const [key, value] of Object.entries(parsed)) {
-    if (!(FEATURE_HOOK_KEYS as readonly string[]).includes(key)) throw new Error(`Unsupported AI import field: ${key}. Only the eight selector keys are allowed.`)
+    if (!(FEATURE_HOOK_KEYS as readonly string[]).includes(key)) throw new Error(`Unsupported AI import field: ${key}. Only the supported selector keys are allowed.`)
     if (typeof value !== 'string') throw new Error(`${key} must be a string, not ${value === null ? 'null' : typeof value}`)
     const trimmed = value.trim()
     if (!trimmed) { ignored.push(key); continue }

@@ -28,11 +28,11 @@ export interface TabDiscardStatus {
 export const DEFAULT_TAB_DISCARD_POLICY: TabDiscardPolicy = {
   version: 1,
   tabDiscardMinutes: 10,
-  maxActiveTabs: 10
+  maxActiveTabs: 7
 }
 
 export const VALID_DISCARD_MINUTES = [0, 5, 10, 30, 60] as const
-export const VALID_MAX_ACTIVE_TABS = [0, 1, 3, 5, 10] as const
+export const VALID_MAX_ACTIVE_TABS = [0, 1, 3, 5, 7, 10] as const
 
 export function validateTabDiscardPolicy(input: unknown): { policy: TabDiscardPolicy; valid: boolean; errors: string[] } {
   const errors: string[] = []

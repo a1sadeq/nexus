@@ -121,7 +121,7 @@ const SETTINGS_SEARCH_INDEX: SearchItem[] = [
   { id: 'custom-models', title: 'Add Custom AI Provider', subtitle: 'Register a new model endpoint or web URL', tab: 'models', keywords: ['add', 'custom', 'model', 'new', 'endpoint', 'provider'] },
 
   // AI Features & Hooks
-  { id: 'ai-features', title: 'AI Features & Interceptors', subtitle: 'Keyboard shortcuts, DOM hooks & auto-actions', tab: 'features', keywords: ['feature', 'hook', 'prompt', 'shortcut', 'action', 'ctrl+b', 'ctrl+shift+o', 'interceptor', 'context'] },
+  { id: 'ai-features', title: 'AI Features & Hooks', subtitle: 'Keyboard shortcuts, DOM hooks & auto-actions', tab: 'features', keywords: ['feature', 'hook', 'prompt', 'shortcut', 'action', 'ctrl+b', 'ctrl+shift+o', 'interceptor', 'context'] },
 
   // Skills & Tools
   { id: 'skills-tools', title: 'Skills & Agent Framework', subtitle: 'Manage active agent skills, plugins & MCP tools', tab: 'skills', keywords: ['skill', 'tool', 'agent', 'mcp', 'plugin', 'framework', 'automation'] },
@@ -1593,7 +1593,7 @@ export default function SettingsOverlay({
                 {tab === 'shortcuts' && 'Keyboard Shortcuts Matrix'}
                 {tab === 'models' && 'AI Providers & Endpoints'}
                 {tab === 'sessions' && 'AI Accounts & Provider Sessions'}
-                {tab === 'features' && 'AI Features & Interceptors'}
+                {tab === 'features' && 'AI Features & Hooks'}
                 {tab === 'skills' && 'Skills & Autonomous Tools'}
                 {tab === 'themes' && 'Themes & Color Palettes'}
                 {tab === 'style' && 'Interface & Style Studio'}
