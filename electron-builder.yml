@@ -39,6 +39,8 @@ linux:
     - pacman
   maintainer: electronjs.org
   category: Utility
+pacman:
+  artifactName: ${name}-${version}.${ext}
 appImage:
   artifactName: ${name}-${version}.${ext}
 npmRebuild: false

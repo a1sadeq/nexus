@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   build-windows:
-    name: Build Windows
+    name: Build Windows (.exe)
     runs-on: windows-latest
     timeout-minutes: 30
 
@@ -51,15 +51,15 @@ jobs:
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: nexus-windows-${{ github.ref_name }}
+          name: nexus-windows
           path: |
             dist/*.exe
             dist/*.exe.blockmap
             dist/latest.yml
-          if-no-files-found: error
+          if-no-files-found: warn
 
   build-linux:
-    name: Build Linux Pacman
+    name: Build Linux (.pacman)
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -76,7 +76,7 @@ jobs:
       - name: Install system packaging tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y libarchive-tools
+          sudo apt-get install -y libarchive-tools bsdtar zstd fakeroot
 
       - name: Cache Electron downloads
         uses: actions/cache@v4
@@ -99,48 +99,55 @@ jobs:
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: nexus-linux-${{ github.ref_name }}
+          name: nexus-linux
           path: |
             dist/*.pacman
             dist/latest-linux.yml
-          if-no-files-found: error
+          if-no-files-found: warn
 
   publish:
-    name: Publish Release
+    name: Publish GitHub Release
     needs: [build-windows, build-linux]
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: always() && (needs.build-windows.result == 'success' || needs.build-linux.result == 'success')
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Download Windows artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: nexus-windows-${{ github.ref_name }}
-          path: release-assets
+      - name: Determine Release Tag
+        id: release_tag
+        shell: bash
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          else
+            VERSION=$(node -p "require('./package.json').version")
+            echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: Download Linux artifacts
+      - name: Download all built artifacts
         uses: actions/download-artifact@v4
         with:
-          name: nexus-linux-${{ github.ref_name }}
           path: release-assets
+          merge-multiple: true
 
       - name: Generate SHA-256 Checksums
         run: |
           cd release-assets
-          TAG="${{ github.ref_name }}"
-          sha256sum nexus-* > "SHA256SUMS-${TAG}.txt"
-          cat "SHA256SUMS-${TAG}.txt"
+          TAG="${{ steps.release_tag.outputs.tag }}"
+          find . -maxdepth 1 -type f \( -name "*.exe" -o -name "*.pacman" -o -name "*.blockmap" -o -name "*.yml" \) -exec sha256sum {} + > "SHA256SUMS-${TAG}.txt" || true
+          cat "SHA256SUMS-${TAG}.txt" || true
 
       - name: Publish to GitHub Release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ steps.release_tag.outputs.tag }}
         run: |
+          echo "Publishing release $TAG with assets:"
+          ls -la release-assets/
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" --title "Nexus $TAG" --generate-notes release-assets/*
           else

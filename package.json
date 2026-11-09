@@ -1,6 +1,6 @@
 {
   "name": "nexus",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "Nexus — multi-provider AI desktop command center",
   "main": "./out/main/index.js",
   "author": "A1sadeq",
@@ -19,7 +19,7 @@
     "build:unpack": "npm run build && electron-builder --dir",
     "build:win": "npm run build && electron-builder --win",
     "build:mac": "electron-vite build && electron-builder --mac",
-    "build:linux": "electron-vite build && electron-builder --linux pacman",
+    "build:linux": "npm run build && electron-builder --linux pacman",
     "dev:renderer": "vite --config vite.renderer.config.ts",
     "build:renderer": "vite build --config vite.renderer.config.ts"
   },
