@@ -937,33 +937,35 @@ Acknowledge these skills with a concise confirmation in this exact format:
 
         // If generation stopped
         if (!isGenerating) {
+          const status = updated[tabId]
+          const tabItem = tabsRef.current.find((t) => t.id === tabId)
+          const tabTitle = tabItem?.title || 'AI Session'
+          const modelKey = tabItem?.model || 'gemini'
+
           if (isActive) {
             // Active tab finished: linger for 6 seconds so user has clear visual confirmation, then transition to idle
             scheduleStatusDismissal(tabId, ACTIVE_TAB_LINGER_MS)
-          } else {
-            // Background tab finished: trigger sound FX
-            const status = updated[tabId]
+          }
+
+          // Trigger sound FX if background tab OR if Nexus is not focused/visible (e.g. hidden via shortcut)
+          if (!isActive || !isWindowFocusedRef.current) {
             if (status === 'waiting-input') {
               sfx.aiPromptAlert()
             } else {
               sfx.chime()
             }
-
-            const tabItem = tabsRef.current.find((t) => t.id === tabId)
-            const tabTitle = tabItem?.title || 'AI Session'
-            const modelKey = tabItem?.model || 'gemini'
-
-            // Trigger notification: in-app HUD toast when focused, or native OS desktop notification when in background
-            // @ts-ignore
-            window.electron?.ipcRenderer?.send('show_in_app_toast', {
-              id: `${tabId}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-              tabId,
-              tabTitle,
-              model: modelKey,
-              status: status === 'waiting-input' ? 'waiting-input' : 'done',
-              snippet: lastSnippet
-            })
           }
+
+          // Trigger notification: in-app HUD toast when focused, or native OS desktop notification when in background or hidden
+          // @ts-ignore
+          window.electron?.ipcRenderer?.send('show_in_app_toast', {
+            id: `${tabId}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            tabId,
+            tabTitle,
+            model: modelKey,
+            status: status === 'waiting-input' ? 'waiting-input' : 'done',
+            snippet: lastSnippet
+          })
         }
 
         return updated

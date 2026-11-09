@@ -3,7 +3,11 @@ export function collectFeatureHookEvidence(current: Record<string, unknown> = {}
   const started = performance.now()
   const MAX_CHARS = 64000
   const warnings: string[] = []
-  const keys = ['attachmentSelector', 'promptNavSelector', 'composerSelector', 'sendButtonSelector', 'chatTitleSelector', 'newChatSelector', 'stopGenerationSelector', 'virtualizationSelector']
+  const keys = [
+    'attachmentSelector', 'promptNavSelector', 'composerSelector', 'sendButtonSelector',
+    'chatTitleSelector', 'newChatSelector', 'stopGenerationSelector', 'virtualizationSelector',
+    'assistantMessageSelector', 'streamingSelector', 'errorSelector', 'completionActionSelector'
+  ]
   const expired = () => performance.now() - started > 250
   const redact = (value: string, limit = 180) => value
     .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[EMAIL]')
@@ -97,7 +101,11 @@ export function collectFeatureHookEvidence(current: Record<string, unknown> = {}
     chatTitleSelector: 'header h1, header h2, a[data-active="true"], [aria-current="page"], button[aria-haspopup="menu"] > span[dir="auto"].truncate',
     newChatSelector: 'a[href="/"], a[href="/agent"], button[aria-label*="new" i], a[aria-label*="new" i], [data-testid*="new-chat" i]',
     stopGenerationSelector: 'button[aria-label*="stop" i], [data-testid*="stop" i], button[class*="stop" i]',
-    virtualizationSelector: '[data-agent-transcript-message], [data-chat-message-id], [data-message-id], [data-message-author-role], [data-testid="user-message"], [data-testid="assistant-message"]'
+    virtualizationSelector: '[data-agent-transcript-message], [data-chat-message-id], [data-message-id], [data-message-author-role], [data-testid="user-message"], [data-testid="assistant-message"]',
+    assistantMessageSelector: '[data-message-author-role="assistant"], [data-testid="assistant-message"], model-response, article[class*="message" i], .bot.message, .markdown-body, div[class*="ds-message" i]',
+    streamingSelector: '.result-streaming, [data-is-streaming="true"], model-response.is-streaming, .cursor-blink, [class*="cursor-blink" i], [class*="streaming-cursor" i], [class*="ds-thinking" i]',
+    errorSelector: '[data-testid*="error" i], .error-banner, div[class*="error" i], .text-red-500',
+    completionActionSelector: 'button[aria-label="Copy" i], button[data-testid*="copy" i], button[aria-label*="Regenerate" i], button[aria-label*="Retry" i], [data-testid*="action-bar" i]'
   }
   const validations: Record<string, { count?: number; samples?: unknown[]; error?: string }> = {}
   // Current selectors first; preserve counts even when samples must be discarded.
@@ -161,7 +169,11 @@ export function collectFeatureHookEvidence(current: Record<string, unknown> = {}
 }
 
 export function buildFeatureHookEvidenceScript(current: Record<string, unknown> = {}): string {
-  const keys = ['attachmentSelector', 'promptNavSelector', 'composerSelector', 'sendButtonSelector', 'chatTitleSelector', 'newChatSelector', 'stopGenerationSelector', 'virtualizationSelector']
+  const keys = [
+    'attachmentSelector', 'promptNavSelector', 'composerSelector', 'sendButtonSelector',
+    'chatTitleSelector', 'newChatSelector', 'stopGenerationSelector', 'virtualizationSelector',
+    'assistantMessageSelector', 'streamingSelector', 'errorSelector', 'completionActionSelector'
+  ]
   // Do not silently truncate a CSS expression into a different valid selector.
   const selectors = Object.fromEntries(keys.filter(k => typeof current[k] === 'string').map(k => [k, String(current[k]).length <= 2000 ? current[k] : 'x'.repeat(2001)]))
   return `(${collectFeatureHookEvidence.toString()})(${JSON.stringify(selectors)})`

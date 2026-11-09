@@ -375,8 +375,8 @@ function triggerDesktopNotification(data: {
 
     notif.on('click', () => {
       if (mainWindow && !mainWindow.isDestroyed()) {
+        if (!mainWindow.isVisible()) mainWindow.show()
         if (mainWindow.isMinimized()) mainWindow.restore()
-        mainWindow.show()
         mainWindow.focus()
         sendToMainWindow('notification_switch_to_tab', data.tabId)
       }
@@ -398,16 +398,20 @@ function showInAppToast(data: {
 }) {
   if (!mainWindow || mainWindow.isDestroyed()) return
 
-  // Check if Nexus mainWindow has OS focus and is not minimized
-  const isAppFocused = mainWindow.isFocused() && !mainWindow.isMinimized()
+  // Check if Nexus mainWindow has OS focus and is visible and not minimized
+  const isAppActiveAndVisible = Boolean(
+    mainWindow.isVisible() &&
+    !mainWindow.isMinimized() &&
+    mainWindow.isFocused()
+  )
 
-  if (!isAppFocused) {
-    // When user is NOT focusing on Nexus (minimized or in background), fire native OS desktop notification!
+  if (!isAppActiveAndVisible) {
+    // When user is NOT focusing on Nexus (minimized, hidden via shortcut, or in background), fire native OS desktop notification!
     triggerDesktopNotification(data)
   }
 
   // Inside-Nexus HUD overlay toast (only shown when focused on Nexus and looking at another tab or canvas)
-  if (isAppFocused) {
+  if (isAppActiveAndVisible) {
     if (overlaysOpen || !aiNotificationView) return
 
     // If user is already on this tab and mainWindow has focus, no need to show HUD toast
@@ -664,7 +668,13 @@ ipcMain.handle('get_resource_diagnostics', (event) => {
 
 // IPC endpoints for in-app notification toasts & app focus detection
 ipcMain.handle('is_app_focused', () => {
-  return Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isFocused())
+  return Boolean(
+    mainWindow &&
+    !mainWindow.isDestroyed() &&
+    mainWindow.isVisible() &&
+    !mainWindow.isMinimized() &&
+    mainWindow.isFocused()
+  )
 })
 
 ipcMain.on('show_in_app_toast', (event, data) => {
@@ -1975,6 +1985,26 @@ function createWindow() {
   mainWindow.on('blur', () => {
     if (!mainWindow || mainWindow.isDestroyed()) return
     sendToMainWindow('window-focus-changed', false)
+  })
+
+  mainWindow.on('hide', () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return
+    sendToMainWindow('window-focus-changed', false)
+  })
+
+  mainWindow.on('minimize', () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return
+    sendToMainWindow('window-focus-changed', false)
+  })
+
+  mainWindow.on('restore', () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return
+    sendToMainWindow('window-focus-changed', true)
+  })
+
+  mainWindow.on('show', () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return
+    sendToMainWindow('window-focus-changed', true)
   })
 
   mainWindow.on('close', (e) => {
