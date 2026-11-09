@@ -953,7 +953,7 @@ Acknowledge these skills with a concise confirmation in this exact format:
             const tabTitle = tabItem?.title || 'AI Session'
             const modelKey = tabItem?.model || 'gemini'
 
-            // Trigger inside-Nexus native Iron-Man HUD notification overlay
+            // Trigger notification: in-app HUD toast when focused, or native OS desktop notification when in background
             // @ts-ignore
             window.electron?.ipcRenderer?.send('show_in_app_toast', {
               id: `${tabId}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
@@ -963,43 +963,6 @@ Acknowledge these skills with a concise confirmation in this exact format:
               status: status === 'waiting-input' ? 'waiting-input' : 'done',
               snippet: lastSnippet
             })
-
-            // System OS desktop notification ONLY if the user is truly NOT focused on Nexus app
-            const triggerSystemNotification = () => {
-              try {
-                if (typeof Notification !== 'undefined') {
-                  if (Notification.permission === 'granted') {
-                    const notif = new Notification('Nexus AI', {
-                      body:
-                        status === 'waiting-input'
-                          ? `${tabTitle}: Needs your input or choice`
-                          : `${tabTitle}: Finished generating response`,
-                      silent: true
-                    })
-                    notif.onclick = () => {
-                      window.focus()
-                      if (tabItem?.url) switchToTabRef.current?.(tabId, tabItem.url)
-                    }
-                  } else if (Notification.permission === 'default') {
-                    Notification.requestPermission().catch(() => {})
-                  }
-                }
-              } catch {}
-            }
-
-            if (!isWindowFocusedRef.current) {
-              // Double check with main process before popping an intrusive OS notification
-              // @ts-ignore
-              window.electron?.ipcRenderer?.invoke('is_app_focused').then((focused: boolean) => {
-                if (focused) {
-                  isWindowFocusedRef.current = true
-                  return
-                }
-                triggerSystemNotification()
-              }).catch(() => {
-                triggerSystemNotification()
-              })
-            }
           }
         }
 

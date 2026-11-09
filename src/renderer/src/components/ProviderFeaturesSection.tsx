@@ -869,6 +869,76 @@ export const ProviderFeaturesSection: React.FC<Props> = ({
             </div>
           </div>
 
+          {/* CARD 6: AI Generation & State Intelligence Hooks */}
+          <div className="p-3.5 rounded-2xl border flex flex-col gap-2.5 shadow-sm" style={{ background: 'var(--surface)', borderColor: 'var(--border)' }}>
+            <div className="flex items-center justify-between pb-1 border-b border-white/5">
+              <div className="flex items-center gap-2">
+                <IconZap size={15} className="text-emerald-400" />
+                <span className="text-xs font-bold text-(--text)">State & Completion Intelligence</span>
+              </div>
+              <span className="text-[10px] font-mono text-(--text2)">Status Beacon</span>
+            </div>
+            <p className="text-[11px] text-(--text2) leading-relaxed">
+              Powers real-time tab state detection (purple pulse while generating, emerald on completion, amber when asking a question).
+            </p>
+            <div className="flex flex-col gap-1">
+              <label className="text-[11px] font-semibold text-(--text2)">Assistant Message Container:</label>
+              <input
+                type="text"
+                value={userFeatures.assistantMessageSelector ?? mergedFeatures.assistantMessageSelector ?? ''}
+                onChange={(e) => updateFeatureField('assistantMessageSelector', e.target.value)}
+                placeholder='e.g. [data-message-author-role="assistant"], model-response, .bot.message'
+                className="w-full p-2 rounded-lg text-xs font-mono bg-black/50 border border-white/10 text-gray-200 focus:border-emerald-400 focus:outline-none"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-[11px] font-semibold text-(--text2)">Streaming & Thinking Indicator:</label>
+              <input
+                type="text"
+                value={userFeatures.streamingSelector ?? mergedFeatures.streamingSelector ?? ''}
+                onChange={(e) => updateFeatureField('streamingSelector', e.target.value)}
+                placeholder='e.g. .result-streaming, [data-is-streaming="true"], [class*="cursor-blink"], .ds-thinking'
+                className="w-full p-2 rounded-lg text-xs font-mono bg-black/50 border border-white/10 text-gray-200 focus:border-emerald-400 focus:outline-none"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-[11px] font-semibold text-(--text2)">Completion Action Buttons (Copy / Regenerate):</label>
+              <input
+                type="text"
+                value={userFeatures.completionActionSelector ?? mergedFeatures.completionActionSelector ?? ''}
+                onChange={(e) => updateFeatureField('completionActionSelector', e.target.value)}
+                placeholder='e.g. button[aria-label="Copy"], button[data-testid*="copy"], button[aria-label*="Regenerate"]'
+                className="w-full p-2 rounded-lg text-xs font-mono bg-black/50 border border-white/10 text-gray-200 focus:border-emerald-400 focus:outline-none"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-[11px] font-semibold text-(--text2)">Error Banner & Failure Selector:</label>
+              <input
+                type="text"
+                value={userFeatures.errorSelector ?? mergedFeatures.errorSelector ?? ''}
+                onChange={(e) => updateFeatureField('errorSelector', e.target.value)}
+                placeholder='e.g. [data-testid*="error"], .error-banner, div[class*="error" i], .text-red-500'
+                className="w-full p-2 rounded-lg text-xs font-mono bg-black/50 border border-white/10 text-gray-200 focus:border-emerald-400 focus:outline-none"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-[11px] font-semibold text-(--text2)">Reasoning Watchdog Timeout (ms):</label>
+              <input
+                type="number"
+                min={1000}
+                max={60000}
+                step={500}
+                value={userFeatures.statusWatchdogTimeoutMs ?? mergedFeatures.statusWatchdogTimeoutMs ?? 5000}
+                onChange={(e) => {
+                  const val = parseInt(e.target.value, 10)
+                  updateFeatureField('statusWatchdogTimeoutMs', isNaN(val) ? undefined : val)
+                }}
+                className="w-full p-2 rounded-lg text-xs font-mono bg-black/50 border border-white/10 text-gray-200 focus:border-emerald-400 focus:outline-none"
+              />
+              <span className="text-[10px] text-(--text2) opacity-60">Increase for heavy reasoning models (o1, o3, DeepSeek R1) that pause before outputting text. Default: 5000ms.</span>
+            </div>
+          </div>
+
           {/* CARD 6: Memory Virtualization */}
           <div className="p-3.5 rounded-2xl border flex flex-col gap-2.5 shadow-sm" style={{ background: 'var(--surface)', borderColor: 'var(--border)' }}>
             <div className="flex items-center justify-between pb-1 border-b border-white/5">

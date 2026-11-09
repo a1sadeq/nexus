@@ -27,6 +27,15 @@ export function getAiStatusObserverScript(
     DEFAULT_PROVIDER_FEATURES[modelKey]?.sendButtonSelector ||
     'button[data-testid="send-button"], button[aria-label*="send" i], button[aria-label*="Send message" i], button[type="submit"]'
 
+  const assistantSelector = feats.assistantMessageSelector || ''
+  const streamingSelector = feats.streamingSelector || ''
+  const errorSelector = feats.errorSelector || ''
+  const completionSelector = feats.completionActionSelector || ''
+  const watchdogTimeoutMs =
+    typeof feats.statusWatchdogTimeoutMs === 'number' && feats.statusWatchdogTimeoutMs > 0
+      ? feats.statusWatchdogTimeoutMs
+      : 5000
+
   return `(() => {
     try {
       if (window.__nexusAiStatusObserverActive) return;
@@ -34,6 +43,11 @@ export function getAiStatusObserverScript(
 
       const customStopSelector = ${JSON.stringify(stopSelector)};
       const customSendSelector = ${JSON.stringify(sendSelector)};
+      const customAssistantSelector = ${JSON.stringify(assistantSelector)};
+      const customStreamingSelector = ${JSON.stringify(streamingSelector)};
+      const customErrorSelector = ${JSON.stringify(errorSelector)};
+      const customCompletionSelector = ${JSON.stringify(completionSelector)};
+      const customWatchdogTimeout = ${JSON.stringify(watchdogTimeoutMs)};
 
       let isGenerating = false;
       let lastTextLength = 0;
@@ -44,6 +58,12 @@ export function getAiStatusObserverScript(
 
       function getAssistantElement() {
         try {
+          if (customAssistantSelector) {
+            const customNodes = document.querySelectorAll(customAssistantSelector);
+            if (customNodes && customNodes.length > 0) {
+              return customNodes[customNodes.length - 1];
+            }
+          }
           const selectors = [
             '[data-message-author-role="assistant"]',
             '[data-testid="assistant-message"]',
@@ -164,7 +184,32 @@ export function getAiStatusObserverScript(
         return false;
       }
 
+      function isErrorVisible() {
+        if (!customErrorSelector) return false;
+        try {
+          const nodes = document.querySelectorAll(customErrorSelector);
+          for (let i = 0; i < nodes.length; i++) {
+            if (isElementVisible(nodes[i])) return true;
+          }
+        } catch (e) {}
+        return false;
+      }
+
+      function isCompletionActionVisible() {
+        if (!customCompletionSelector) return false;
+        try {
+          const nodes = document.querySelectorAll(customCompletionSelector);
+          for (let i = 0; i < nodes.length; i++) {
+            if (isElementVisible(nodes[i])) return true;
+          }
+        } catch (e) {}
+        return false;
+      }
+
       function checkGenerationActive() {
+        // 0. If error is displayed, generation aborted/failed
+        if (isErrorVisible()) return false;
+
         // 1. Check custom configured stop selector inside composer
         if (customStopSelector) {
           try {
@@ -184,6 +229,15 @@ export function getAiStatusObserverScript(
         } catch (e) {}
 
         // 3. Streaming containers and cursor indicators (ChatGPT, Claude, Gemini, DeepSeek, z.ai, Arena)
+        if (customStreamingSelector) {
+          try {
+            const nodes = document.querySelectorAll(customStreamingSelector);
+            for (let i = 0; i < nodes.length; i++) {
+              if (isElementVisible(nodes[i])) return true;
+            }
+          } catch (e) {}
+        }
+
         const streamingSelectors = [
           '.result-streaming', '[data-is-streaming="true"]', 'model-response.is-streaming',
           '.cursor-blink', '[class*="cursor-blink" i]', '[class*="streaming-cursor" i]',
@@ -211,7 +265,13 @@ export function getAiStatusObserverScript(
           }
         } catch (e) {}
 
-        // 5. Assistant text growth heartbeat: if text grew in the last 1500ms
+        // 5. Completion Action check:
+        // If completion action (e.g. Copy / Regenerate) is already present and active, generation is done!
+        if (isCompletionActionVisible() && isSendButtonVisible()) {
+          return false;
+        }
+
+        // 6. Assistant text growth heartbeat: if text grew in the last 1500ms
         const now = Date.now();
         if (isGenerating && lastTextGrowthTime > 0 && now - lastTextGrowthTime < 1500) {
           lastTokenTime = lastTextGrowthTime;
@@ -249,10 +309,12 @@ export function getAiStatusObserverScript(
               lastTextLength = currentLength;
               console.log('__NEXUS_AI_STATUS__:' + JSON.stringify({ isGenerating: true, lastSnippet: '' }));
             } else {
-              // Fail-safe watchdog: if in 'working' state for > 4s with no text growth and Send button is back
-              const isStalled = lastTextGrowthTime > 0 && now - lastTextGrowthTime > 4000;
+              // Fail-safe watchdog: if in 'working' state for > watchdogTimeout with no text growth and Send or Completion is back
+              const watchdogLimit = customWatchdogTimeout || 5000;
+              const isStalled = lastTextGrowthTime > 0 && now - lastTextGrowthTime > watchdogLimit;
               const hasSend = isSendButtonVisible();
-              if (isStalled && (hasSend || !assistantEl)) {
+              const hasCompletion = isCompletionActionVisible();
+              if (isStalled && (hasSend || hasCompletion || !assistantEl)) {
                 isGenerating = false;
                 const lastSnippet = getAssistantSnippet();
                 console.log('__NEXUS_AI_STATUS__:' + JSON.stringify({ isGenerating: false, lastSnippet }));

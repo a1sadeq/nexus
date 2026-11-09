@@ -3,8 +3,12 @@ import { parseFeatureHookImport, selectMeasuredHookUpdates } from './featureHook
 
 describe('strict AI hook imports', () => {
   it('accepts fenced selector JSON and preserves empty fields', () => {
-    const result = parseFeatureHookImport('```json\n{"composerSelector":" textarea ","stopGenerationSelector":""}\n```')
-    expect(result.selectors).toEqual({ composerSelector: 'textarea' })
+    const result = parseFeatureHookImport('```json\n{"composerSelector":" textarea ","stopGenerationSelector":"","errorSelector":".error-banner","completionActionSelector":"button.copy"}\n```')
+    expect(result.selectors).toEqual({
+      composerSelector: 'textarea',
+      errorSelector: '.error-banner',
+      completionActionSelector: 'button.copy'
+    })
     expect(result.ignored).toEqual(['stopGenerationSelector'])
   })
   it.each([true, 3, null, [], {}])('rejects nonstring selector value %j', value => {

@@ -10,6 +10,9 @@ export interface ProviderFeatureConfig {
   stopGenerationSelector?: string       // Site's "Stop generating" button selector
   assistantMessageSelector?: string     // Assistant message container for text growth and completion detection
   streamingSelector?: string            // Active streaming / thinking indicator selector
+  errorSelector?: string                // Error message / rate-limit container selector
+  completionActionSelector?: string     // Action buttons container or Copy/Regenerate button that only appears on completion
+  statusWatchdogTimeoutMs?: number      // Fail-safe watchdog timeout in ms (default 5000, up to 30000 for reasoning models)
   virtualizationSelector?: string       // Selector for content-visibility: auto memory optimization
   enableSlashFocus?: boolean            // Whether '/' hotkey focuses prompt
   enableFocusRetention?: boolean        // Whether caret position is remembered on blur

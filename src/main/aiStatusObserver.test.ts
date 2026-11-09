@@ -24,6 +24,28 @@ describe('aiStatusObserver', () => {
     expect(arenaScript).toContain('lastTokenTime')
   })
 
+  it('injects custom assistant, streaming, error, and completion selectors from config overrides', () => {
+    const customConfig = {
+      customModel: {
+        features: {
+          assistantMessageSelector: '.my-assistant',
+          streamingSelector: '.my-streaming',
+          errorSelector: '.my-error-banner',
+          completionActionSelector: 'button.my-copy',
+          statusWatchdogTimeoutMs: 12000
+        }
+      }
+    }
+    const script = getAiStatusObserverScript('customModel', customConfig as any)
+    expect(script).toContain('.my-assistant')
+    expect(script).toContain('.my-streaming')
+    expect(script).toContain('.my-error-banner')
+    expect(script).toContain('button.my-copy')
+    expect(script).toContain('12000')
+    expect(script).toContain('isErrorVisible')
+    expect(script).toContain('isCompletionActionVisible')
+  })
+
   it('attachAiStatusListener parses __NEXUS_AI_STATUS__ and invokes callback', () => {
     const emitter = new EventEmitter()
     const onStatus = vi.fn()

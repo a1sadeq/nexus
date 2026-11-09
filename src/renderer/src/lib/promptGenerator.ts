@@ -445,7 +445,17 @@ Analyze the DOM structure of **"${name}"** (${url}) and provide evidence-backed 
 - **Targets**: The active streaming cursor, pulsing indicator, or thinking accordion.
 - **Examples**: \`.result-streaming\`, \`model-response.is-streaming\`, \`[class*="cursor-blink"]\`, \`.ds-thinking\`
 
-### 10. Memory Virtualization (\`virtualizationSelector\`)
+### 10. Error Banner & Failure Container (\`errorSelector\`)
+- **Purpose**: Detects rate-limit alerts, network errors, or generation aborts so Nexus avoids false completion badges.
+- **Targets**: Error alerts, error banners, or rate-limit warnings.
+- **Examples**: \`[data-testid*="error"]\`, \`.error-banner\`, \`div[class*="error" i]\`, \`.text-red-500\`
+
+### 11. Completion Action Buttons (\`completionActionSelector\`)
+- **Purpose**: Provides a 100% deterministic completion signal (Copy or Regenerate buttons that only appear when generation has completely finished).
+- **Targets**: Copy button or Regenerate button on the assistant turn.
+- **Examples**: \`button[aria-label="Copy"]\`, \`button[data-testid*="copy"]\`, \`button[aria-label*="Regenerate"]\`, \`[data-testid*="action-bar"]\`
+
+### 12. Memory Virtualization (\`virtualizationSelector\`)
 - **Purpose**: Applies \`content-visibility: auto\` to off-screen messages to reduce RAM footprint in long threads.
 - **Targets**: Repeated chat message container elements.
 - **Examples**: \`[data-message-id]\`, \`.conversation-turn\`, \`.chat-message\`
@@ -469,6 +479,8 @@ IMPORTANT: Return ONLY a valid JSON object with EXACTLY the known keys shown bel
   "stopGenerationSelector": "...",
   "assistantMessageSelector": "...",
   "streamingSelector": "...",
+  "errorSelector": "...",
+  "completionActionSelector": "...",
   "virtualizationSelector": "..."
 }
 \`\`\`

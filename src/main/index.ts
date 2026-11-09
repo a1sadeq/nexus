@@ -14,7 +14,8 @@ import {
   Tray,
   Menu,
   globalShortcut,
-  dialog
+  dialog,
+  Notification
 } from 'electron'
 import { join, basename, extname } from 'path'
 import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, copyFileSync } from 'fs'
@@ -348,6 +349,45 @@ function buildNotificationHtml(data: {
 </html>`
 }
 
+function triggerDesktopNotification(data: {
+  id?: string
+  tabId: string
+  tabTitle: string
+  model: string
+  status: 'done' | 'waiting-input'
+  snippet?: string
+}) {
+  if (!Notification.isSupported()) return
+  try {
+    const iconPath = join(__dirname, '../../resources/icon.png')
+    const hasIcon = existsSync(iconPath)
+    const notif = new Notification({
+      title: 'Nexus AI',
+      subtitle: data.tabTitle,
+      body:
+        data.status === 'waiting-input'
+          ? `${data.tabTitle}: Needs your input or choice`
+          : `${data.tabTitle}: Finished generating response`,
+      urgency: data.status === 'waiting-input' ? 'critical' : 'normal',
+      silent: false,
+      icon: hasIcon ? iconPath : undefined
+    })
+
+    notif.on('click', () => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        if (mainWindow.isMinimized()) mainWindow.restore()
+        mainWindow.show()
+        mainWindow.focus()
+        sendToMainWindow('notification_switch_to_tab', data.tabId)
+      }
+    })
+
+    notif.show()
+  } catch (e) {
+    console.error('[Notification] Failed to trigger desktop notification:', e)
+  }
+}
+
 function showInAppToast(data: {
   id: string
   tabId: string
@@ -356,42 +396,54 @@ function showInAppToast(data: {
   status: 'done' | 'waiting-input'
   snippet?: string
 }) {
-  if (!mainWindow || mainWindow.isDestroyed() || !aiNotificationView) return
-  if (overlaysOpen) return
+  if (!mainWindow || mainWindow.isDestroyed()) return
 
-  // If user is already on this tab and mainWindow has focus, no need to show toast
-  if (activeViewId === data.tabId && mainWindow.isFocused()) {
-    dismissInAppToast()
-    return
+  // Check if Nexus mainWindow has OS focus and is not minimized
+  const isAppFocused = mainWindow.isFocused() && !mainWindow.isMinimized()
+
+  if (!isAppFocused) {
+    // When user is NOT focusing on Nexus (minimized or in background), fire native OS desktop notification!
+    triggerDesktopNotification(data)
   }
 
-  currentNotificationData = data
-  if (aiNotificationDismissTimer) {
-    clearTimeout(aiNotificationDismissTimer)
-    aiNotificationDismissTimer = null
+  // Inside-Nexus HUD overlay toast (only shown when focused on Nexus and looking at another tab or canvas)
+  if (isAppFocused) {
+    if (overlaysOpen || !aiNotificationView) return
+
+    // If user is already on this tab and mainWindow has focus, no need to show HUD toast
+    if (activeViewId === data.tabId) {
+      dismissInAppToast()
+      return
+    }
+
+    currentNotificationData = data
+    if (aiNotificationDismissTimer) {
+      clearTimeout(aiNotificationDismissTimer)
+      aiNotificationDismissTimer = null
+    }
+
+    const html = buildNotificationHtml(data)
+    aiNotificationView.webContents.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html))
+
+    try {
+      mainWindow.contentView.removeChildView(aiNotificationView)
+      mainWindow.contentView.addChildView(aiNotificationView)
+    } catch {}
+
+    const winBounds = mainWindow.getContentBounds()
+    aiNotificationView.setBounds({
+      x: Math.max(0, winBounds.width - 395),
+      y: 44,
+      width: 380,
+      height: 125
+    })
+    aiNotificationView.setVisible(true)
+    isAiNotificationVisible = true
+
+    aiNotificationDismissTimer = setTimeout(() => {
+      dismissInAppToast()
+    }, 7000)
   }
-
-  const html = buildNotificationHtml(data)
-  aiNotificationView.webContents.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html))
-
-  try {
-    mainWindow.contentView.removeChildView(aiNotificationView)
-    mainWindow.contentView.addChildView(aiNotificationView)
-  } catch {}
-
-  const winBounds = mainWindow.getContentBounds()
-  aiNotificationView.setBounds({
-    x: Math.max(0, winBounds.width - 395),
-    y: 44,
-    width: 380,
-    height: 125
-  })
-  aiNotificationView.setVisible(true)
-  isAiNotificationVisible = true
-
-  aiNotificationDismissTimer = setTimeout(() => {
-    dismissInAppToast()
-  }, 7000)
 }
 
 function dismissInAppToast() {

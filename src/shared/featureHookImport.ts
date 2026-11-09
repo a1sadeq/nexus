@@ -3,7 +3,7 @@ import type { ProviderFeatureConfig } from './providerConfig'
 export const FEATURE_HOOK_KEYS = [
   'attachmentSelector', 'promptNavSelector', 'composerSelector', 'sendButtonSelector',
   'chatTitleSelector', 'newChatSelector', 'stopGenerationSelector', 'virtualizationSelector',
-  'assistantMessageSelector', 'streamingSelector'
+  'assistantMessageSelector', 'streamingSelector', 'errorSelector', 'completionActionSelector'
 ] as const
 export type FeatureHookKey = typeof FEATURE_HOOK_KEYS[number]
 export type HookSelectors = Partial<Record<FeatureHookKey, string>>
