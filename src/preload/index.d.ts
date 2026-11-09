@@ -208,6 +208,10 @@ declare global {
       skills?: NexusSkills
       downloads?: NexusDownloads
       aiFeatures?: NexusAiFeatures
+      appearance?: {
+        get: () => Promise<string>
+        set: (mode: 'dark' | 'light' | 'system') => Promise<string>
+      }
       nexusState?: NexusStateBridge
       cache?: NexusCacheBridge
       diagnostics?: NexusDiagnosticsBridge

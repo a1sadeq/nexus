@@ -15,8 +15,16 @@ import {
   Menu,
   globalShortcut,
   dialog,
-  Notification
+  Notification,
+  nativeTheme
 } from 'electron'
+import {
+  DEFAULT_THEME_APPEARANCE,
+  isValidThemeAppearance,
+  resolveEffectiveColorScheme,
+  applyColorSchemeEmulation,
+  type ThemeAppearance
+} from './nativeThemeAppearance'
 import { join, basename, extname } from 'path'
 import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, copyFileSync } from 'fs'
 import { buildEngine } from './promptNav'
@@ -2139,6 +2147,8 @@ app.whenReady().then(() => {
   electronApp.setAppUserModelId('com.nexus.app')
 
   loadCustomKeymap()
+  loadAppearanceFromDisk()
+  nativeTheme.themeSource = activeAppearance
   loadThemeFromDisk()
   loadProviderConfigFromDisk()
   tabDiscardManager.init()
@@ -2760,6 +2770,10 @@ function ensureAiView(tabId: string): Electron.WebContentsView {
   view.setVisible(false)
   view.webContents.setBackgroundThrottling(true)
   view.webContents.setAudioMuted(true)
+  applyColorSchemeEmulation(
+    view.webContents,
+    resolveEffectiveColorScheme(activeAppearance, nativeTheme.shouldUseDarkColors)
+  )
 
   view.webContents.on('context-menu', (_event, params) => {
     const template: Electron.MenuItemConstructorOptions[] = [
@@ -2933,6 +2947,10 @@ function ensureAiView(tabId: string): Electron.WebContentsView {
   })
 
   view.webContents.on('dom-ready', () => {
+    applyColorSchemeEmulation(
+      view.webContents,
+      resolveEffectiveColorScheme(activeAppearance, nativeTheme.shouldUseDarkColors)
+    )
     const modelKey = viewModelKeys.get(tabId) || resolveModelKey(tabId, view.webContents.getURL()) || ''
     applyWebviewTheme(view, modelKey)
     injectVirtualizationCss(view, modelKey)
@@ -3037,6 +3055,34 @@ ipcMain.on('navigate_to_url', async (_event, tabId, url, bounds, modelKey) => {
     })
   }
 })
+
+// Native appearance management: defaults to dark across all platforms
+let activeAppearance: ThemeAppearance = DEFAULT_THEME_APPEARANCE
+
+function appearanceFile() {
+  return join(app.getPath('userData'), 'theme-appearance.json')
+}
+
+function loadAppearanceFromDisk() {
+  try {
+    const file = appearanceFile()
+    if (existsSync(file)) {
+      const raw = readFileSync(file, 'utf-8')
+      const parsed = JSON.parse(raw)
+      if (parsed && isValidThemeAppearance(parsed.appearance)) {
+        activeAppearance = parsed.appearance
+        return
+      }
+    }
+  } catch {}
+  activeAppearance = DEFAULT_THEME_APPEARANCE
+}
+
+function persistAppearance() {
+  try {
+    atomicWriteJson(appearanceFile(), { appearance: activeAppearance })
+  } catch {}
+}
 
 // Webview theming: inject the active app theme's own colors into AI pages.
 // Persisted to disk so views are born themed on cold start (no raw-style flash),
@@ -3452,6 +3498,7 @@ function genericFallbackCss(v, dark) {
   return `
     ${getStructuralVars(v)}
     :root {
+      color-scheme: ${dark ? 'dark' : 'light'} !important;
       --nexus-bg: ${v.bg};
       --nexus-surface: ${v.surface};
       --nexus-surface2: ${v.surface2};
@@ -3461,6 +3508,7 @@ function genericFallbackCss(v, dark) {
       --nexus-border: ${v.border};
       --radius: ${v.radius ?? 8}px;
     }
+    html { color-scheme: ${dark ? 'dark' : 'light'} !important; }
     ${doColor ? `
     html { background-color: var(--nexus-bg) !important; color-scheme: ${dark ? 'dark' : 'light'} !important; }
     body { background-color: var(--nexus-bg) !important; ${bodyTypography} }
@@ -3831,6 +3879,22 @@ function applyWebviewTheme(view, modelKey?: string) {
   })
   viewCssChains.set(wc, nextChain)
 }
+ipcMain.handle('get_theme_appearance', () => activeAppearance)
+
+ipcMain.handle('set_theme_appearance', (_event, mode: unknown) => {
+  if (isValidThemeAppearance(mode)) {
+    activeAppearance = mode
+    nativeTheme.themeSource = mode
+    persistAppearance()
+    const effective = resolveEffectiveColorScheme(mode, nativeTheme.shouldUseDarkColors)
+    for (const [tabId, view] of aiViews) {
+      applyColorSchemeEmulation(view.webContents, effective)
+      applyWebviewTheme(view, viewModelKeys.get(tabId) || resolveModelKey(tabId, view.webContents.getURL()))
+    }
+  }
+  return activeAppearance
+})
+
 ipcMain.on('set_webview_theme', (_event, payload) => {
   webviewTheme = payload || null
   persistTheme()

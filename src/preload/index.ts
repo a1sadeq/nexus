@@ -156,6 +156,10 @@ const electronAPI = {
     siteNewChat: (): Promise<unknown> => ipcRenderer.invoke('ai_site_new_chat'),
     testLiveHooks: (modelKey: string): Promise<unknown> => ipcRenderer.invoke('test_provider_live_hooks', modelKey)
   },
+  appearance: {
+    get: (): Promise<string> => ipcRenderer.invoke('get_theme_appearance'),
+    set: (mode: 'dark' | 'light' | 'system'): Promise<string> => ipcRenderer.invoke('set_theme_appearance', mode)
+  },
   cache: {
     getStats: (): Promise<unknown> => ipcRenderer.invoke('get_cache_stats'),
     purge: (): Promise<unknown> => ipcRenderer.invoke('purge_cache')
