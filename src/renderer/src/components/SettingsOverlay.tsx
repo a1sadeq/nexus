@@ -688,7 +688,7 @@ export default function SettingsOverlay({
     setInterfaceSettings((prev) => {
       const next = { ...prev, [key]: value }
       saveInterfaceSettings(next)
-      applyInterfaceCssVariables(next)
+      applyInterfaceCssVariables(next, displayed)
       onInterfaceSettingsChange?.(next)
       return next
     })
@@ -707,7 +707,7 @@ export default function SettingsOverlay({
         aestheticPreset: preset
       }
       saveInterfaceSettings(next)
-      applyInterfaceCssVariables(next)
+      applyInterfaceCssVariables(next, displayed)
       onInterfaceSettingsChange?.(next)
       return next
     })
@@ -1138,7 +1138,13 @@ export default function SettingsOverlay({
 
   useEffect(() => {
     applyTheme(displayed)
-    applyInterfaceCssVariables(interfaceSettings)
+    applyInterfaceCssVariables(interfaceSettings, displayed)
+    if (window.electron?.platform === 'win32') {
+      window.electron?.ipcRenderer.invoke('set_titlebar_overlay_theme', {
+        color: displayed.colors.bg,
+        symbolColor: displayed.colors.text
+      }).catch(() => {})
+    }
   }, [displayed, interfaceSettings])
 
   // Push the CURRENTLY DISPLAYED theme (incl. in-flight preset edits, which

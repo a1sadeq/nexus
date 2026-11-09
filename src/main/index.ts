@@ -3879,6 +3879,22 @@ function applyWebviewTheme(view, modelKey?: string) {
   })
   viewCssChains.set(wc, nextChain)
 }
+ipcMain.handle('set_titlebar_overlay_theme', (_event, colors: { color: string; symbolColor: string }) => {
+  if (process.platform === 'win32' && mainWindow && !mainWindow.isDestroyed()) {
+    try {
+      mainWindow.setTitleBarOverlay({
+        color: colors.color || '#11151e',
+        symbolColor: colors.symbolColor || '#e9edf4',
+        height: 36
+      })
+      return true
+    } catch (err) {
+      console.warn('[setTitleBarOverlay] failed:', err)
+    }
+  }
+  return false
+})
+
 ipcMain.handle('get_theme_appearance', () => activeAppearance)
 
 ipcMain.handle('set_theme_appearance', (_event, mode: unknown) => {

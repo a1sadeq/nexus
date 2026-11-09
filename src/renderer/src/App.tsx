@@ -389,18 +389,27 @@ function App() {
     }).catch(() => {})
   }, [tabsHydrated])
 
-  // Apply interface CSS variables immediately on startup and whenever interfaceSettings changes
+  const [themeState, setThemeState] = useState(loadThemeState)
+
+  // Apply unified theme and interface CSS variables in coordinated pipeline
   useEffect(() => {
-    applyInterfaceCssVariables(interfaceSettings)
+    const activeTheme = findTheme(themeState)
+    applyTheme(activeTheme)
+    applyInterfaceCssVariables(interfaceSettings, activeTheme)
+    if (window.electron?.platform === 'win32') {
+      window.electron?.ipcRenderer.invoke('set_titlebar_overlay_theme', {
+        color: activeTheme.colors.bg,
+        symbolColor: activeTheme.colors.text
+      }).catch(() => {})
+    }
+  }, [themeState.activeId, themeState.customs, interfaceSettings])
+
+  useEffect(() => {
     if (tabsHydrated) {
       window.nexusState?.save('interface_settings', interfaceSettings).catch(() => {})
     }
   }, [interfaceSettings, tabsHydrated])
 
-  const [themeState, setThemeState] = useState(loadThemeState)
-  useEffect(() => {
-    applyTheme(findTheme(themeState))
-  }, [themeState.activeId, themeState.customs])
   useEffect(() => {
     saveThemeState(themeState)
   }, [themeState])

@@ -209,7 +209,7 @@ export function ZenGuideModal({
 
   const effAccent = adjustAccentContrast(interfaceSettings.accentColor || '#6366f1', interfaceSettings.accentContrast ?? 100)
   const effSecondaryGlow = adjustAccentContrast(interfaceSettings.accentGlowColor || '#22d3ee', interfaceSettings.accentContrast ?? 100)
-  const effDarkness = interfaceSettings.surfaceDarkness ?? 25
+  const effDarkness = interfaceSettings.surfaceDarkness ?? 50
   const effContrast = interfaceSettings.accentContrast ?? 100
   const effRadius = interfaceSettings.cornerRadius ?? 14
   const effGlass = interfaceSettings.glassmorphism || 'glassmorphic'

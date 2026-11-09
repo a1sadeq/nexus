@@ -1,4 +1,5 @@
 import type { IconPack, IconStrokeWeight } from './iconContext'
+import type { AppTheme } from './themes'
 export type { IconPack, IconStrokeWeight }
 
 export type AestheticPreset = 'refined-modern' | 'cyberpunk-neon' | 'minimalist-slate' | 'iron-man-hud' | 'custom'
@@ -457,12 +458,17 @@ export function computeSurfaceColors(baseHex: string = '#0b0c14', darknessPercen
   }
 }
 
-export function applyInterfaceCssVariables(settings: InterfaceSettings): void {
+export function applyInterfaceCssVariables(settings: InterfaceSettings, activeTheme?: AppTheme): void {
   const root = document.documentElement
+
+  const isCustomMode = settings.aestheticPreset === 'custom'
 
   // 1. Accent & Glow Colors & Contrast Transformation
   const contrast = settings.accentContrast ?? 100
-  const baseAccent = settings.accentColor || '#6366f1'
+  const baseAccent = (isCustomMode && settings.accentColor)
+    ? settings.accentColor
+    : (activeTheme?.colors.accent || settings.accentColor || '#6366f1')
+
   const transformedAccent = adjustAccentContrast(baseAccent, contrast)
   root.style.setProperty('--accent', transformedAccent)
 
@@ -475,23 +481,46 @@ export function applyInterfaceCssVariables(settings: InterfaceSettings): void {
 
   // 2. Surface Darkness & Dynamic Theme Background Palette
   const darkness = settings.surfaceDarkness ?? 50
-  const baseSurface = settings.surfaceBgColor || (
-    settings.aestheticPreset === 'cyberpunk-neon' ? '#07070b' :
-    settings.aestheticPreset === 'minimalist-slate' ? '#0f1115' : '#0b0c14'
-  )
-  const palette = computeSurfaceColors(baseSurface, darkness)
-
   root.style.setProperty('--surface-darkness', `${darkness}%`)
-  root.style.setProperty('--surface-custom', baseSurface)
-  root.style.setProperty('--bg', palette.bg)
-  root.style.setProperty('--surface', palette.surface)
-  root.style.setProperty('--surface2', palette.surface2)
-  root.style.setProperty('--border', palette.border)
-  root.style.setProperty('--text', palette.text)
-  root.style.setProperty('--text2', palette.text2)
+
+  if (activeTheme && !isCustomMode) {
+    // Preserve active theme colors faithfully
+    root.style.setProperty('--surface-custom', activeTheme.colors.surface)
+    if (darkness === 50) {
+      root.style.setProperty('--bg', activeTheme.colors.bg)
+      root.style.setProperty('--surface', activeTheme.colors.surface)
+      root.style.setProperty('--surface2', activeTheme.colors.surface2)
+      root.style.setProperty('--border', activeTheme.colors.border)
+      root.style.setProperty('--text', activeTheme.colors.text)
+      root.style.setProperty('--text2', activeTheme.colors.text2)
+    } else {
+      // Modulate lightness relative to activeTheme's surface color
+      const palette = computeSurfaceColors(activeTheme.colors.surface, darkness)
+      root.style.setProperty('--bg', palette.bg)
+      root.style.setProperty('--surface', palette.surface)
+      root.style.setProperty('--surface2', palette.surface2)
+      root.style.setProperty('--border', palette.border)
+      root.style.setProperty('--text', palette.text)
+      root.style.setProperty('--text2', palette.text2)
+    }
+  } else {
+    const baseSurface = settings.surfaceBgColor || (
+      settings.aestheticPreset === 'cyberpunk-neon' ? '#07070b' :
+      settings.aestheticPreset === 'minimalist-slate' ? '#0f1115' : '#0b0c14'
+    )
+    const palette = computeSurfaceColors(baseSurface, darkness)
+
+    root.style.setProperty('--surface-custom', baseSurface)
+    root.style.setProperty('--bg', palette.bg)
+    root.style.setProperty('--surface', palette.surface)
+    root.style.setProperty('--surface2', palette.surface2)
+    root.style.setProperty('--border', palette.border)
+    root.style.setProperty('--text', palette.text)
+    root.style.setProperty('--text2', palette.text2)
+  }
 
   // 3. Corner Radius
-  const rad = settings.cornerRadius ?? 12
+  const rad = settings.cornerRadius ?? activeTheme?.radius ?? 12
   root.style.setProperty('--theme-radius', `${rad}px`)
   root.style.setProperty('--radius', `${rad}px`)
 

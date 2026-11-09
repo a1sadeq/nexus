@@ -84,7 +84,7 @@ export const StyleStudioCanvas: React.FC<Props> = ({
   // Effective Values
   const effAccent = (isGlobal ? interfaceSettings.accentColor : prov.accentColor) || interfaceSettings.accentColor || '#6366f1'
   const effSecondaryGlow = (isGlobal ? interfaceSettings.accentGlowColor : prov.accentGlowColor) || interfaceSettings.accentGlowColor || '#22d3ee'
-  const effDarkness = (isGlobal ? interfaceSettings.surfaceDarkness : prov.surfaceDarkness) ?? interfaceSettings.surfaceDarkness ?? 25
+  const effDarkness = (isGlobal ? interfaceSettings.surfaceDarkness : prov.surfaceDarkness) ?? interfaceSettings.surfaceDarkness ?? 50
   const effContrast = (isGlobal ? interfaceSettings.accentContrast : prov.accentContrast) ?? interfaceSettings.accentContrast ?? 100
   const effSurfaceBg = (isGlobal ? interfaceSettings.surfaceBgColor : prov.surfaceBgColor) || interfaceSettings.surfaceBgColor || '#0b0c14'
 
