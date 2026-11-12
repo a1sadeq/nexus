@@ -1,3 +1,4 @@
+
 import { closeWebContents, type ClosableContents } from './webContentsLifecycle'
 
 import { join } from 'path'
@@ -282,7 +283,7 @@ export class TabDiscardManager {
       residentCount,
       discardedCount,
       residentTabIds: Array.from(this.views.keys()),
-      discardedTabIds: Array.from(this.evictedTabStates.keys()),
+      discardedTabIds: Array.from(this.evictedTabStates.keys()).reverse(),
       pendingCount,
       protectedCount,
       effectiveCapExceeded,
@@ -482,7 +483,6 @@ export class TabDiscardManager {
     }
     return null
   }
-
 
   public getEvictedTabState(tabId: string): EvictedTabState | undefined {
     return this.evictedTabStates.get(tabId)

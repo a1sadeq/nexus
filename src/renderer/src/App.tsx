@@ -1,3 +1,4 @@
+
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import {
   serializeState,
@@ -125,7 +126,7 @@ function App() {
         const loadedTabs = (parsed as any).tabs as Tab[]
         const loadedActiveId = (parsed as any).activeId || loadedTabs[0]?.id || null
         const loadedMru = Array.isArray((parsed as any).mruTabIds) ? ((parsed as any).mruTabIds as string[]) : undefined
-        return { tabs: loadedTabs, activeId: loadedActiveId, mruTabIds: loadedMru }
+        return { tabs: loadedTabs, activeId: loadedActiveId, mruTabIds: loadedMru, residentTabIds: (parsed as any).residentTabIds, discardedTabIds: (parsed as any).discardedTabIds }
       }
     } catch {}
     const restored = deserializeState(localStorage.getItem(TABS_STORAGE_KEY))
@@ -136,9 +137,9 @@ function App() {
   const [tabs, setTabs] = useState<Tab[]>(initialTabs.tabs)
   const [activeId, setActiveId] = useState<string | null>(initialTabs.activeId)
   const [residentTabIds, setResidentTabIds] = useState<string[]>(() =>
-    getRecentActiveTabIds(initialTabs.tabs, initialTabs.activeId, initialTabs.mruTabIds, 7)
+    Array.isArray((initialTabs as any).residentTabIds) ? (initialTabs as any).residentTabIds : getRecentActiveTabIds(initialTabs.tabs, initialTabs.activeId, initialTabs.mruTabIds, 7)
   )
-  const [discardedTabIds, setDiscardedTabIds] = useState<string[]>(() => [])
+  const [discardedTabIds, setDiscardedTabIds] = useState<string[]>(() => Array.isArray((initialTabs as any).discardedTabIds) ? (initialTabs as any).discardedTabIds : [])
   const discardedTabIdsRef = useRef<string[]>([])
   useEffect(() => { discardedTabIdsRef.current = discardedTabIds }, [discardedTabIds])
 
@@ -155,7 +156,7 @@ function App() {
           const preserved = prev.filter((id) => !discardedSet.has(id))
           return Array.from(new Set([...residentFromMain, ...preserved]))
         })
-        setDiscardedTabIds(discardedFromMain)
+        setDiscardedTabIds((prev) => [...prev.filter((id) => !residentFromMain.includes(id)), ...discardedFromMain.filter((id) => !prev.includes(id))])
       }
     )
     // Initial fetch of discard status
@@ -169,7 +170,7 @@ function App() {
           const preserved = prev.filter((id) => !discardedSet.has(id))
           return Array.from(new Set([...residentFromMain, ...preserved]))
         })
-        setDiscardedTabIds(discardedFromMain)
+        setDiscardedTabIds((prev) => [...prev.filter((id) => !residentFromMain.includes(id)), ...discardedFromMain.filter((id) => !prev.includes(id))])
       }
     }).catch(() => {})
 
@@ -2740,3 +2741,4 @@ Acknowledge these skills with a concise confirmation in this exact format:
 }
 
 export default App
+

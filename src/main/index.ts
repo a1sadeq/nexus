@@ -5123,3 +5123,4 @@ ipcMain.handle('list_history', (event) => {
 
 // Universal file-backed app state (tabs, pinned, models, providers, interface-settings, theme)
 // is registered with the Session Write Barrier and Atomic Write Engine in registerStateIpc().
+
