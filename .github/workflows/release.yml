@@ -14,11 +14,36 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  check:
+    name: Typecheck & Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
   build-windows:
     name: Build Windows (.exe)
+    needs: check
     runs-on: windows-latest
     timeout-minutes: 30
-
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -46,7 +71,6 @@ jobs:
         run: npm run build:win
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: false
-          GH_TOKEN: ${{ github.token }}
 
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
@@ -58,11 +82,34 @@ jobs:
             dist/latest.yml
           if-no-files-found: warn
 
+      - name: Create or update GitHub Release
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          exists=$(gh release view "$TAG" --json id --jq '.id' 2>/dev/null || echo "")
+          if [ -z "$exists" ]; then
+            gh release create "$TAG" \
+              --title "Release $TAG" \
+              --notes "Automated build for $TAG" \
+              --draft=false \
+              --latest \
+              dist/*.exe \
+              dist/*.exe.blockmap \
+              dist/latest.yml
+          else
+            gh release edit "$TAG" --draft=false --latest
+            gh release upload "$TAG" \
+              dist/*.exe \
+              dist/*.exe.blockmap \
+              dist/latest.yml --clobber
+          fi
+
   build-linux:
     name: Build Linux (.pacman)
+    needs: check
     runs-on: ubuntu-latest
     timeout-minutes: 30
-
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -105,52 +152,21 @@ jobs:
             dist/latest-linux.yml
           if-no-files-found: warn
 
-  publish:
-    name: Publish GitHub Release
-    needs: [build-windows, build-linux]
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    if: always() && (needs.build-windows.result == 'success' || needs.build-linux.result == 'success')
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Determine Release Tag
-        id: release_tag
-        shell: bash
+      - name: Create or update GitHub Release
         run: |
-          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
-            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          TAG="${GITHUB_REF#refs/tags/}"
+          exists=$(gh release view "$TAG" --json id --jq '.id' 2>/dev/null || echo "")
+          if [ -z "$exists" ]; then
+            gh release create "$TAG" \
+              --title "Release $TAG" \
+              --notes "Automated build for $TAG" \
+              --draft=false \
+              --latest \
+              dist/*.pacman \
+              dist/latest-linux.yml
           else
-            VERSION=$(node -p "require('./package.json').version")
-            echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Download all built artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: release-assets
-          merge-multiple: true
-
-      - name: Generate SHA-256 Checksums
-        run: |
-          cd release-assets
-          TAG="${{ steps.release_tag.outputs.tag }}"
-          find . -maxdepth 1 -type f \( -name "*.exe" -o -name "*.pacman" -o -name "*.blockmap" -o -name "*.yml" \) -exec sha256sum {} + > "SHA256SUMS-${TAG}.txt" || true
-          cat "SHA256SUMS-${TAG}.txt" || true
-
-      - name: Publish to GitHub Release
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.release_tag.outputs.tag }}
-        run: |
-          echo "Publishing release $TAG with assets:"
-          ls -la release-assets/
-          if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" --title "Nexus $TAG" --generate-notes release-assets/*
-          else
-            gh release upload "$TAG" release-assets/* --clobber
             gh release edit "$TAG" --draft=false --latest
+            gh release upload "$TAG" \
+              dist/*.pacman \
+              dist/latest-linux.yml --clobber
           fi
