@@ -123,7 +123,7 @@ jobs:
       - name: Install system packaging tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y libarchive-tools bsdtar zstd fakeroot
+          sudo apt-get install -y libarchive-tools zstd fakeroot
 
       - name: Cache Electron downloads
         uses: actions/cache@v4
