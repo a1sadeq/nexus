@@ -1,3 +1,4 @@
+
 import { dialog, type BrowserWindow, type WebContentsView } from 'electron'
 import * as fs from 'fs'
 import * as path from 'path'
@@ -103,7 +104,6 @@ const BINARY_EXTENSIONS = new Set([
   '.db',
   '.sqlite'
 ])
-
 
 const MAX_FOLDER_FILES = 10000
 const MAX_FILE_SIZE = 10 * 1024 * 1024 // 10MB per file
@@ -284,7 +284,7 @@ export async function handleFolderUpload(
     if (canceled || filePaths.length === 0) return
 
     const folderPath = filePaths[0]
-    const scanResult = scanFolder(folderPath)
+    const scanResult = await scanFolderAsync(folderPath)
 
     if (scanResult.totalFiles === 0) {
       showNexusToast(view, 'No readable text files found in folder.')
@@ -300,6 +300,102 @@ export async function handleFolderUpload(
     isDialogOpen = false
     lastDialogTimestamp = Date.now()
   }
+}
+
+const yieldToMain = () => new Promise<void>(resolve => setImmediate(resolve))
+
+/** Non-blocking production scanner. The synchronous export remains for compatibility/tests. */
+export async function scanFolderAsync(folderPath: string): Promise<FolderScanResult> {
+  const files: ScannedFileInfo[] = []
+  const prunedDirs: string[] = []
+  let totalBytes = 0
+  let isTruncated = false
+  let operations = 0
+  const queue: string[] = [folderPath]
+  while (queue.length && files.length < MAX_FOLDER_FILES) {
+    const dir = queue.shift()!
+    let entries: fs.Dirent[]
+    try { entries = await fs.promises.readdir(dir, { withFileTypes: true }) } catch { continue }
+    const subdirs = entries.filter(e => e.isDirectory() && !IGNORE_DIRS.has(e.name) && !e.name.startsWith('.'))
+      .sort((a,b) => Number(PRIORITY_DIR_NAMES.has(b.name.toLowerCase()))-Number(PRIORITY_DIR_NAMES.has(a.name.toLowerCase())) || a.name.localeCompare(b.name))
+    queue.push(...subdirs.map(e => path.join(dir,e.name)))
+    for (const entry of entries) {
+      if (files.length >= MAX_FOLDER_FILES) { isTruncated=true; break }
+      if (!entry.isFile()) continue
+      const ext=path.extname(entry.name).toLowerCase()
+      if (BINARY_EXTENSIONS.has(ext) || (entry.name.startsWith('.') && !entry.name.startsWith('.env'))) continue
+      const fullPath=path.join(dir,entry.name)
+      try {
+        const stat=await fs.promises.stat(fullPath)
+        if(stat.size>MAX_FILE_SIZE)continue
+        const handle=await fs.promises.open(fullPath,'r')
+        const buffer=Buffer.allocUnsafe(1024)
+        const {bytesRead}=await handle.read(buffer,0,1024,0)
+        await handle.close()
+        if(buffer.subarray(0,bytesRead).includes(0))continue
+        const lowerName=entry.name.toLowerCase()
+        let removalReason: string|undefined
+        if(SUGGESTED_REMOVAL_FILENAMES.has(lowerName))removalReason='Lockfile (large / redundant)'
+        else if(lowerName.startsWith('.env'))removalReason='Sensitive / Secrets file'
+        else if(lowerName.endsWith('.min.js')||lowerName.endsWith('.min.css'))removalReason='Minified asset'
+        else if(lowerName.endsWith('.map'))removalReason='Source map'
+        else if(lowerName.endsWith('.log'))removalReason='Log file'
+        else if(stat.size>250*1024)removalReason=`Large file (${Math.round(stat.size/1024)} KB)`
+        else if(SUGGESTED_REMOVAL_EXTENSIONS.has(ext))removalReason='Data dump / temporary'
+        files.push({path:fullPath,relativePath:path.relative(folderPath,fullPath),size:stat.size,extension:ext||'no-ext',isSuggestedRemoval:Boolean(removalReason),removalReason})
+        totalBytes+=stat.size
+      } catch { /* Ignore disappearing/unreadable entries. */ }
+      if(++operations%40===0)await yieldToMain()
+    }
+  }
+  if(queue.length){isTruncated=true;prunedDirs.push(...queue.slice(0,100).map(d=>path.relative(folderPath,d)).filter(Boolean))}
+  annotateFileVariants(files as any[])
+  return {folderPath,folderName:path.basename(folderPath),totalFiles:files.length,totalBytes,files,prunedDirs:prunedDirs.length?prunedDirs:undefined,isTruncated:isTruncated||undefined}
+}
+
+async function processFilesForUpload(filePaths:string[]):Promise<string[]> {
+  const processed:string[]=[]
+  for(const originalPath of filePaths){
+    const ext=path.extname(originalPath).toLowerCase()
+    if(ext==='.txt'||ext==='.pdf'||BINARY_EXTENSIONS.has(ext))processed.push(originalPath)
+    else {try{processed.push(createMasqueradedTextFile(originalPath))}catch{processed.push(originalPath)}}
+    await yieldToMain()
+  }
+  return processed
+}
+
+/** Ctrl+O: every selected file and folder enters the same review flow as Ctrl+Shift+O. */
+export async function handleMixedUpload(view:WebContentsView,mainWindow:BrowserWindow,customSelector?:string):Promise<void>{
+  void customSelector // Review/confirmation resolves the active provider selector through the existing flow.
+  if(!mainWindow||mainWindow.isDestroyed()||!view||view.webContents.isDestroyed())return
+  const now=Date.now();if(isDialogOpen||now-lastDialogTimestamp<DIALOG_COOLDOWN_MS)return
+  isDialogOpen=true;lastDialogTimestamp=now
+  try{
+    const result=await dialog.showOpenDialog(mainWindow,{title:'Upload Files and Folders to AI',properties:['openFile','openDirectory','multiSelections']})
+    if(result.canceled||!result.filePaths.length)return
+    const directFiles:string[]=[];const folders:string[]=[]
+    for(const selected of result.filePaths){try{(await fs.promises.stat(selected)).isDirectory()?folders.push(selected):directFiles.push(selected)}catch{}}
+    if(directFiles.length||folders.length){
+      const scans:FolderScanResult[]=[];for(const folder of folders){scans.push(await scanFolderAsync(folder));await yieldToMain()}
+      const files=scans.flatMap(r=>r.files)
+      for(const filePath of directFiles){try{const stat=await fs.promises.stat(filePath);files.push({path:filePath,relativePath:path.basename(filePath),size:stat.size,extension:path.extname(filePath).toLowerCase()||'no-ext',isSuggestedRemoval:false})}catch{}}
+      if(!files.length){showNexusToast(view,'No readable text files found in the selected folders.');return}
+      const roots=[...folders,...directFiles.map(f=>path.dirname(f))]
+      let common=roots[0]||path.parse(result.filePaths[0]).root
+      for(const root of roots.slice(1)){while(common!==path.dirname(common)&&root!==common&&!root.startsWith(common+path.sep))common=path.dirname(common)}
+      for(const file of files){if(roots.length>1)file.relativePath=path.relative(common,file.path)}
+      const scanResult:FolderScanResult={folderPath:common,folderName:folders.length===1&&!directFiles.length?path.basename(folders[0]):`${directFiles.length} files + ${folders.length} folders`,totalFiles:files.length,totalBytes:files.reduce((n,f)=>n+f.size,0),files,prunedDirs:scans.flatMap(r=>r.prunedDirs??[]),isTruncated:scans.some(r=>r.isTruncated)||undefined}
+      mainWindow.webContents.send('show_folder_upload_modal',scanResult)
+    }
+  }catch(err){console.error('Mixed upload failed:',err);showNexusToast(view,'Upload failed. Try a smaller selection.')}finally{isDialogOpen=false;lastDialogTimestamp=Date.now()}
+}
+
+/** Non-blocking bundle preview used by renderer IPC. */
+export async function generateBundleTextAsync(folderPath:string,selectedPaths:string[]):Promise<BundlePreviewResult>{
+  const parts=[`================================================================\nCodebase Bundle: ${path.basename(folderPath)}\nTotal Selected Files: ${selectedPaths.length}\n================================================================\n\n`]
+  const filesIncluded:string[]=[]
+  for(const fullPath of selectedPaths){try{const content=await fs.promises.readFile(fullPath,'utf8');const relativePath=path.relative(folderPath,fullPath);parts.push(`================================================================\nFile: ${relativePath}\n================================================================\n\n${content}\n\n`);filesIncluded.push(relativePath)}catch(err){console.error('Failed to read bundle file:',fullPath,err)}await yieldToMain()}
+  const text=parts.join('');return{text,fileCount:filesIncluded.length,byteSize:Buffer.byteLength(text),filesIncluded}
 }
 
 /**
@@ -632,18 +728,7 @@ export async function handleFileUpload(
 
     if (canceled || filePaths.length === 0) return
 
-    const processedPaths = filePaths.map((originalPath) => {
-      const ext = path.extname(originalPath).toLowerCase()
-      if (ext === '.txt' || ext === '.pdf' || BINARY_EXTENSIONS.has(ext)) {
-        return originalPath
-      }
-      try {
-        return createMasqueradedTextFile(originalPath)
-      } catch (err) {
-        console.error('Failed to masquerade file:', err)
-        return originalPath
-      }
-    })
+    const processedPaths = await processFilesForUpload(filePaths)
 
     await injectFilesViaCDP(view, processedPaths, customSelector)
   } catch (err) {
@@ -830,15 +915,15 @@ function showNexusToast(view: WebContentsView, message: string): void {
       `
     (function() {
       let t = document.getElementById('__nexusTabToast');
-      if (!t) { 
-        t = document.createElement('div'); 
-        t.id = '__nexusTabToast'; 
-        t.style.cssText = 'position:fixed;top:24px;left:50%;transform:translateX(-50%);background:rgba(5,15,20,0.92);color:#00e5ff;font:13px/1.5 "Share Tech Mono",monospace;padding:8px 24px;border-radius:4px;z-index:2147483647;pointer-events:none;opacity:0;transition:all .3s cubic-bezier(0.16, 1, 0.3, 1);white-space:nowrap;box-shadow:0 0 20px rgba(0,229,255,0.3);backdrop-filter:blur(12px);border:1px solid rgba(0,229,255,0.4);margin-top:-10px;text-transform:uppercase;letter-spacing:1px;'; 
-        document.documentElement.appendChild(t); 
+      if (!t) {
+        t = document.createElement('div');
+        t.id = '__nexusTabToast';
+        t.style.cssText = 'position:fixed;top:24px;left:50%;transform:translateX(-50%);background:rgba(5,15,20,0.92);color:#00e5ff;font:13px/1.5 "Share Tech Mono",monospace;padding:8px 24px;border-radius:4px;z-index:2147483647;pointer-events:none;opacity:0;transition:all .3s cubic-bezier(0.16, 1, 0.3, 1);white-space:nowrap;box-shadow:0 0 20px rgba(0,229,255,0.3);backdrop-filter:blur(12px);border:1px solid rgba(0,229,255,0.4);margin-top:-10px;text-transform:uppercase;letter-spacing:1px;';
+        document.documentElement.appendChild(t);
       }
       t.textContent = ${JSON.stringify(message)};
       requestAnimationFrame(() => { t.style.opacity = '1'; t.style.marginTop = '0px'; });
-      clearTimeout(t._t); 
+      clearTimeout(t._t);
       t._t = setTimeout(() => { t.style.opacity = '0'; t.style.marginTop = '-10px'; }, 3000);
     })();
   `

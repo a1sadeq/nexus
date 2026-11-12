@@ -78,7 +78,8 @@ import {
   handleFolderUpload,
   handleFileUpload,
   bundleAndInjectSelectedFiles,
-  generateBundleText,
+  generateBundleTextAsync,
+  handleMixedUpload,
   partitionCodebaseFiles,
   uploadChunksSequentially
 } from './uploadManager'
@@ -848,7 +849,7 @@ ipcMain.handle('preview_folder_bundle', async (event, payload: ConfirmFolderUplo
   if (!payload || !Array.isArray(payload.selectedPaths) || payload.selectedPaths.length === 0) {
     return { text: '', fileCount: 0, byteSize: 0, filesIncluded: [] }
   }
-  return generateBundleText(payload.folderPath, payload.selectedPaths)
+  return await generateBundleTextAsync(payload.folderPath, payload.selectedPaths)
 })
 
 ipcMain.handle('save_folder_bundle_to_disk', async (event, payload: ConfirmFolderUploadPayload & { useDialog?: boolean }) => {
@@ -886,7 +887,7 @@ ipcMain.handle('save_folder_bundle_to_disk', async (event, payload: ConfirmFolde
       filePath = join(targetDir, `${folderName}_codebase_bundle_${Date.now()}.txt`)
     }
 
-    const { text, fileCount, byteSize } = generateBundleText(payload.folderPath, payload.selectedPaths)
+    const { text, fileCount, byteSize } = await generateBundleTextAsync(payload.folderPath, payload.selectedPaths)
     fs.writeFileSync(filePath, text, 'utf-8')
     clipboard.writeText(filePath)
     return { success: true, savedPath: filePath, fileCount, byteSize, copiedToClipboard: true }
@@ -1767,7 +1768,7 @@ export function routeGlobalShortcut(event: Electron.Event, input: Electron.Input
       if (view && !view.webContents.isDestroyed()) {
         const modelKey = viewModelKeys.get(activeViewId) || ''
         const feats = getMergedProviderFeatures(modelKey, providerConfig[modelKey])
-        handleFileUpload(view, mainWindow, feats.attachmentSelector).catch((err) => {
+        handleMixedUpload(view, mainWindow, feats.attachmentSelector).catch((err) => {
           console.error('Failed to handle file upload:', err)
         })
       }
