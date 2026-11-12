@@ -51,8 +51,8 @@ export default function SyncReminderBanner({ onSyncComplete, onOpenSettings }: S
     setIsSyncing(true)
     setFeedback(null)
     try {
-      // @ts-ignore
-      const res = (await window.electron?.sessions?.syncAll?.()) || (await window.electron?.googleSignIn?.syncAll?.())
+      if (!window.electron?.sessions) throw new Error('Session import is unavailable.')
+      const res = await window.electron.sessions.syncAll()
       if (res && res.success) {
         const count = res.count ?? 0
         setFeedback({

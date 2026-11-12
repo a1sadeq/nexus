@@ -106,8 +106,17 @@ export interface BrowserProfile {
 
 export const GOOGLE_HOST_PATTERN =
   /(^|\.)(google\.(com|eg|co\.\w+|com\.\w+)|googleusercontent\.com|gstatic\.com|googleapis\.com)$/i
+
 export const AI_HOST_PATTERN =
   /(^|\.)(google\.(com|eg|co\.\w+|com\.\w+)|googleusercontent\.com|gstatic\.com|googleapis\.com|openai\.com|chatgpt\.com|oaistatic\.com|oaiusercontent\.com|anthropic\.com|claude\.ai|perplexity\.ai|deepseek\.com|x\.ai|grok\.com|mistral\.ai|z\.ai|copilot\.microsoft\.com|bing\.com)$/i
+
+const SESSION_COOKIES = ['SID', '__Secure-1PSID', '__Secure-3PSID'] as const
+
+// Test-only accessors: expose the private profile-info helpers so tests can
+// validate hasGoogleAuth detection against crafted cookie databases without
+// exercising the full filesystem-based profile scanner.
+export const _test_chromeProfileInfo = chromeProfileInfo
+export const _test_firefoxProfileInfo = firefoxProfileInfo
 
 const SQL_CHROME_AI_WHERE = `
   host_key LIKE '%google%' OR
@@ -141,13 +150,12 @@ const SQL_FIREFOX_AI_WHERE = `
   host LIKE '%bing.com%'
 `
 
-const SESSION_COOKIES = ['SID', '__Secure-1PSID', '__Secure-3PSID'] as const
 
-function matchAiProvidersFromHost(host: string, set: Set<string>): void {
+export function matchAiProvidersFromHost(host: string, set: Set<string>): void {
   const h = host.toLowerCase()
+  if (h.includes('google')) set.add('google')
   if (h.includes('openai') || h.includes('chatgpt')) set.add('chatgpt')
   if (h.includes('anthropic') || h.includes('claude')) set.add('claude')
-  if (h.includes('google')) set.add('google')
   if (h.includes('perplexity')) set.add('perplexity')
   if (h.includes('deepseek')) set.add('deepseek')
   if (h.includes('x.ai') || h.includes('grok')) set.add('grok')
@@ -195,7 +203,7 @@ function firefoxProfileInfo(dbPath: string): {
       }
 
       return {
-        hasGoogleAuth: (authRow?.n ?? 0) > 0 || detected.has('google'),
+        hasGoogleAuth: (authRow?.n ?? 0) > 0,
         detectedAiSessions: Array.from(detected),
         lastAccessed: maxAccess,
         isLocked: false
@@ -251,7 +259,7 @@ function chromeProfileInfo(dbPath: string): {
       }
 
       return {
-        hasGoogleAuth: (authRow?.n ?? 0) > 0 || detected.has('google'),
+        hasGoogleAuth: (authRow?.n ?? 0) > 0,
         detectedAiSessions: Array.from(detected),
         lastAccessed: maxAccess,
         isLocked: false
@@ -793,6 +801,13 @@ export function normalizeExpirationDate(rawExp?: number): number | undefined {
   return Math.floor(rawExp)
 }
 
+export function mapNumericSameSite(value?: number): 'unspecified' | 'no_restriction' | 'lax' | 'strict' {
+  if (value === 0) return 'no_restriction'
+  if (value === 1) return 'lax'
+  if (value === 2) return 'strict'
+  return 'unspecified'
+}
+
 async function readChromeCookies(
   profile: BrowserProfile,
   scope: 'google' | 'all' = 'all'
@@ -818,11 +833,7 @@ async function readChromeCookies(
   const out: BrowserCookie[] = []
   return withTempSqliteDb(profile.cookieDb, (db) => {
     const query =
-      scope === 'google'
-        ? `SELECT host_key, name, value, encrypted_value, path, is_secure, is_httponly,
-                  CAST(expires_utc AS REAL) AS expires_utc, CAST(last_access_utc AS REAL) AS last_access_utc, samesite
-           FROM cookies WHERE host_key LIKE '%google%'`
-        : `SELECT host_key, name, value, encrypted_value, path, is_secure, is_httponly,
+      `SELECT host_key, name, value, encrypted_value, path, is_secure, is_httponly,
                   CAST(expires_utc AS REAL) AS expires_utc, CAST(last_access_utc AS REAL) AS last_access_utc, samesite
            FROM cookies WHERE ${SQL_CHROME_AI_WHERE}`
 
@@ -853,9 +864,9 @@ async function readChromeCookies(
       }
 
       let sameSite: 'unspecified' | 'no_restriction' | 'lax' | 'strict' | undefined = undefined
-      if (row.samesite === 0) sameSite = 'unspecified'
-      else if (row.samesite === 1) sameSite = 'lax'
-      else if (row.samesite === 2) sameSite = 'strict'
+      if (typeof row.samesite === 'number') {
+        sameSite = mapNumericSameSite(row.samesite)
+      }
 
       out.push({
         name: row.name,
@@ -899,16 +910,13 @@ async function readFirefoxCookies(
       lastAccessed: number
       sameSite?: number
     }>
-
     const pattern = scope === 'google' ? GOOGLE_HOST_PATTERN : AI_HOST_PATTERN
     for (const row of rows) {
       if (!pattern.test(row.host)) continue
-
       let sameSite: 'unspecified' | 'no_restriction' | 'lax' | 'strict' | undefined = undefined
-      if (row.sameSite === 0) sameSite = 'unspecified'
-      else if (row.sameSite === 1) sameSite = 'lax'
-      else if (row.sameSite === 2) sameSite = 'strict'
-
+      if (typeof row.sameSite === 'number') {
+        sameSite = mapNumericSameSite(row.sameSite)
+      }
       out.push({
         name: row.name,
         value: row.value,
@@ -1058,58 +1066,18 @@ export function parseCookieEditorJson(jsonStr: string): BrowserCookie[] {
   return cookies
 }
 
-export async function verifyGoogleSession(
-  cookies: BrowserCookie[]
-): Promise<{ ok: boolean; email?: string }> {
-  const hasAuth = cookies.some(
-    (c) => c.name === 'SID' || c.name === '__Secure-1PSID' || c.name === '__Secure-3PSID'
-  )
-  if (!hasAuth) return { ok: false }
+export function isGoogleCookieDomain(domain: string): boolean {
+  const host = domain.trim().toLowerCase().replace(/^\.+/, '').replace(/\.$/, '')
+  return /(^|\.)(google\.(com|eg|co\.[a-z]+|com\.[a-z]+)|googleusercontent\.com|gstatic\.com|googleapis\.com)$/i.test(host)
+}
 
-  // Extract email hint from ACCOUNT_CHOOSER if available
-  const ac = cookies.find((c) => c.name === 'ACCOUNT_CHOOSER')
-  let emailHint: string | undefined = undefined
-  if (ac?.value) {
-    try {
-      const decoded = decodeURIComponent(ac.value)
-      const m = decoded.match(
-        /[\w.+-]+@(?:gmail\.com|googlemail\.com|[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/
-      )
-      if (m) emailHint = m[0]
-    } catch {
-      // ignore
-    }
+export function validateDomainForCookieImport(domain: string): {
+  valid: boolean
+  reason?: string
+} {
+  const host = domain.trim().toLowerCase().replace(/^\.+/, '').replace(/\.$/, '')
+  if (!GOOGLE_HOST_PATTERN.test(host) && !AI_HOST_PATTERN.test(host)) {
+    return { valid: false, reason: `Domain "${host}" is not a supported AI provider.` }
   }
-
-  // Filter root domain cookies to keep request header clean
-  const rootCookies = cookies.filter(
-    (c) => c.domain === '.google.com' || c.domain === 'google.com' || c.domain === 'www.google.com'
-  )
-  const header = (rootCookies.length > 0 ? rootCookies : cookies)
-    .map((c) => `${c.name}=${c.value}`)
-    .join('; ')
-
-  try {
-    const resp = await fetch('https://www.google.com/', {
-      headers: {
-        Cookie: header,
-        'User-Agent':
-          'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36'
-      },
-      redirect: 'follow',
-      signal: AbortSignal.timeout(6000)
-    })
-    const text = await resp.text()
-    const emailMatch = text.match(/"([\w.+-]+@(?:gmail\.com|googlemail\.com))"/)
-    if (emailMatch) return { ok: true, email: emailMatch[1] }
-    const signedIn =
-      text.includes('gb_') &&
-      !text.includes('ServiceLogin') &&
-      !resp.url.includes('accounts.google.com/ServiceLogin')
-    if (signedIn) return { ok: true, email: emailHint }
-  } catch {
-    // ignore network/rate-limit error
-  }
-
-  return { ok: true, email: emailHint }
+  return { valid: true }
 }

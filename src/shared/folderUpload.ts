@@ -5,6 +5,9 @@ export interface ScannedFileInfo {
   extension: string
   isSuggestedRemoval: boolean
   removalReason?: string
+  variantOf?: string
+  variantKind?: 'ai-companion' | 'backup' | 'copy'
+  isPreferredVariant?: boolean
 }
 
 export interface FolderScanResult {

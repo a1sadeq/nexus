@@ -185,9 +185,11 @@ const TreeNodeRow: React.FC<TreeNodeRowProps> = ({
                   {f.isSuggestedRemoval && (
                     <span
                       className="px-1.5 py-0.5 rounded text-[10px] font-sans font-medium bg-amber-500/15 border border-amber-500/30 text-amber-300"
-                      title={f.removalReason}
+                      title={f.removalReason || ''}
                     >
-                      {f.removalReason || 'Suggested removal'}
+                      {(f as any).variantKind
+                        ? `Variant`
+                        : f.removalReason || 'Suggested removal'}
                     </span>
                   )}
                   <span className="px-1.5 py-0.2 rounded text-[10px] font-mono bg-white/[0.04] text-gray-400 border border-white/5">
@@ -230,6 +232,11 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
   const allFiles = data.files
   const suggestedCount = useMemo(
     () => allFiles.filter((f) => f.isSuggestedRemoval).length,
+    [allFiles]
+  )
+  // Count only files marked as duplicate variants (subset of suggested removals, with explicit variantKind)
+  const variantCount = useMemo(
+    () => allFiles.filter((f) => f.isSuggestedRemoval && (f as any).variantKind != null).length,
     [allFiles]
   )
 
@@ -886,6 +893,11 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
               <span className="text-amber-300/70 hidden sm:inline">
                 (lockfiles, env secrets, large bundles)
               </span>
+              {variantCount > 0 && (
+                <span className="text-indigo-300/80 sm:inline">
+                  · {variantCount} possible duplicate variant{variantCount > 1 ? 's' : ''}
+                </span>
+              )}
             </div>
 
             <button

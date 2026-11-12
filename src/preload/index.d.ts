@@ -16,74 +16,53 @@ export interface NexusIpcRenderer {
   removeAllListeners?: (channel: string) => void
 }
 
-export interface GoogleSignInProfile {
+export interface SessionProfile {
   id: string
   browser: string
   name: string
   hasGoogleAuth: boolean
-  detectedAiSessions?: string[]
+  detectedAiSessions: string[]
   lastAccessed?: number
   isLatest?: boolean
   isLocked?: boolean
 }
 
-export type DetectedBrowserProfile = GoogleSignInProfile
-
-export type GoogleSignInStage =
-  | 'opening-browser'
-  | 'waiting'
-  | 'success'
-  | 'error'
-  | 'keyring-error'
-  | 'no-auth'
-
 export interface GoogleSignInEvent {
-  stage: GoogleSignInStage
-  email?: string
+  stage:
+    | 'opening-browser'
+    | 'waiting'
+    | 'success'
+    | 'error'
+    | 'keyring-error'
+    | 'no-auth'
   message?: string
-  profiles?: GoogleSignInProfile[]
+  email?: string
+  profiles?: Array<{
+    id: string
+    browser: string
+    name: string
+    hasGoogleAuth: boolean
+  }>
 }
 
-export interface SessionImportResult {
-  success: boolean
-  count?: number
-  profilesCount?: number
-  profileName?: string
-  detectedProviders?: string[]
-  message?: string
-  error?: string
-  canceled?: boolean
+export interface NexusSessions {
+  syncAll: () => Promise<{ success: boolean; count: number; message: string }>
+  syncProfile: (profileId: string) => Promise<{ success: boolean; profileName?: string; message?: string; count?: number }>
+  getProfiles: () => Promise<Array<SessionProfile>>
+  importJson: (json: string) => Promise<{ success: boolean; count: number; errorCount: number; message: string }>
+  pickCustomFolder: () => Promise<{ canceled?: boolean; success?: boolean; count?: number; profileName?: string; detectedProviders?: string[]; message?: string }>
+  clearSession: (providerKey: string, providerUrl?: string) => Promise<{ success: boolean; message?: string }>
 }
 
 export interface NexusGoogleSignIn {
   start: () => Promise<unknown>
   pickProfile: (profileId: string) => Promise<unknown>
-  getProfiles: () => Promise<GoogleSignInProfile[]>
+  getProfiles: () => Promise<Array<SessionProfile>>
   cancel: () => void
-  syncAll: () => Promise<SessionImportResult>
-  syncProfile: (profileId: string) => Promise<SessionImportResult>
-  importJson: (json: string) => Promise<SessionImportResult>
-  onEvent: (listener: (event: IpcRendererEvent, ev: GoogleSignInEvent) => void) => void
-}
-
-export interface NexusSessions {
-  syncAll: () => Promise<SessionImportResult>
-  syncProfile: (profileId: string) => Promise<SessionImportResult>
-  pickCustomFolder: () => Promise<SessionImportResult>
-  importJson: (json: string) => Promise<SessionImportResult>
-  getProfiles: () => Promise<GoogleSignInProfile[]>
-  pickProfile: (profileId: string) => Promise<unknown>
-  startGoogleSignIn: () => Promise<unknown>
-  cancelGoogleSignIn: () => void
-  onEvent: (listener: (event: IpcRendererEvent, ev: GoogleSignInEvent) => void) => void
-}
-
-export interface NexusWindowControls {
-  minimize: () => void
-  maximizeToggle: () => void
-  close: () => void
-  isMaximized: () => Promise<boolean>
-  onMaximizedChange?: (callback: (isMaximized: boolean) => void) => () => void
+  syncAll: () => Promise<{ success: boolean; count: number; message: string }>
+  syncProfile: (profileId: string) => Promise<{ success: boolean; profileName?: string; message?: string; count?: number }>
+  importJson: (json: string) => Promise<{ success: boolean; count: number; errorCount: number; message: string }>
+  onEvent: (listener: (event: IpcRendererEvent, ev: unknown) => void) => void
 }
 
 export interface SkillVariable {
@@ -106,21 +85,17 @@ export interface SkillDef {
   content: string
   filePath?: string
   isBuiltIn?: boolean
+  usageCount?: number
+  isPinned?: boolean
 }
 
 export interface NexusSkills {
   list: () => Promise<SkillDef[]>
   save: (skill: SkillDef) => Promise<{ success: boolean; filePath?: string; error?: string }>
   delete: (skillId: string) => Promise<{ success: boolean; error?: string }>
-  getPinnedCategories: () => Promise<string[]>
-  toggleCategoryPin: (cat: string) => Promise<void>
-  renameCategory: (oldName: string, newName: string) => Promise<void>
-  deleteCategory: (cat: string) => Promise<void>
-  assignSkillsToCategory: (cat: string, ids: string[]) => Promise<void>
-  readFile: (
-    filePath: string,
-    projectDir?: string
-  ) => Promise<{ success: boolean; content?: string; error?: string }>
+  togglePin: (skillId: string) => Promise<boolean>
+  incrementUsage: (skillId: string) => Promise<boolean>
+  readFile: (filePath: string, projectDir?: string) => Promise<{ success: boolean; content?: string; error?: string }>
   executeCommand: (
     command: string,
     projectDir?: string,
@@ -134,29 +109,20 @@ export interface NexusSkills {
   addSafeCommand: (cmd: string) => Promise<boolean>
   removeSafeCommand: (cmd: string) => Promise<boolean>
   injectPrompt: (tabId: string, promptText: string, autoSend?: boolean) => Promise<boolean>
-  onUpdated?: (callback: () => void) => () => void
-  incrementUsage: (skillId: string) => Promise<boolean>
-  togglePin: (skillId: string) => Promise<boolean>
-}
-
-export interface DownloadItemInfo {
-  id: string
-  filename: string
-  fullPath: string
-  directory: string
-  fileSize: number
-  mimeType?: string
-  isProjectDir: boolean
-  timestamp: number
+  getPinnedCategories: () => Promise<string[]>
+  toggleCategoryPin: (category: string) => Promise<boolean>
+  deleteCategory: (category: string) => Promise<boolean>
+  assignSkillsToCategory: (category: string, ids: string[]) => Promise<boolean>
+  onUpdated: (callback: () => void) => (() => void)
 }
 
 export interface NexusDownloads {
   showItemInFolder: (fullPath: string) => Promise<void>
   openPath: (fullPath: string) => Promise<string>
-  copyPath?: (fullPath: string) => void
   setActiveProjectDir: (dir: string | null) => void
   getDefaultDownloadDir: () => Promise<string>
-  onCompleted: (callback: (info: DownloadItemInfo) => void) => () => void
+  copyPath: (fullPath: string) => void
+  onCompleted: (callback: (info: any) => void) => (() => void)
 }
 
 export interface NexusAiFeatures {
@@ -165,35 +131,29 @@ export interface NexusAiFeatures {
   testLiveHooks: (modelKey: string) => Promise<unknown>
 }
 
+export interface NexusWindowControls {
+  minimize: () => void
+  maximizeToggle: () => void
+  close: () => void
+  isMaximized: () => Promise<boolean>
+  onMaximizedChange: (callback: (isMaximized: boolean) => void) => (() => void)
+}
+
 export interface NexusStateBridge {
   get: (key: string) => Promise<any>
-  save: (key: string, data: unknown) => Promise<boolean>
+  save: (key: string, data: unknown) => Promise<any>
   getThemeSync: () => any
-  getTabsSync?: () => any
+  getTabsSync: () => any
 }
 
 export interface NexusCacheBridge {
-  getStats: () => Promise<{
-    rootCacheBytes: number
-    partitionCacheBytes: number
-    totalCacheBytes: number
-    totalCacheMB: number
-    processMemoryMB: number
-    heapUsedMB: number
-  }>
-  purge: () => Promise<{
-    success: boolean
-    freedBytes: number
-    freedMB: number
-    currentCacheBytes: number
-    currentCacheMB: number
-    error?: string
-  }>
+  getStats: () => Promise<any>
+  purge: () => Promise<any>
 }
 
 export interface NexusDiagnosticsBridge {
-  capture: (samplingMs?: number) => Promise<{ success: boolean; report?: any; reason?: string }>
-  exportToFile: (report: any) => Promise<{ success: boolean; filePath?: string; error?: string }>
+  capture: (samplingMs?: number) => Promise<any>
+  exportToFile: (report: any) => Promise<any>
 }
 
 declare global {
@@ -201,8 +161,8 @@ declare global {
     nexusState?: NexusStateBridge
     electron: {
       ipcRenderer: NexusIpcRenderer
-      googleSignIn: NexusGoogleSignIn
       sessions?: NexusSessions
+      googleSignIn?: NexusGoogleSignIn
       platform?: string
       windowControls?: NexusWindowControls
       skills?: NexusSkills
@@ -218,4 +178,3 @@ declare global {
     }
   }
 }
-

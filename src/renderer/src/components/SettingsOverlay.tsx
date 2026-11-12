@@ -1010,8 +1010,8 @@ export default function SettingsOverlay({
   const fetchBrowserProfiles = useCallback(async () => {
     setLoadingProfiles(true)
     try {
-      // @ts-ignore
-      const res = await (window.electron?.sessions?.getProfiles?.() || window.electron?.googleSignIn?.getProfiles?.())
+      if (!window.electron?.sessions) return
+      const res = await window.electron.sessions.getProfiles()
       if (Array.isArray(res)) {
         setBrowserProfiles(res)
       }

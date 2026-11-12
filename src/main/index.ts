@@ -1,4 +1,8 @@
+
 import './bootstrap'
+import { DownloadNotificationOverlay } from './downloadNotificationOverlay'
+import { installGoogleSessionPersistence, flushGoogleSessionStore } from './googleSessionPersistence'
+import { isGoogleLoginRecoveryUrl, recoverGoogleSessionFromLatestBrowser } from './googleSessionRecovery'
 import { spawn } from 'child_process'
 import {
   app,
@@ -58,16 +62,18 @@ const PAGE_HELPERS = `
 import { nextThemeSwap } from './themeSwap'
 import { skillsEngine, type SkillDef } from './skillsEngine'
 import {
-  startGoogleSignIn,
-  listProfiles,
-  cancelGoogleSignIn,
   syncAllSessionsFromBrowsers,
   syncSessionFromProfile,
   importCookiesFromJson,
   injectCookies,
-  type GoogleSignInEvent
+  listProfiles,
+  startGoogleSignIn,
+  cancelGoogleSignIn
 } from './googleAuth'
-import { readCookiesFromCustomDirectory } from './cookieImport'
+import { reloadProviderViews } from './providerViewReloader'
+import {
+  readCookiesFromCustomDirectory
+} from './cookieImport'
 import {
   handleFolderUpload,
   handleFileUpload,
@@ -131,6 +137,7 @@ const viewModelKeys = new Map<string, string>()
 let providerConfig: import('../shared/providerConfig').ProviderConfigMap = {}
 
 let aiNotificationView: Electron.WebContentsView | null = null
+let downloadNotificationOverlay: DownloadNotificationOverlay | null = null
 let isAiNotificationVisible = false
 let aiNotificationDismissTimer: NodeJS.Timeout | null = null
 let currentNotificationData: {
@@ -451,6 +458,7 @@ function showInAppToast(data: {
     })
     aiNotificationView.setVisible(true)
     isAiNotificationVisible = true
+    downloadNotificationOverlay?.raiseToFront()
 
     aiNotificationDismissTimer = setTimeout(() => {
       dismissInAppToast()
@@ -1256,6 +1264,7 @@ function registerDownloadHandler(targetSession: Electron.Session) {
         }
 
         sendToMainWindow('download_completed', downloadInfo)
+        downloadNotificationOverlay?.show({ id: downloadInfo.id, filename: downloadInfo.filename, fullPath: downloadInfo.fullPath, size: downloadInfo.fileSize, destination: downloadInfo.directory })
       } else if (state === 'interrupted' || state === 'cancelled') {
         console.warn(`[Nexus Downloads] Download ${state}: ${rawFilename}`)
       }
@@ -1494,6 +1503,8 @@ app.on('before-quit', () => {
 })
 
 app.on('will-quit', () => {
+  downloadNotificationOverlay?.destroy()
+  void flushGoogleSessionStore(session.fromPartition('persist:ai-shared')).catch(console.error)
   globalShortcut.unregisterAll()
 })
 
@@ -1957,6 +1968,16 @@ function createWindow() {
   aiNotificationView.setBounds({ x: 0, y: 0, width: 0, height: 0 })
   mainWindow.contentView.addChildView(aiNotificationView)
 
+  // Construct once during window startup. This must not live in the
+  // AI-notification presenter, or downloads before an AI alert are dropped.
+  downloadNotificationOverlay = new DownloadNotificationOverlay(mainWindow, join(__dirname, '../preload/index.js'), () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return
+    if (aiNotificationView) {
+      mainWindow.contentView.removeChildView(aiNotificationView)
+      mainWindow.contentView.addChildView(aiNotificationView)
+    }
+  })
+
   mainWindow.on('resize', () => {
     if (aiNotificationView && currentNotificationData && isAiNotificationVisible) {
       const winBounds = mainWindow?.getContentBounds()
@@ -2167,34 +2188,6 @@ app.whenReady().then(() => {
   scheduleStartupAndExitPruning(getFinalUserDataDir())
   // Retain persistent partition cache across launches to avoid cold-load network re-download penalties.
 
-  // One-time migration: the old OAuth cookie bridge left empty/corrupted
-  // Google cookies in the AI webview partition (blank page on Gemini).
-  // Purge them once so the webview shows a fresh sign-in screen. The flag
-  // ensures a subsequent valid in-webview sign-in is never wiped.
-  const authRemovedFlag = join(app.getPath('userData'), 'oauth-removed.flag')
-  if (!existsSync(authRemovedFlag)) {
-    const aiSession = session.fromPartition('persist:ai-shared')
-    aiSession.cookies
-      .get({})
-      .then((cookies) => {
-        const google = cookies.filter((c) => (c.domain || '').toLowerCase().includes('google'))
-        return Promise.all(
-          google.map((c) => {
-            const host = (c.domain || '').replace(/^\./, '')
-            return aiSession.cookies.remove(
-              `http${c.secure ? 's' : ''}://${host}${c.path || '/'}`,
-              c.name
-            )
-          })
-        )
-      })
-      .then(() => {
-        mkdirSync(app.getPath('userData'), { recursive: true })
-        writeFileSync(authRemovedFlag, new Date().toISOString(), { mode: 0o600 })
-      })
-      .catch(console.error)
-  }
-
   // thumb:// serves JPEG thumbnails from the disk-backed thumbnails dir.
   // 'thumb://abc.jpg' parses as hostname 'abc.jpg' + empty pathname, so
   // concatenating hostname+pathname reconstructs the original filename.
@@ -2213,7 +2206,6 @@ app.whenReady().then(() => {
 
   app.on('browser-window-created', (_, window) => {
     optimizer.watchWindowShortcuts(window)
-    window.webContents.userAgent = AI_UA
     window.webContents.setWindowOpenHandler(() => {
       return {
         action: 'allow',
@@ -2282,6 +2274,7 @@ app.whenReady().then(() => {
   })
 
   // Register intelligent download manager routing
+  installGoogleSessionPersistence(session.fromPartition('persist:ai-shared'))
   registerDownloadHandler(session.fromPartition('persist:ai-shared'))
   registerDownloadHandler(session.defaultSession)
 
@@ -2981,6 +2974,7 @@ function ensureAiView(tabId: string): Electron.WebContentsView {
     viewCssState.delete(view.webContents)
     resolveModelKey(tabId, url)
     sendToMainWindow('ai-url-updated', tabId, url)
+    if (isGoogleLoginRecoveryUrl(url)) void recoverGoogleSessionFromLatestBrowser(tabId, view)
   })
   view.webContents.on('did-navigate-in-page', (_event, url) => {
     sendToMainWindow('ai-url-updated', tabId, url)
@@ -3009,7 +3003,6 @@ function ensureAiView(tabId: string): Electron.WebContentsView {
     }
   })
 
-
   // Transactional registration: register with TabDiscardManager BEFORE adding to window or setting in aiViews
   tabDiscardManager.registerView(tabId, view as unknown as DiscardableView)
 
@@ -3025,6 +3018,9 @@ function ensureAiView(tabId: string): Electron.WebContentsView {
         mainWindow.contentView.removeChildView(aiNotificationView)
         mainWindow.contentView.addChildView(aiNotificationView)
       }
+      // addChildView(view) puts the native AI canvas on top. Downloads must
+      // be attached last or only the portion outside the canvas is visible.
+      downloadNotificationOverlay?.raiseToFront()
     } catch {}
   }
 
@@ -4582,38 +4578,6 @@ ipcMain.on('reload_active_view', () => {
   if (view) view.webContents.reload()
 })
 
-// On a successful Google session import, reload the active AI view so Gemini
-// picks up the cookies; forward every flow event to the renderer for the toast.
-function forwardGoogleSignInEvent(ev: GoogleSignInEvent): void {
-  if (ev.stage === 'success') {
-    for (const view of aiViews.values()) {
-      if (!view.webContents.isDestroyed()) {
-        view.webContents.reload()
-      }
-    }
-  }
-  sendToMainWindow('google-signin-event', ev)
-}
-
-const GEMINI_LOGIN_URL =
-  'https://accounts.google.com/ServiceLogin?hl=en&passive=true&continue=' +
-  encodeURIComponent('https://gemini.google.com/signin?continue=https%3A%2F%2Fgemini.google.com%2Fapp') +
-  '&flowName=GlifWebSignIn&flowEntry=ServiceLogin'
-
-ipcMain.handle('google_signin_start', () => {
-  void startGoogleSignIn(GEMINI_LOGIN_URL, { onEvent: forwardGoogleSignInEvent })
-})
-
-ipcMain.handle('google_signin_pick_profile', (_event, profileId: string) => {
-  void startGoogleSignIn(GEMINI_LOGIN_URL, { profileId, onEvent: forwardGoogleSignInEvent })
-})
-
-ipcMain.handle('google_signin_profiles', () => listProfiles())
-
-ipcMain.on('google_signin_cancel', () => {
-  cancelGoogleSignIn()
-})
-
 ipcMain.handle('provider_clear_session', async (event, providerKey: string, providerUrl?: string) => {
   if (!isValidMainWindowSender(event)) return { success: false, message: 'Unauthorized' }
   const sess = session.fromPartition('persist:ai-shared')
@@ -4647,15 +4611,34 @@ ipcMain.handle('provider_clear_session', async (event, providerKey: string, prov
   }
 })
 
+// On a successful Google session import, reload Gemini views only so the
+// embedded page picks up the newly-imported session; forward events to renderer.
+function forwardGoogleSignInEvent(ev: import('./googleAuth').GoogleSignInEvent): void {
+  if (ev.stage === 'success') {
+    reloadProviderViews(aiViews, viewModelKeys, ['gemini'])
+  }
+  sendToMainWindow('google-signin-event', ev)
+}
+const GEMINI_LOGIN_URL =
+  'https://accounts.google.com/ServiceLogin?hl=en&passive=true&continue=' +
+  encodeURIComponent('https://gemini.google.com/signin?continue=https%3A%2F%2Fgemini.google.com%2Fapp') +
+  '&flowName=GlifWebSignIn&flowEntry=ServiceLogin'
+ipcMain.handle('google_signin_start', () => {
+  void startGoogleSignIn(GEMINI_LOGIN_URL, { onEvent: forwardGoogleSignInEvent })
+})
+ipcMain.handle('google_signin_pick_profile', (_event, profileId: string) => {
+  void startGoogleSignIn(GEMINI_LOGIN_URL, { profileId, onEvent: forwardGoogleSignInEvent })
+})
+ipcMain.handle('google_signin_profiles', () => listProfiles())
+ipcMain.on('google_signin_cancel', () => {
+  cancelGoogleSignIn()
+})
+
 ipcMain.handle('sessions_sync_all', async (event) => {
   if (!isValidMainWindowSender(event)) return { success: false, message: 'Unauthorized' }
   const result = await syncAllSessionsFromBrowsers()
-  if (result.success) {
-    for (const view of aiViews.values()) {
-      if (!view.webContents.isDestroyed()) {
-        view.webContents.reload()
-      }
-    }
+  if (result.success && result.detectedProviders?.length) {
+    reloadProviderViews(aiViews, viewModelKeys, result.detectedProviders)
   }
   return result
 })
@@ -4663,12 +4646,8 @@ ipcMain.handle('sessions_sync_all', async (event) => {
 ipcMain.handle('sessions_sync_profile', async (event, profileId: string) => {
   if (!isValidMainWindowSender(event)) return { success: false, message: 'Unauthorized' }
   const result = await syncSessionFromProfile(profileId)
-  if (result.success) {
-    for (const view of aiViews.values()) {
-      if (!view.webContents.isDestroyed()) {
-        view.webContents.reload()
-      }
-    }
+  if (result.success && result.affectedProviders?.length) {
+    reloadProviderViews(aiViews, viewModelKeys, result.affectedProviders)
   }
   return result
 })
@@ -4694,18 +4673,20 @@ ipcMain.handle('sessions_pick_custom_folder', async (event) => {
     if (cookies.length === 0) {
       return { success: false, message: `No active AI session cookies found in "${folder}".` }
     }
-    const { count } = await injectCookies(cookies)
-    for (const view of aiViews.values()) {
-      if (!view.webContents.isDestroyed()) {
-        view.webContents.reload()
-      }
+    const report = await injectCookies(cookies)
+    if (report.count > 0 && report.affectedProviders?.length) {
+      reloadProviderViews(aiViews, viewModelKeys, report.affectedProviders)
     }
     return {
-      success: count > 0,
-      count,
+      success: report.count > 0,
+      count: report.count,
+      errorCount: report.errorCount,
       profileName: profile.name,
       detectedProviders: profile.detectedAiSessions,
-      message: `Successfully imported ${count} cookie(s) from "${profile.name}".`
+      affectedProviders: report.affectedProviders,
+      message: report.errorCount > 0
+        ? `Imported ${report.count} cookie(s) from "${profile.name}" but ${report.errorCount} failed.`
+        : `Successfully imported ${report.count} cookie(s) from "${profile.name}".`
     }
   } catch (err: any) {
     return { success: false, message: err?.message || String(err) }
@@ -4715,12 +4696,8 @@ ipcMain.handle('sessions_pick_custom_folder', async (event) => {
 ipcMain.handle('cookies_import_json', async (event, jsonStr: string) => {
   if (!isValidMainWindowSender(event)) return { success: false, message: 'Unauthorized' }
   const result = await importCookiesFromJson(jsonStr)
-  if (result.success) {
-    for (const view of aiViews.values()) {
-      if (!view.webContents.isDestroyed()) {
-        view.webContents.reload()
-      }
-    }
+  if (result.success && result.affectedProviders?.length) {
+    reloadProviderViews(aiViews, viewModelKeys, result.affectedProviders)
   }
   return result
 })
@@ -5145,4 +5122,3 @@ ipcMain.handle('list_history', (event) => {
 
 // Universal file-backed app state (tabs, pinned, models, providers, interface-settings, theme)
 // is registered with the Session Write Barrier and Atomic Write Engine in registerStateIpc().
-

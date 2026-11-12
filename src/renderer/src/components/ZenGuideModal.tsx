@@ -79,32 +79,17 @@ export function ZenGuideModal({
 
   // Load detected browser profiles
   useEffect(() => {
-    // @ts-ignore
-    window.electron?.googleSignIn?.getProfiles?.().then((profiles: any) => {
+    if (!window.electron?.sessions) return
+    window.electron.sessions.getProfiles().then((profiles: any[]) => {
       if (Array.isArray(profiles) && profiles.length > 0) {
-        const sorted = [...profiles].sort((a, b) => {
+        const sorted = [...profiles].sort((a: any, b: any) => {
           if (a.isLatest && !b.isLatest) return -1
           if (!a.isLatest && b.isLatest) return 1
           return (b.lastAccessed || 0) - (a.lastAccessed || 0)
         })
-        setSignInProfiles(sorted)
+        setSignInProfiles(sorted as typeof signInProfiles)
       }
     }).catch(() => {})
-  }, [])
-
-  // Listen to profile events
-  useEffect(() => {
-    const onEv = (_e: unknown, ev: { stage: string; email?: string; message?: string; profiles?: Array<{ id: string; browser: string; name: string; hasGoogleAuth: boolean }> }) => {
-      if (ev.stage === 'no-auth' && Array.isArray(ev.profiles)) {
-        setSignInProfiles(ev.profiles)
-      }
-    }
-    // @ts-ignore
-    window.electron?.googleSignIn?.onEvent(onEv)
-    return () => {
-      // @ts-ignore
-      window.electron?.ipcRenderer?.removeListener('google-signin-event', onEv)
-    }
   }, [])
 
   // Don't show again on startup state
@@ -166,12 +151,12 @@ export function ZenGuideModal({
     setIsSyncingAll(true)
     setSyncStatus('Detecting and syncing session cookies across all browser profiles…')
     try {
-      // @ts-ignore
-      const result = await window.electron?.googleSignIn?.syncSessions?.()
+      if (!window.electron?.sessions) throw new Error('Session import is unavailable.')
+      const result = await window.electron.sessions.syncAll()
       if (result?.success) {
-        setSyncStatus(`✓ Successfully imported ${result.count ?? result.importedCount ?? 'all active'} sessions!`)
+        setSyncStatus(`✓ Successfully imported ${result.count ?? 'all active'} sessions!`)
       } else {
-        setSyncStatus('Checked browser profiles. Sessions are active or can be imported per profile below.')
+        setSyncStatus(result?.message || 'Checked browser profiles. Sessions are active or can be imported per profile below.')
       }
     } catch {
       setSyncStatus('Cookie sync completed.')
@@ -184,8 +169,8 @@ export function ZenGuideModal({
     setSyncingProfileId(profileId)
     setSyncStatus(`Importing session cookies from "${profileName}"…`)
     try {
-      // @ts-ignore
-      const res = await window.electron?.googleSignIn?.syncProfile(profileId)
+      if (!window.electron?.sessions) throw new Error('Session import is unavailable.')
+      const res = await window.electron.sessions.syncProfile(profileId)
       if (res && res.success) {
         try { localStorage.setItem('nexus.has_synced_sessions', 'true') } catch {}
         setSyncStatus(`✓ Synced ${res.count ?? 0} session cookies from "${profileName}".`)

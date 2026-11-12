@@ -50,6 +50,7 @@ const electronAPI = {
       ipcRenderer.removeAllListeners(channel)
     }
   },
+  // Google sign-in opens in system browser; cookies are imported into Electron after detection.
   googleSignIn: {
     start: (): Promise<unknown> => ipcRenderer.invoke('google_signin_start'),
     pickProfile: (profileId: string): Promise<unknown> =>
@@ -73,13 +74,8 @@ const electronAPI = {
     importJson: (json: string): Promise<unknown> =>
       ipcRenderer.invoke('cookies_import_json', json),
     getProfiles: (): Promise<unknown> => ipcRenderer.invoke('sessions_get_profiles'),
-    pickProfile: (profileId: string): Promise<unknown> =>
-      ipcRenderer.invoke('google_signin_pick_profile', profileId),
-    startGoogleSignIn: (): Promise<unknown> => ipcRenderer.invoke('google_signin_start'),
-    cancelGoogleSignIn: (): void => ipcRenderer.send('google_signin_cancel'),
-    onEvent: (listener: (event: IpcRendererEvent, ev: unknown) => void): void => {
-      ipcRenderer.on('google-signin-event', listener)
-    }
+    clearSession: (providerKey: string, providerUrl?: string): Promise<unknown> =>
+      ipcRenderer.invoke('provider_clear_session', providerKey, providerUrl)
   },
   platform: process.platform,
   zoom: {
@@ -92,7 +88,7 @@ const electronAPI = {
     close: (): void => ipcRenderer.send('window_close'),
     isMaximized: (): Promise<boolean> => ipcRenderer.invoke('window_is_maximized'),
     onMaximizedChange: (callback: (isMaximized: boolean) => void): (() => void) => {
-      const handler = (_event: IpcRendererEvent, isMaximized: boolean) => {
+      const handler = (_event: IpcRendererEvent, isMaximized: boolean): void => {
         callback(Boolean(isMaximized))
       }
       ipcRenderer.on('window_maximized_changed', handler)
@@ -143,8 +139,8 @@ const electronAPI = {
     copyPath: (fullPath: string): void => {
       ipcRenderer.send('downloads_copy_path', fullPath)
     },
-    onCompleted: (callback: (info: any) => void): (() => void) => {
-      const handler = (_event: IpcRendererEvent, info: any): void => callback(info)
+    onCompleted: (callback: (info: unknown) => void): (() => void) => {
+      const handler = (_event: IpcRendererEvent, info: unknown): void => callback(info as any)
       ipcRenderer.on('download_completed', handler)
       return (): void => {
         ipcRenderer.removeListener('download_completed', handler)

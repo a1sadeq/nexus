@@ -186,35 +186,62 @@ export function countModelUsage(tabs: Tab[], history: HistoryItem[]): Record<str
   return counts
 }
 
-export function serializeState(tabs: Tab[], activeId: string | null, mruTabIds?: string[]): string {
-  return JSON.stringify({ tabs, activeId, mruTabIds })
+export function serializeState(
+  tabs: Tab[],
+  activeId: string | null,
+  mruTabIds?: string[],
+  residentTabIds?: string[],
+  discardedTabIds?: string[]
+): string {
+  return JSON.stringify({ tabs, activeId, mruTabIds, residentTabIds, discardedTabIds })
 }
 
 export function deserializeState(
   raw: string | null
-): { tabs: Tab[]; activeId: string | null; mruTabIds?: string[] } | null {
+): {
+  tabs: Tab[]
+  activeId: string | null
+  mruTabIds?: string[]
+  residentTabIds?: string[]
+  discardedTabIds?: string[]
+} | null {
   if (!raw) return null
   try {
     const parsed = JSON.parse(raw)
     const rawList = Array.isArray(parsed) ? parsed : parsed?.tabs
     if (!Array.isArray(rawList)) return null
+    const allTabIds = new Set<string>()
     const tabs: Tab[] = rawList.filter(
       (t: unknown): t is Tab =>
         t != null &&
         typeof t === 'object' &&
         typeof (t as Tab).id === 'string' &&
         typeof (t as Tab).url === 'string' &&
-        typeof (t as Tab).model === 'string'
+        typeof (t as Tab).model === 'string' &&
+        (allTabIds.add((t as Tab).id), true)
     )
     if (tabs.length === 0) return null
     const activeId =
-      typeof parsed?.activeId === 'string' && tabs.some((t) => t.id === parsed.activeId)
+      typeof parsed?.activeId === 'string' && allTabIds.has(parsed.activeId)
         ? parsed.activeId
         : tabs[0].id
-    const mruTabIds = Array.isArray(parsed?.mruTabIds)
-      ? (parsed.mruTabIds as unknown[]).filter((id): id is string => typeof id === 'string' && tabs.some((t) => t.id === id))
-      : undefined
-    return { tabs, activeId, mruTabIds }
+    const sanitize = (arr: unknown[]): string[] =>
+      Array.isArray(arr)
+        ? (arr as unknown[]).filter((id): id is string => typeof id === 'string' && allTabIds.has(id))
+        : []
+    // Deduplicate while preserving order
+    const dedup = (ids: string[]): string[] => {
+      const seen = new Set<string>()
+      const out: string[] = []
+      for (const id of ids) {
+        if (!seen.has(id)) { seen.add(id); out.push(id) }
+      }
+      return out
+    }
+    const mruTabIds = dedup(sanitize(parsed?.mruTabIds))
+    const residentTabIds = dedup(sanitize(parsed?.residentTabIds))
+    const discardedTabIds = dedup(sanitize(parsed?.discardedTabIds))
+    return { tabs, activeId, mruTabIds, residentTabIds, discardedTabIds }
   } catch {
     return null
   }
@@ -472,16 +499,41 @@ export function sanitizeHistory(
 }
 
 /**
+ * Orders discarded tabs so that newest-first preserved order is respected.
+ * IDs in discardedTabIds appear first (in that order); any unknown IDs fall
+ * after in stable existing-tab order. Closed/unknown IDs are pruned.
+ */
+export function orderDiscardedTabs(tabs: Tab[], discardedTabIds: string[]): Tab[] {
+  if (!discardedTabIds || discardedTabIds.length === 0) {
+    return tabs.filter((t) => !tabs.some((other) => other.id === t.id && false)) // unreachable but type-safe
+  }
+  const tabMap = new Map<string, Tab>()
+  for (const t of tabs) tabMap.set(t.id, t)
+  const ranked: Tab[] = []
+  const seen = new Set<string>()
+  for (const id of discardedTabIds) {
+    const t = tabMap.get(id)
+    if (t && !seen.has(id)) { ranked.push(t); seen.add(id) }
+  }
+  // Unknown/closed IDs after ranked ones, in original tab order
+  for (const t of tabs) {
+    if (!seen.has(t.id) && !ranked.includes(t)) ranked.push(t)
+  }
+  return ranked
+}
+
+/**
  * Produces the exact ordered sequence of tabs visually displayed in the vertical tabs list.
  * 1. Active group (pinned first, then unpinned)
- * 2. Discarded/sleeping group (pinned first, then unpinned)
+ * 2. Discarded/sleeping group (newest-first according to discardedTabIds, then unknown)
  */
 export function getOrderedVisualTabs(
   tabs: Tab[],
   activeId: string | null | undefined,
   pinnedIds: string[] = [],
   tabStatuses: Record<string, string> = {},
-  residentTabIds?: string[]
+  residentTabIds?: string[],
+  discardedTabIds?: string[]
 ): Tab[] {
   const activeList: Tab[] = []
   const discardedList: Tab[] = []
@@ -507,7 +559,12 @@ export function getOrderedVisualTabs(
     return [...pinned, ...unpinned]
   }
 
-  return [...sortGroup(activeList), ...sortGroup(discardedList)]
+  // Apply newest-first discarded ordering when available
+  const sortedDiscarded = discardedTabIds && discardedTabIds.length > 0
+    ? orderDiscardedTabs(discardedList, discardedTabIds)
+    : sortGroup(discardedList)
+
+  return [...sortGroup(activeList), ...sortedDiscarded]
 }
 
 /**

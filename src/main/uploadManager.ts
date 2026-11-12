@@ -10,6 +10,7 @@ import type {
   PartitionResult,
   ChunkFileItem
 } from '../shared/folderUpload'
+import { annotateFileVariants } from '../shared/fileVariants'
 
 const SUGGESTED_REMOVAL_FILENAMES = new Set([
   'package-lock.json',
@@ -239,6 +240,9 @@ export function scanFolder(folderPath: string): FolderScanResult {
   }
 
   crawl(folderPath)
+
+  // Annotate likely duplicate variants so the UI can surface them to the user.
+  annotateFileVariants(files as any[])
 
   return {
     folderPath,

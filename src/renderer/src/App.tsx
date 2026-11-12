@@ -41,7 +41,6 @@ import HistoryOverlay from './components/HistoryOverlay'
 import TabOverviewOverlay from './components/TabOverviewOverlay'
 import NewTabOverlay from './components/NewTabOverlay'
 import { ExportOverlay } from './components/ExportOverlay'
-import { DownloadNotificationToast } from './components/DownloadNotificationToast'
 
 import SettingsOverlay from './components/SettingsOverlay'
 import { loadThemeState, saveThemeState, applyTheme, findTheme } from './lib/themes'
@@ -139,6 +138,9 @@ function App() {
   const [residentTabIds, setResidentTabIds] = useState<string[]>(() =>
     getRecentActiveTabIds(initialTabs.tabs, initialTabs.activeId, initialTabs.mruTabIds, 7)
   )
+  const [discardedTabIds, setDiscardedTabIds] = useState<string[]>(() => [])
+  const discardedTabIdsRef = useRef<string[]>([])
+  useEffect(() => { discardedTabIdsRef.current = discardedTabIds }, [discardedTabIds])
 
   // Listen for real-time tab discard status from main process
   useEffect(() => {
@@ -153,6 +155,7 @@ function App() {
           const preserved = prev.filter((id) => !discardedSet.has(id))
           return Array.from(new Set([...residentFromMain, ...preserved]))
         })
+        setDiscardedTabIds(discardedFromMain)
       }
     )
     // Initial fetch of discard status
@@ -166,6 +169,7 @@ function App() {
           const preserved = prev.filter((id) => !discardedSet.has(id))
           return Array.from(new Set([...residentFromMain, ...preserved]))
         })
+        setDiscardedTabIds(discardedFromMain)
       }
     }).catch(() => {})
 
@@ -199,11 +203,18 @@ function App() {
         hydrated = true
         const loadedTabs = (diskState as any).tabs as Tab[]
         const loadedActiveId = (diskState as any).activeId || loadedTabs[0]?.id || null
+        const loadedResidentTabIds = Array.isArray((diskState as any)?.residentTabIds) ? ((diskState as any).residentTabIds as string[]) : undefined
+        const loadedDiscardedTabIds = Array.isArray((diskState as any)?.discardedTabIds) ? ((diskState as any).discardedTabIds as string[]) : undefined
         setTabs(loadedTabs)
         setActiveId(loadedActiveId)
         setMruTabIds(loadedTabs.map((t) => t.id))
+        setResidentTabIds((prev) => {
+          const preserved = prev.filter((id) => !loadedDiscardedTabIds?.includes(id))
+          return Array.from(new Set([...(loadedResidentTabIds || []), ...preserved]))
+        })
+        setDiscardedTabIds(loadedDiscardedTabIds || [])
         try {
-          localStorage.setItem(TABS_STORAGE_KEY, serializeState(loadedTabs, loadedActiveId))
+          localStorage.setItem(TABS_STORAGE_KEY, serializeState(loadedTabs, loadedActiveId, loadedTabs.map((t) => t.id), (loadedResidentTabIds || []), (loadedDiscardedTabIds || [])))
         } catch {}
         setTabsHydrated(true)
         const activeTabToActivate = loadedTabs.find((t) => t.id === loadedActiveId) || loadedTabs[0]
@@ -217,6 +228,8 @@ function App() {
         if (restored && restored.tabs.length > 0) {
           setTabs(restored.tabs)
           setActiveId(restored.activeId)
+          setResidentTabIds(restored.residentTabIds || [])
+          setDiscardedTabIds(restored.discardedTabIds || [])
         } else {
           const initial = createTab('gemini', 'New Chat', 'https://gemini.google.com')
           setTabs([initial])
@@ -245,6 +258,8 @@ function App() {
       if (restored && restored.tabs.length > 0) {
         setTabs(restored.tabs)
         setActiveId(restored.activeId)
+        setResidentTabIds(restored.residentTabIds || [])
+        setDiscardedTabIds(restored.discardedTabIds || [])
       }
     }, 1500)
 
@@ -1092,8 +1107,18 @@ Acknowledge these skills with a concise confirmation in this exact format:
 
   const switchToTab = useCallback(
     (id: string, url: string) => {
+      // Keyboard events can arrive before React commits. Keep the navigation
+      // source of truth synchronous so repeated Ctrl+Tab cannot reuse stale state.
+      activeIdRef.current = id
       setActiveId(id)
-      setResidentTabIds((prev) => (prev.includes(id) ? prev : [...prev, id]))
+      const nextResident = residentTabIdsRef.current.includes(id)
+        ? residentTabIdsRef.current
+        : [...residentTabIdsRef.current, id]
+      residentTabIdsRef.current = nextResident
+      setResidentTabIds(nextResident)
+      const nextDiscarded = discardedTabIdsRef.current.filter((tabId) => tabId !== id)
+      discardedTabIdsRef.current = nextDiscarded
+      setDiscardedTabIds(nextDiscarded)
       // Dismiss in-app toast for this tab
       // @ts-ignore
       window.electron?.ipcRenderer?.send('dismiss_in_app_toast')
@@ -1138,7 +1163,8 @@ Acknowledge these skills with a concise confirmation in this exact format:
         activeIdRef.current,
         pinnedIdsRef.current,
         tabStatusesRef.current,
-        residentTabIdsRef.current
+        residentTabIdsRef.current,
+        discardedTabIdsRef.current
       )
       if (visualTabs.length <= 1) return
 
@@ -1722,14 +1748,14 @@ Acknowledge these skills with a concise confirmation in this exact format:
   useEffect(() => {
     if (!tabsHydrated || tabs.length === 0) return
     try {
-      localStorage.setItem(TABS_STORAGE_KEY, serializeState(tabs, activeId, mruTabIds))
+      localStorage.setItem(TABS_STORAGE_KEY, serializeState(tabs, activeId, mruTabIds, residentTabIds, discardedTabIds))
     } catch (e) {
       console.error('Failed to persist tabs:', e)
     }
-    window.nexusState?.save('tabs', { tabs, activeId, mruTabIds }).catch((err: Error) => {
+    window.nexusState?.save('tabs', { tabs, activeId, mruTabIds, residentTabIds, discardedTabIds }).catch((err: Error) => {
       console.error('Failed to save tabs to disk:', err)
     })
-  }, [tabs, activeId, mruTabIds, tabsHydrated])
+  }, [tabs, activeId, mruTabIds, residentTabIds, discardedTabIds, tabsHydrated])
 
   useEffect(() => {
     const el = containerRef.current
@@ -1842,6 +1868,7 @@ Acknowledge these skills with a concise confirmation in this exact format:
               pinnedIds={pinnedIds}
               tabStatuses={tabStatuses}
               residentTabIds={residentTabIds}
+              discardedTabIds={discardedTabIds}
               sidebarCollapsed={sidebarCollapsed}
               onSelect={(id: string) => {
                 const t = tabs.find((x) => x.id === id)
@@ -2708,7 +2735,6 @@ Acknowledge these skills with a concise confirmation in this exact format:
       )}
 
       {/* Downloads native toast notification */}
-      <DownloadNotificationToast />
     </div>
   )
 }

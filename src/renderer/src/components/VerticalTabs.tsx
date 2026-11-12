@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useMemo } from 'react'
 import type { Tab } from '../lib/tabs'
 import { BRAND_IDS, DOT_COLOR, getEffectiveProviderColor, getProviderGradient } from '../lib/modelVisuals'
+import { orderDiscardedTabs } from '../lib/tabs'
 import { BrandIcon, IconX, IconPin } from './BrandIcons'
 import { AiStatusBadge } from './AiStatusBadge'
 import { formatCollapsedTitle, type TabAiStatus } from '../lib/tabStatus'
@@ -12,6 +13,7 @@ interface Props {
   pinnedIds?: string[]
   tabStatuses?: Record<string, TabAiStatus>
   residentTabIds?: string[]
+  discardedTabIds?: string[]
   sidebarCollapsed: boolean
   onSelect: (id: string) => void
   onClose: (id: string) => void
@@ -26,6 +28,7 @@ export default function VerticalTabs({
   pinnedIds = [],
   tabStatuses = {},
   residentTabIds,
+  discardedTabIds,
   sidebarCollapsed,
   onSelect,
   onClose,
@@ -71,9 +74,11 @@ export default function VerticalTabs({
 
     return {
       activeTabs: sortGroup(activeList),
-      discardedTabs: sortGroup(discardedList)
+      discardedTabs: discardedTabIds && discardedTabIds.length > 0
+        ? orderDiscardedTabs(discardedList, discardedTabIds)
+        : sortGroup(discardedList)
     }
-  }, [tabs, activeId, pinnedIds, tabStatuses, residentTabIds])
+  }, [tabs, activeId, pinnedIds, tabStatuses, residentTabIds, discardedTabIds])
 
   const orderedTabs = useMemo(() => [...activeTabs, ...discardedTabs], [activeTabs, discardedTabs])
 
