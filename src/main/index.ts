@@ -43,7 +43,7 @@ import { buildProviderMotionScript } from './providerMotion'
 import { ActiveTitleSync, buildActiveTitleReadScript } from './activeTitleSync'
 import { getCustomThemeEntry, saveCustomThemeEntry, removeCustomThemeEntry } from './customThemesStore'
 import { PROVIDER_THEMES, mergeOverrides, getStructuralVars } from './providerThemes'
-import { type ProviderOverrides, getMergedProviderFeatures, DEFAULT_BUILTIN_PROVIDER_CONFIG } from '../shared/providerConfig'
+import { type ProviderOverrides, getMergedProviderFeatures, DEFAULT_BUILTIN_PROVIDER_CONFIG, migrateLegacyArenaFeatures } from '../shared/providerConfig'
 import { splitSelectorList } from '../shared/selectorUtils'
 import { cleanConversationTitle, isDefaultConversationTitle } from '../shared/titleUtils'
 import { consolidateLegacyConfigDir } from './migrations/consolidateLegacyConfigDir'
@@ -51,7 +51,7 @@ import { registerStateIpc, trustWindow } from './stateIpc'
 import { atomicWriteJson } from './atomicWrite'
 import { scheduleStartupAndExitPruning, getCacheStats, pruneAppCaches } from './cachePruningManager'
 import { captureDiagnosticReport, saveDiagnosticsToFile, type ViewContextInfo } from './diagnosticsManager'
-import { injectAiStatusObserver, attachAiStatusListener } from './aiStatusObserver'
+import { injectAiStatusObserver, attachAiStatusListener, isSnippetAwaitingInput } from './aiStatusObserver'
 
 // Page-side helpers embedded into every injected script. Built from the tested
 // shared source via toString() — self-contained, no closures.
@@ -2956,7 +2956,7 @@ function ensureAiView(tabId: string): Electron.WebContentsView {
     injectVirtualizationCss(view, modelKey)
     applyProviderMotionMode(view, modelKey)
     executeCustomInitScript(view, modelKey)
-    injectAiStatusObserver(view, modelKey)
+    injectAiStatusObserver(view, modelKey, providerConfig)
   })
 
   view.webContents.on('did-finish-load', () => {
@@ -2968,7 +2968,7 @@ function ensureAiView(tabId: string): Electron.WebContentsView {
 
     const script = buildWebviewRuntimeJs(modelKey)
     view.webContents.executeJavaScript(script).catch((err) => console.error(err))
-    injectAiStatusObserver(view, modelKey)
+    injectAiStatusObserver(view, modelKey, providerConfig)
   })
 
   view.webContents.on('did-navigate', (_event, url) => {
@@ -2980,7 +2980,7 @@ function ensureAiView(tabId: string): Electron.WebContentsView {
   view.webContents.on('did-navigate-in-page', (_event, url) => {
     sendToMainWindow('ai-url-updated', tabId, url)
     const modelKey = viewModelKeys.get(tabId) || resolveModelKey(tabId, url) || ''
-    injectAiStatusObserver(view, modelKey)
+    injectAiStatusObserver(view, modelKey, providerConfig)
   })
   view.webContents.on('did-start-loading', () => {
     sendToMainWindow('ai-loading', tabId, true)
@@ -3008,7 +3008,12 @@ function ensureAiView(tabId: string): Electron.WebContentsView {
   tabDiscardManager.registerView(tabId, view as unknown as DiscardableView)
 
   attachAiStatusListener(view.webContents, tabId, (id, isGenerating, lastSnippet) => {
-    activeAiStatuses.set(id, isGenerating ? 'working' : 'done')
+    const nextStatus = isGenerating
+      ? 'working'
+      : id !== activeViewId && isSnippetAwaitingInput(lastSnippet)
+        ? 'waiting-input'
+        : 'done'
+    activeAiStatuses.set(id, nextStatus)
     sendToMainWindow('ai-live-status', id, isGenerating, lastSnippet)
   })
 
@@ -3223,7 +3228,20 @@ function loadProviderConfigFromDisk() {
           merged[k] = v as any
         }
       }
+      let migratedArena = false
+      for (const arenaKey of ['arena-ai', 'arena'] as const) {
+        if (merged[arenaKey]) {
+          const res = migrateLegacyArenaFeatures(merged[arenaKey].features)
+          if (res.migrated) {
+            merged[arenaKey] = { ...merged[arenaKey], features: res.features }
+            migratedArena = true
+          }
+        }
+      }
       providerConfig = merged
+      if (migratedArena) {
+        persistProviderConfig()
+      }
     } else {
       providerConfig = JSON.parse(JSON.stringify(DEFAULT_BUILTIN_PROVIDER_CONFIG))
       persistProviderConfig()
@@ -4266,6 +4284,7 @@ ipcMain.on('set_provider_config', (_event, map) => {
     updateWebviewTitlePoller(view, modelKey)
     injectVirtualizationCss(view, modelKey)
     applyProviderMotionMode(view, modelKey)
+    injectAiStatusObserver(view, modelKey, providerConfig)
   }
   if (previewViewId) capturePreviewFrame()
   restartActiveArenaTitleSync()
@@ -4384,6 +4403,9 @@ ipcMain.on('activate_tab', async (_event, tabId, url, bounds, modelKey) => {
   }
 
   activeViewId = tabId
+  if (activeAiStatuses.get(tabId) === 'waiting-input' || activeAiStatuses.get(tabId) === 'done') {
+    activeAiStatuses.set(tabId, 'idle')
+  }
   if (currentNotificationData?.tabId === tabId) {
     dismissInAppToast()
   }

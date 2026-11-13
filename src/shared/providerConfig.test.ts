@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest'
-import { getProviderDefaultFeatures, getMergedProviderFeatures, DEFAULT_PROVIDER_FEATURES } from './providerConfig'
+import {
+  getProviderDefaultFeatures,
+  getMergedProviderFeatures,
+  DEFAULT_PROVIDER_FEATURES,
+  migrateLegacyArenaFeatures
+} from './providerConfig'
 
 describe('z.ai provider resolution', () => {
   it('resolves z.ai spellings to the ZAI entry, not generic', () => {
@@ -11,7 +16,7 @@ describe('z.ai provider resolution', () => {
 })
 
 describe('arena provider resolution', () => {
-  it('resolves arena spellings to the arena entry with verified promptNavSelector', () => {
+  it('resolves arena spellings to the arena entry with verified promptNavSelector and Status Beacon hooks', () => {
     for (const key of ['arena', 'arena-ai', 'chatbot-arena', 'ARENA']) {
       const feats = getProviderDefaultFeatures(key)
       expect(feats).toBe(DEFAULT_PROVIDER_FEATURES.arena)
@@ -19,7 +24,32 @@ describe('arena provider resolution', () => {
         '[data-agent-transcript-message="true"][data-chat-message-id]:has(> [data-user-message-layout="true"])'
       )
       expect(feats.chatTitleSelector).toBe('button[aria-haspopup="menu"] > span[dir="auto"].truncate')
+      expect(feats.sendButtonSelector).toBe('button[data-perf-target="send"][aria-label="Send message"]')
+      expect(feats.stopGenerationSelector).toBe('button[data-perf-target="send"][aria-label="Stop generating"]')
+      expect(feats.assistantMessageSelector).toContain('[data-agent-transcript-message="true"]')
+      expect(feats.streamingSelector).toContain('[data-perf-target="transcript"] .animate-spin')
+      expect(feats.completionActionSelector).toBe(
+        '[data-agent-transcript-message="true"]:last-child > div > div > div.mt-3 button[aria-label="Copy"]'
+      )
+      expect(feats.statusWatchdogTimeoutMs).toBe(15000)
     }
+  })
+
+  it('migrates auto-seeded v1.0.7 generic Arena selectors without overwriting custom user selectors', () => {
+    const legacy = {
+      chatTitleSelector: 'button[aria-haspopup="menu"] > span[dir="auto"].truncate',
+      stopGenerationSelector:
+        'button[aria-label*="stop" i], button[data-testid*="stop" i], button[aria-label*="interrupt" i], button[data-testid*="interrupt" i], button:has(svg.lucide-square), button[class*="stop" i]',
+      sendButtonSelector: '#user-intentional-custom-send'
+    }
+    const { features, migrated } = migrateLegacyArenaFeatures(legacy)
+    expect(migrated).toBe(true)
+    expect(features.stopGenerationSelector).toBe(
+      'button[data-perf-target="send"][aria-label="Stop generating"]'
+    )
+    expect(features.sendButtonSelector).toBe('#user-intentional-custom-send')
+    expect(features.streamingSelector).toBe(DEFAULT_PROVIDER_FEATURES.arena.streamingSelector)
+    expect(features.statusWatchdogTimeoutMs).toBe(15000)
   })
 })
 

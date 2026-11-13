@@ -144,18 +144,88 @@ const ARENA_FEATURES: ProviderFeatureConfig = {
   chatTitlePollingIntervalMs: 1500,
   defaultChatTitles: ['Chatbot Arena', 'Arena', 'Direct Chat', 'Side-by-Side', 'New Chat', 'Untitled'],
   composerSelector:
-    'textarea:not([disabled]):not([readonly]), [contenteditable="true"][role="textbox"], div[contenteditable="true"], #prompt-textarea, .ProseMirror, [data-testid*="prompt-input" i], [data-testid*="chat-input" i], [data-perf-target="composer"]',
-  sendButtonSelector:
-    'button[data-testid*="send" i], button[aria-label*="send" i], button[type="submit"]:not([disabled]), button:has(svg.lucide-send), button:has(svg.lucide-arrow-up), [role="button"][aria-label*="send" i], .send-button, [data-perf-target="composer"] button[aria-label*="send" i]',
+    '[data-perf-target="composer"] div.ProseMirror[contenteditable="true"]:not([aria-disabled="true"])',
+  sendButtonSelector: 'button[data-perf-target="send"][aria-label="Send message"]',
   autoSubmitSkillPrompt: true,
-  newChatSelector: 'a[data-sidebar="menu-button"][href="/agent"], button[aria-label*="New"], a[href*="arena"]',
-  stopGenerationSelector:
-    'button[aria-label*="stop" i], button[data-testid*="stop" i], button[aria-label*="interrupt" i], button[data-testid*="interrupt" i], button:has(svg.lucide-square), button[class*="stop" i]',
+  newChatSelector: 'a[data-sidebar="menu-button"][href="/agent"]',
+  stopGenerationSelector: 'button[data-perf-target="send"][aria-label="Stop generating"]',
+  assistantMessageSelector:
+    '[data-agent-transcript-message="true"][data-chat-message-id]:not(:has(> [data-user-message-layout="true"])), [data-perf-target="transcript"] [role="log"] > div > div.rounded-xl:not([data-agent-transcript-message])',
+  streamingSelector:
+    'button[data-perf-target="send"][aria-label="Stop generating"], [data-perf-target="transcript"] [role="log"] > div > div.rounded-xl:not([data-agent-transcript-message]), [data-perf-target="transcript"] .animate-spin, [data-perf-target="sidebar_session"] a[data-active="true"] .animate-spin',
+  completionActionSelector:
+    '[data-agent-transcript-message="true"]:last-child > div > div > div.mt-3 button[aria-label="Copy"]',
+  statusWatchdogTimeoutMs: 15000,
   virtualizationSelector: '[data-agent-transcript-message="true"][data-chat-message-id]',
   enableSlashFocus: true,
   enableFocusRetention: true,
-  attachmentSelector:
+  attachmentSelector: '[data-perf-target="composer"] input[type="file"]'
+}
+
+const LEGACY_ARENA_BUILTIN_SELECTORS: Partial<Record<keyof ProviderFeatureConfig, string[]>> = {
+  attachmentSelector: [
     'input[type="file"], button[data-testid*="attach" i], button[data-testid*="upload" i], button[aria-label*="attach" i], button[aria-label*="upload" i], button[aria-label*="file" i], button:has(svg.lucide-paperclip), [data-testid*="dropzone" i], [class*="dropzone" i]'
+  ],
+  promptNavSelector: [
+    '[data-agent-transcript-message="true"]:has(> [data-user-message-layout="true"])'
+  ],
+  composerSelector: [
+    'textarea:not([disabled]):not([readonly]), [contenteditable="true"][role="textbox"], div[contenteditable="true"], #prompt-textarea, .ProseMirror, [data-testid*="prompt-input" i], [data-testid*="chat-input" i]',
+    'textarea:not([disabled]):not([readonly]), [contenteditable="true"][role="textbox"], div[contenteditable="true"], #prompt-textarea, .ProseMirror, [data-testid*="prompt-input" i], [data-testid*="chat-input" i], [data-perf-target="composer"]'
+  ],
+  sendButtonSelector: [
+    'button[data-testid*="send" i], button[aria-label*="send" i], button[type="submit"]:not([disabled]), button:has(svg.lucide-send), button:has(svg.lucide-arrow-up), [role="button"][aria-label*="send" i], .send-button',
+    'button[data-testid*="send" i], button[aria-label*="send" i], button[type="submit"]:not([disabled]), button:has(svg.lucide-send), button:has(svg.lucide-arrow-up), [role="button"][aria-label*="send" i], .send-button, [data-perf-target="composer"] button[aria-label*="send" i]'
+  ],
+  stopGenerationSelector: [
+    'button[aria-label*="stop" i], button[data-testid*="stop" i], button[aria-label*="interrupt" i], button[data-testid*="interrupt" i], button:has(svg.lucide-square), button[class*="stop" i]'
+  ]
+}
+
+/**
+ * Upgrades auto-seeded v1.0.7 generic Arena selector strings in persisted providers.json
+ * to verified Arena Agent Mode selectors without overwriting intentional user customizations.
+ */
+export function migrateLegacyArenaFeatures(
+  features?: ProviderFeatureConfig
+): { features: ProviderFeatureConfig; migrated: boolean } {
+  const next: ProviderFeatureConfig = { ...(features || {}) }
+  let migrated = false
+
+  for (const [key, legacyValues] of Object.entries(LEGACY_ARENA_BUILTIN_SELECTORS) as Array<
+    [keyof ProviderFeatureConfig, string[]]
+  >) {
+    const current = next[key]
+    const verified = ARENA_FEATURES[key]
+    if (
+      verified !== undefined &&
+      (current === undefined ||
+        current === '' ||
+        (typeof current === 'string' && legacyValues.includes(current.trim())))
+    ) {
+      if (current !== verified) {
+        ;(next as Record<string, unknown>)[key] = verified
+        migrated = true
+      }
+    }
+  }
+
+  const newStatusKeys: Array<keyof ProviderFeatureConfig> = [
+    'assistantMessageSelector',
+    'streamingSelector',
+    'completionActionSelector',
+    'statusWatchdogTimeoutMs'
+  ]
+  for (const key of newStatusKeys) {
+    const current = next[key]
+    const verified = ARENA_FEATURES[key]
+    if (verified !== undefined && (current === undefined || current === '')) {
+      ;(next as Record<string, unknown>)[key] = verified
+      migrated = true
+    }
+  }
+
+  return { features: next, migrated }
 }
 
 export const DEFAULT_PROVIDER_FEATURES: Record<string, ProviderFeatureConfig> = {
@@ -327,4 +397,3 @@ export function getMergedProviderFeatures(
           : defaults.defaultChatTitles
   }
 }
-
