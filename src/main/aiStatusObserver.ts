@@ -1,4 +1,5 @@
 import { WebContentsView } from 'electron'
+import type { AiObserverReport } from '../shared/aiLifecycle'
 import {
   DEFAULT_PROVIDER_FEATURES,
   getMergedProviderFeatures,
@@ -47,7 +48,8 @@ function resolveMergedObserverFeatures(
  */
 export function getAiStatusObserverScript(
   modelKey: string,
-  providerConfigMap?: Record<string, ProviderOverrides>
+  providerConfigMap?: Record<string, ProviderOverrides>,
+  viewGeneration?: number
 ): string {
   const feats = resolveMergedObserverFeatures(modelKey, providerConfigMap)
 
@@ -80,7 +82,8 @@ export function getAiStatusObserverScript(
         streamingSelector: ${JSON.stringify(streamingSelector)},
         errorSelector: ${JSON.stringify(errorSelector)},
         completionSelector: ${JSON.stringify(completionSelector)},
-        watchdogTimeout: ${JSON.stringify(watchdogTimeoutMs)}
+        watchdogTimeout: ${JSON.stringify(watchdogTimeoutMs)},
+        viewGeneration: ${JSON.stringify(viewGeneration ?? 1)}
       };
 
       if (window.__nexusArenaBeaconTimer) {
@@ -103,10 +106,45 @@ export function getAiStatusObserverScript(
       let lastTextGrowthTime = 0;
       let lastTokenTime = 0; // Compatibility alias
       let doneDebounceTimer = null;
+      let heartbeatTimer = null;
       let evaluateScheduled = false;
+      let initialEmitted = false;
+      let lastReportedStatus = null;
 
       function getCfg() {
         return window.__nexusAiStatusConfig || {};
+      }
+
+      function emitStatus(payload) {
+        if (payload) {
+          payload.viewGeneration = getCfg().viewGeneration;
+          console.log('__NEXUS_AI_STATUS__:' + JSON.stringify(payload));
+        }
+      }
+
+      function hasReliableLiveEvidence() {
+        if (isSendButtonVisible() || hasActiveStopButton()) return true;
+        const assistantEl = getAssistantElement();
+        if (assistantEl && isElementLaidOut(assistantEl)) return true;
+        return false;
+      }
+
+      function hasReliableDetectionHooks() {
+        return hasReliableLiveEvidence();
+      }
+
+      function getErrorSnippet() {
+        const customErrorSelector = getCfg().errorSelector;
+        if (!customErrorSelector) return '';
+        try {
+          const nodes = document.querySelectorAll(customErrorSelector);
+          for (let i = 0; i < nodes.length; i++) {
+            if (isElementVisible(nodes[i])) {
+              return (nodes[i].innerText || nodes[i].textContent || '').trim().slice(0, 300);
+            }
+          }
+        } catch (e) {}
+        return '';
       }
 
       function getAssistantElement() {
@@ -146,18 +184,16 @@ export function getAiStatusObserverScript(
 
       function getAssistantSnippet() {
         try {
+          const hasInteractiveChoice = Boolean(
+            document.querySelector('[role="radiogroup"] [role="radio"]:not([disabled])')
+          );
           const el = getAssistantElement();
-          if (el) {
-            const hasInteractiveChoice = Boolean(
-              el.querySelector('[role="radiogroup"] [role="radio"]:not([disabled])')
-            );
-            const text = (el.innerText || el.textContent || '').trim();
-            if (hasInteractiveChoice) {
-              const base = text ? text.slice(-260) : 'Waiting for your input';
-              return /[?？؟]\\s*$/.test(base) ? base : base + ' — Please choose an option?';
-            }
-            if (text) return text.slice(-300);
+          const text = el ? (el.innerText || el.textContent || '').trim() : '';
+          if (hasInteractiveChoice) {
+            const base = text ? text.slice(-260) : 'Waiting for your input';
+            return /[?？؟]\\s*$/.test(base) ? base : base + ' — Please choose an option?';
           }
+          if (text) return text.slice(-300);
         } catch {}
         return '';
       }
@@ -375,7 +411,7 @@ export function getAiStatusObserverScript(
           if (assistantEl !== lastAssistantEl) {
             lastAssistantEl = assistantEl;
             lastTextLength = currentLength;
-            if (currentLength > 0) {
+            if (currentLength > 0 && hasActiveStopButton()) {
               lastTextGrowthTime = now;
             }
           } else if (currentLength > lastTextLength) {
@@ -384,6 +420,46 @@ export function getAiStatusObserverScript(
           }
 
           const active = checkGenerationActive();
+
+          if (!initialEmitted) {
+            let initialStatus = 'unknown';
+            let initialSnippet = '';
+            let initialError = undefined;
+
+            if (isErrorVisible()) {
+              initialStatus = 'error';
+              initialError = getErrorSnippet();
+              initialSnippet = initialError;
+            } else if (active) {
+              initialStatus = 'working';
+              isGenerating = true;
+            } else {
+              const hasInteractiveChoice = Boolean(
+                document.querySelector('[role="radiogroup"] [role="radio"]:not([disabled])')
+              );
+              const snippet = getAssistantSnippet();
+              const isAwaiting = hasInteractiveChoice || (Boolean(snippet) && /[?？؟]\s*$/.test(snippet));
+              if (isAwaiting) {
+                initialStatus = 'waiting-input';
+                initialSnippet = snippet;
+              } else if (hasReliableLiveEvidence()) {
+                initialStatus = 'idle';
+              } else {
+                initialStatus = 'unknown';
+              }
+            }
+
+            initialEmitted = true;
+            lastReportedStatus = initialStatus;
+            emitStatus({
+              isGenerating: initialStatus === 'working',
+              lastSnippet: initialSnippet,
+              status: initialStatus,
+              error: initialError,
+              initial: true,
+              hasReliableHooks: initialStatus !== 'unknown'
+            });
+          }
 
           if (active) {
             // Cancel pending completion debounce
@@ -395,8 +471,14 @@ export function getAiStatusObserverScript(
               isGenerating = true;
               lastTextGrowthTime = now;
               lastTextLength = currentLength;
-              console.log('__NEXUS_AI_STATUS__:' + JSON.stringify({ isGenerating: true, lastSnippet: '' }));
+              lastReportedStatus = 'working';
+              emitStatus({ isGenerating: true, lastSnippet: '', status: 'working' });
             } else {
+              if (!hasActiveStopButton()) {
+                if (heartbeatTimer) clearTimeout(heartbeatTimer);
+                const timeRemaining = Math.max(100, 1550 - (now - lastTextGrowthTime));
+                heartbeatTimer = setTimeout(scheduleEvaluate, timeRemaining);
+              }
               // Fail-safe watchdog: only recover if no active composer Stop button remains,
               // text growth stalled > watchdogTimeout, and Send or Completion is back.
               const watchdogLimit = getCfg().watchdogTimeout || 5000;
@@ -407,12 +489,22 @@ export function getAiStatusObserverScript(
                 if (hasSend || hasCompletion || !assistantEl) {
                   isGenerating = false;
                   const lastSnippet = getAssistantSnippet();
-                  console.log('__NEXUS_AI_STATUS__:' + JSON.stringify({ isGenerating: false, lastSnippet }));
+                  const hasInteractiveChoice = Boolean(
+                    document.querySelector('[role="radiogroup"] [role="radio"]:not([disabled])')
+                  );
+                  const isAwaiting = hasInteractiveChoice || /[?？؟]\s*$/.test(lastSnippet);
+                  const status = isAwaiting ? 'waiting-input' : 'done';
+                  lastReportedStatus = status;
+                  emitStatus({ isGenerating: false, lastSnippet, status });
                   return;
                 }
               }
             }
           } else {
+            if (heartbeatTimer) {
+              clearTimeout(heartbeatTimer);
+              heartbeatTimer = null;
+            }
             // Fast-track 250ms debounce when explicit completion action bar is mounted; 1000ms fallback otherwise
             if (isGenerating && !doneDebounceTimer) {
               const debounceMs = isCompletionActionVisible() ? 250 : 1000;
@@ -423,9 +515,69 @@ export function getAiStatusObserverScript(
                   lastTextLength = 0;
                   lastTextGrowthTime = 0;
                   const lastSnippet = getAssistantSnippet();
-                  console.log('__NEXUS_AI_STATUS__:' + JSON.stringify({ isGenerating: false, lastSnippet }));
+                  if (isErrorVisible()) {
+                    const err = getErrorSnippet();
+                    lastReportedStatus = 'error';
+                    emitStatus({ isGenerating: false, lastSnippet: err, status: 'error', error: err });
+                  } else {
+                    const hasInteractiveChoice = Boolean(
+                      document.querySelector('[role="radiogroup"] [role="radio"]:not([disabled])')
+                    );
+                    const isAwaiting = hasInteractiveChoice || /[?？؟]\s*$/.test(lastSnippet);
+                    const status = isAwaiting ? 'waiting-input' : 'done';
+                    lastReportedStatus = status;
+                    emitStatus({ isGenerating: false, lastSnippet, status });
+                  }
                 }
               }, debounceMs);
+            } else if (!isGenerating && !doneDebounceTimer) {
+              // Post initial-load re-evaluation of pending input, errors, and reliable hooks
+              if (isErrorVisible()) {
+                if (lastReportedStatus !== 'error') {
+                  const err = getErrorSnippet();
+                  lastReportedStatus = 'error';
+                  emitStatus({ isGenerating: false, lastSnippet: err, status: 'error', error: err });
+                }
+              } else {
+                const hasInteractiveChoice = Boolean(
+                  document.querySelector('[role="radiogroup"] [role="radio"]:not([disabled])')
+                );
+                const snippet = getAssistantSnippet();
+                const isAwaiting = hasInteractiveChoice || (Boolean(snippet) && /[?？؟]\s*$/.test(snippet));
+
+                if (isAwaiting) {
+                  if (lastReportedStatus !== 'waiting-input') {
+                    lastReportedStatus = 'waiting-input';
+                    emitStatus({ isGenerating: false, lastSnippet: snippet, status: 'waiting-input' });
+                  }
+                } else if (lastReportedStatus === 'waiting-input') {
+                  if (hasReliableLiveEvidence()) {
+                    lastReportedStatus = 'idle';
+                    emitStatus({ isGenerating: false, lastSnippet: snippet, status: 'idle' });
+                  } else {
+                    lastReportedStatus = 'unknown';
+                    emitStatus({ isGenerating: false, lastSnippet: '', status: 'unknown' });
+                  }
+                } else if (lastReportedStatus === 'error') {
+                  if (hasReliableLiveEvidence()) {
+                    lastReportedStatus = 'idle';
+                    emitStatus({ isGenerating: false, lastSnippet: snippet, status: 'idle' });
+                  } else {
+                    lastReportedStatus = 'unknown';
+                    emitStatus({ isGenerating: false, lastSnippet: '', status: 'unknown' });
+                  }
+                } else if (lastReportedStatus === 'unknown') {
+                  if (hasReliableLiveEvidence()) {
+                    lastReportedStatus = 'idle';
+                    emitStatus({ isGenerating: false, lastSnippet: snippet, status: 'idle', hasReliableHooks: true });
+                  }
+                } else if (lastReportedStatus === 'idle') {
+                  if (!hasReliableLiveEvidence()) {
+                    lastReportedStatus = 'unknown';
+                    emitStatus({ isGenerating: false, lastSnippet: '', status: 'unknown', hasReliableHooks: false });
+                  }
+                }
+              }
             }
           }
         } catch (e) {}
@@ -513,7 +665,13 @@ export function isSnippetAwaitingInput(text?: string | null): boolean {
 export function attachAiStatusListener(
   webContents: Electron.WebContents,
   tabId: string,
-  onStatus: (tabId: string, isGenerating: boolean, lastSnippet: string) => void
+  onStatus: (
+    tabId: string,
+    isGenerating: boolean,
+    lastSnippet: string,
+    report?: AiObserverReport
+  ) => void,
+  getViewGeneration?: () => number
 ): () => void {
   const handler = (
     event: Electron.Event & { message?: string },
@@ -524,7 +682,35 @@ export function attachAiStatusListener(
     if (typeof message === 'string' && message.startsWith('__NEXUS_AI_STATUS__:')) {
       try {
         const payload = JSON.parse(message.slice('__NEXUS_AI_STATUS__:'.length))
-        onStatus(tabId, Boolean(payload.isGenerating), String(payload.lastSnippet || ''))
+        if (getViewGeneration) {
+          const currentGen = getViewGeneration()
+          if (payload.viewGeneration !== undefined && payload.viewGeneration !== currentGen) {
+            // Stale observer update from an older view/navigation generation; discard
+            return
+          }
+        }
+        const isGenerating = Boolean(payload.isGenerating)
+        const lastSnippet = String(payload.lastSnippet || '')
+        const report: AiObserverReport = {
+          isGenerating,
+          lastSnippet,
+          status: payload.status,
+          error: payload.error,
+          hasReliableHooks: payload.hasReliableHooks,
+          initial: payload.initial,
+          viewGeneration: payload.viewGeneration
+        }
+        if (
+          payload.status !== undefined ||
+          payload.initial !== undefined ||
+          payload.error !== undefined ||
+          payload.hasReliableHooks !== undefined ||
+          payload.viewGeneration !== undefined
+        ) {
+          onStatus(tabId, isGenerating, lastSnippet, report)
+        } else {
+          onStatus(tabId, isGenerating, lastSnippet)
+        }
       } catch (err) {
         console.warn('[aiStatusObserver] Failed to parse status payload:', err)
       }
@@ -543,10 +729,11 @@ export function attachAiStatusListener(
 export function injectAiStatusObserver(
   view: WebContentsView,
   modelKey: string,
-  providerConfigMap?: Record<string, ProviderOverrides>
+  providerConfigMap?: Record<string, ProviderOverrides>,
+  viewGeneration?: number
 ): void {
   if (!view || !view.webContents || view.webContents.isDestroyed()) return
-  const script = getAiStatusObserverScript(modelKey, providerConfigMap)
+  const script = getAiStatusObserverScript(modelKey, providerConfigMap, viewGeneration)
   view.webContents.executeJavaScript(script).catch(() => {
     // Ignore execution errors on unloaded pages
   })

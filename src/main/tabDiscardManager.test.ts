@@ -154,6 +154,38 @@ describe('TabDiscardManager', () => {
     expect(manager.getActiveViewId()).toBe('tabA')
   })
 
+  it('does not commit a pending eviction after the tab becomes busy', async () => {
+    let resolveSnapshot!: (value: number) => void
+    let busy = false
+    const target = createMockView('target', {
+      pendingSnapshot: true,
+      onSnapshotResolve: (resolve) => { resolveSnapshot = resolve }
+    })
+    const active = createMockView('active')
+    const manager = new TabDiscardManager({
+      getUserDataDir: () => tempDir,
+      clock: () => simulatedTime,
+      isBusy: (id) => id === 'target' && busy,
+      onTeardown: (_id, view) => view.webContents.close()
+    })
+    manager.init()
+    try {
+      manager.setPolicy({ maxActiveTabs: 1 })
+      manager.registerView('target', target.view)
+      manager.registerView('active', active.view)
+      manager.activateTab('active')
+      expect(manager.getStatus().pendingCount).toBe(1)
+      busy = true
+      resolveSnapshot(0)
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      expect(target.destroyed).toBe(false)
+      expect(manager.hasView('target')).toBe(true)
+      expect(manager.getStatus().pendingCount).toBe(0)
+    } finally {
+      manager.stop()
+    }
+  })
+
   it('D05: bounded snapshot timeout allows eviction even if renderer never resolves', async () => {
     const mockA = createMockView('tabA', { pendingSnapshot: true })
     const mockB = createMockView('tabB')
@@ -323,6 +355,133 @@ describe('TabDiscardManager', () => {
     // Now tabA is past 15 minutes and gets evicted for capacity
     expect(mockA.destroyed).toBe(true)
     expect(manager.isTabEvicted('tabA')).toBe(true)
+  })
+
+  it('idle timeout threshold measures from max(backgroundSince, enteredIdleAt)', async () => {
+    let tabAStatus: 'working' | 'idle' = 'working'
+    const mockA = createMockView('tabA')
+    const mockB = createMockView('tabB')
+
+    const manager = new TabDiscardManager({
+      getUserDataDir: () => tempDir,
+      clock: () => simulatedTime,
+      isBusy: (id) => id === 'tabA' && tabAStatus !== 'idle',
+      onTeardown: (_id, v) => v.webContents.close()
+    })
+    manager.init()
+    manager.setPolicy({ tabDiscardMinutes: 30 })
+
+    // tabA active initially
+    manager.registerView('tabA', mockA.view)
+    manager.activateTab('tabA')
+
+    // At t=10m, switch to tabB. tabA is now in background, but still working!
+    simulatedTime += 10 * 60 * 1000
+    manager.registerView('tabB', mockB.view)
+    manager.activateTab('tabB')
+
+    // At t=40m (30 min background), tabA completes work and enters idle
+    simulatedTime += 30 * 60 * 1000
+    tabAStatus = 'idle'
+    manager.onAiStatusChanged('tabA', true)
+    expect(manager.getEnteredIdleAt('tabA')).toBe(simulatedTime)
+
+    // At t=60m (50 min background, but only 20 min idle < 30 min policy)
+    simulatedTime += 20 * 60 * 1000
+    manager.checkIdleTimeout()
+    expect(mockA.destroyed).toBe(false)
+    expect(manager.hasView('tabA')).toBe(true)
+
+    // At t=71m (61 min background, 31 min idle >= 30 min policy)
+    simulatedTime += 11 * 60 * 1000
+    manager.checkIdleTimeout()
+    await new Promise((r) => setTimeout(r, 20))
+    expect(mockA.destroyed).toBe(true)
+    expect(manager.isTabEvicted('tabA')).toBe(true)
+  })
+
+  it('capacity reconciliation protects busy tabs even when retention grace has expired', async () => {
+    let busyTab = true
+    const mockBusy = createMockView('tabBusy')
+    const mockIdle = createMockView('tabIdle')
+    const mockActive = createMockView('tabActive')
+
+    const manager = new TabDiscardManager({
+      getUserDataDir: () => tempDir,
+      clock: () => simulatedTime,
+      retentionGraceMs: 5 * 60 * 1000,
+      isBusy: (id) => id === 'tabBusy' && busyTab,
+      onTeardown: (_id, v) => v.webContents.close()
+    })
+    manager.init()
+    manager.setPolicy({ maxActiveTabs: 1 })
+
+    manager.registerView('tabBusy', mockBusy.view)
+    manager.registerView('tabIdle', mockIdle.view)
+    manager.onAiStatusChanged('tabIdle', true)
+    manager.registerView('tabActive', mockActive.view)
+    manager.activateTab('tabActive')
+
+    // Advance 10 minutes (grace period expired for both background tabs)
+    simulatedTime += 10 * 60 * 1000
+    manager.reconcileCapacity()
+    await new Promise((r) => setTimeout(r, 20))
+
+    // tabIdle was evicted, tabBusy remained protected
+    expect(mockIdle.destroyed).toBe(true)
+    expect(mockBusy.destroyed).toBe(false)
+    expect(manager.hasView('tabBusy')).toBe(true)
+
+    // Verify getStatus diagnostics
+    const status = manager.getStatus()
+    expect(status.protectedCount).toBe(2) // tabActive (active) + tabBusy (busy)
+    expect(status.exceededReason).toContain('All resident background tabs are protected')
+  })
+
+  it('cancels pending eviction and invalidates ticket when tab transitions to non-idle', async () => {
+    let resolveSnapshot!: (val: number) => void
+    const mockA = createMockView('tabA', {
+      pendingSnapshot: true,
+      onSnapshotResolve: (r) => {
+        resolveSnapshot = r
+      }
+    })
+    const mockActive = createMockView('tabActive')
+
+    let isBusyA = false
+    const manager = new TabDiscardManager({
+      getUserDataDir: () => tempDir,
+      clock: () => simulatedTime,
+      isBusy: (id) => id === 'tabA' && isBusyA,
+      onTeardown: (_id, v) => v.webContents.close()
+    })
+    manager.init()
+    manager.setPolicy({ maxActiveTabs: 1 })
+
+    manager.registerView('tabA', mockA.view)
+    manager.onAiStatusChanged('tabA', true)
+    manager.registerView('tabActive', mockActive.view)
+    manager.activateTab('tabActive')
+
+    // Wait 16 minutes to pass retention grace
+    simulatedTime += 16 * 60 * 1000
+    manager.reconcileCapacity()
+
+    // Eviction for tabA is now pending snapshot
+    expect(manager.getStatus().pendingCount).toBe(1)
+
+    // While snapshot is pending, tabA starts generating or receives prompt -> non-idle!
+    isBusyA = true
+    manager.onAiStatusChanged('tabA', false)
+
+    // Snapshot finishes
+    resolveSnapshot(100)
+    await new Promise((r) => setTimeout(r, 20))
+
+    // Eviction must be aborted!
+    expect(mockA.destroyed).toBe(false)
+    expect(manager.hasView('tabA')).toBe(true)
+    expect(manager.getStatus().pendingCount).toBe(0)
   })
 })
 

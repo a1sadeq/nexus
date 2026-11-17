@@ -1,5 +1,9 @@
 appId: com.nexus.app
 productName: Nexus
+publish:
+  - provider: github
+    owner: a1sadeq
+    repo: nexus
 directories:
   buildResources: build
 files:

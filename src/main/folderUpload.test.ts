@@ -115,6 +115,87 @@ describe('scanFolder', () => {
   })
 })
 
+
+
+describe('scanFolder - conservative classification', () => {
+  let tempDir: string
+
+  beforeEach(() => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nexus-test-scan-'))
+  })
+
+  afterEach(() => {
+    try {
+      fs.rmSync(tempDir, { recursive: true, force: true })
+    } catch {}
+  })
+
+  it('does NOT mark large source files as suggested removal based on size alone', () => {
+    // Create a large TypeScript file (>250KB) by repeating content
+    const line = 'export const data = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";\n'
+    const largeContent = line.repeat(5000)  // ~300KB
+    fs.writeFileSync(path.join(tempDir, 'large.ts'), largeContent, 'utf8')
+    
+    const result = scanFolder(tempDir)
+    expect(result.totalFiles).toBe(1)
+    
+    const largeFile = result.files[0]
+    expect(largeFile.size).toBeGreaterThan(250 * 1024)
+    // Large files should NOT be marked for suggested removal
+    expect(largeFile.isSuggestedRemoval).toBe(false)
+    expect(largeFile.removalReason).toBeUndefined()
+  })
+
+  it('still flags .env files as sensitive regardless of size', () => {
+    const envContent = 'SECRET_KEY=12345\nDATABASE_URL=postgres://...'
+    fs.writeFileSync(path.join(tempDir, '.env'), envContent, 'utf8')
+    
+    const result = scanFolder(tempDir)
+    expect(result.totalFiles).toBe(1)
+    
+    const envFile = result.files[0]
+    expect(envFile.isSuggestedRemoval).toBe(true)
+    expect(envFile.removalReason).toContain('Sensitive')
+  })
+
+  it('classifies common lockfiles and minified assets correctly', () => {
+    const packages_lock = path.join(tempDir, 'package-lock.json')
+    const yarn_lock = path.join(tempDir, 'yarn.lock')
+    const bundle_min = path.join(tempDir, 'app.min.js')
+    const source_map = path.join(tempDir, 'app.js.map')
+    const log_file = path.join(tempDir, 'debug.log')
+    
+    fs.writeFileSync(packages_lock, '{}', 'utf8')
+    fs.writeFileSync(yarn_lock, '', 'utf8')
+    fs.writeFileSync(bundle_min, 'function a(){}', 'utf8')
+    fs.writeFileSync(source_map, '{"version":3}', 'utf8')
+    fs.writeFileSync(log_file, 'log line 1\n', 'utf8')
+    
+    const result = scanFolder(tempDir)
+    expect(result.totalFiles).toBe(5)
+    
+    const pf = result.files.find(f => f.relativePath === 'package-lock.json')
+    expect(pf?.isSuggestedRemoval).toBe(true)
+    expect(pf?.removalReason).toContain('Lockfile')
+    
+    const yf = result.files.find(f => f.relativePath === 'yarn.lock')
+    expect(yf?.isSuggestedRemoval).toBe(true)
+    
+    const mf = result.files.find(f => f.relativePath === 'app.min.js')
+    expect(mf?.isSuggestedRemoval).toBe(true)
+    expect(mf?.removalReason).toContain('Minified')
+    
+    const sf = result.files.find(f => f.relativePath === 'app.js.map')
+    expect(sf?.isSuggestedRemoval).toBe(true)
+    expect(sf?.removalReason).toContain('Source map')
+    
+    const lf = result.files.find(f => f.relativePath === 'debug.log')
+    expect(lf?.isSuggestedRemoval).toBe(true)
+    expect(lf?.removalReason).toContain('Log file')
+  })
+
+})
+
 describe('createMasqueradedTextFile', () => {
   let tempDir: string
 

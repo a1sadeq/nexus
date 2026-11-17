@@ -4,6 +4,9 @@ import { DownloadNotificationOverlay } from './downloadNotificationOverlay'
 import { installGoogleSessionPersistence, flushGoogleSessionStore } from './googleSessionPersistence'
 import { isGoogleLoginRecoveryUrl, recoverGoogleSessionFromLatestBrowser } from './googleSessionRecovery'
 import { spawn } from 'child_process'
+import { AutoUpdateService, type UpdateEngine } from './autoUpdateService'
+import { supportsAutomaticUpdates } from './autoUpdatePlatform'
+import type { UpdateStatus } from '../shared/updateStatus'
 import {
   app,
   shell,
@@ -52,6 +55,18 @@ import { atomicWriteJson } from './atomicWrite'
 import { scheduleStartupAndExitPruning, getCacheStats, pruneAppCaches } from './cachePruningManager'
 import { captureDiagnosticReport, saveDiagnosticsToFile, type ViewContextInfo } from './diagnosticsManager'
 import { injectAiStatusObserver, attachAiStatusListener, isSnippetAwaitingInput } from './aiStatusObserver'
+import {
+  type AiLifecycleStatus,
+  type TabAiLifecycleState,
+  type AiLifecycleStatusUpdate,
+  isProtectedLifecycleStatus,
+  isGenuineCompletionTransition,
+  shouldDeduplicateCompletion,
+  formatDesktopNotificationContent,
+  ACTIVE_TAB_DONE_LINGER_MS,
+  VISITED_DONE_LINGER_MS
+} from '../shared/aiLifecycle'
+import { AiToastManager } from './aiToastManager'
 
 // Page-side helpers embedded into every injected script. Built from the tested
 // shared source via toString() — self-contained, no closures.
@@ -140,7 +155,6 @@ let providerConfig: import('../shared/providerConfig').ProviderConfigMap = {}
 let aiNotificationView: Electron.WebContentsView | null = null
 let downloadNotificationOverlay: DownloadNotificationOverlay | null = null
 let isAiNotificationVisible = false
-let aiNotificationDismissTimer: NodeJS.Timeout | null = null
 let currentNotificationData: {
   id: string
   tabId: string
@@ -149,6 +163,8 @@ let currentNotificationData: {
   status: 'done' | 'waiting-input'
   snippet?: string
 } | null = null
+
+const lastDesktopNotifications = new Map<string, number>()
 
 function buildNotificationHtml(data: {
   id: string
@@ -162,10 +178,10 @@ function buildNotificationHtml(data: {
   const accentColor = isWaitingInput ? '#ef4444' : '#10b981'
   const glowColor = isWaitingInput ? 'rgba(239, 68, 68, 0.4)' : 'rgba(16, 185, 129, 0.3)'
   const statusLabel = isWaitingInput ? 'Needs Input' : 'Response Ready'
-  const safeTitle = data.tabTitle.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-  const safeSnippet = (data.snippet || (isWaitingInput ? 'Waiting for your choice or confirmation' : 'Generation completed.'))
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-  const safeTabId = JSON.stringify(data.tabId)
+  const safeTitle = data.tabTitle.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+  const rawSnippet = data.snippet || (isWaitingInput ? 'Waiting for your choice or confirmation' : 'Generation completed.')
+  const safeSnippet = rawSnippet.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+  const safeTabIdAttr = data.tabId.replace(/&/g, '&amp;').replace(/"/g, '&quot;')
 
   return `<!DOCTYPE html>
 <html>
@@ -188,11 +204,32 @@ function buildNotificationHtml(data: {
       flex-direction: column;
       gap: 6px;
       cursor: pointer;
+      animation: toastEnter 0.22s cubic-bezier(0.16, 1, 0.3, 1) forwards;
       transition: transform 0.15s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.2s ease;
+    }
+    .toast.exiting {
+      animation: toastExit 0.18s cubic-bezier(0.4, 0, 1, 1) forwards;
+    }
+    @keyframes toastEnter {
+      from { opacity: 0; transform: translateY(-8px) scale(0.98); }
+      to { opacity: 1; transform: translateY(0) scale(1); }
+    }
+    @keyframes toastExit {
+      from { opacity: 1; transform: translateY(0) scale(1); }
+      to { opacity: 0; transform: translateY(-6px) scale(0.98); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .toast { animation: none !important; transition: opacity 0.15s ease !important; }
+      .toast.exiting { opacity: 0 !important; }
+      .status-dot { animation: none !important; }
+      .progress-fill { animation: none !important; }
     }
     .toast:hover {
       transform: translateY(-2px);
       box-shadow: 0 20px 42px rgba(0, 0, 0, 0.85), 0 0 32px ${glowColor};
+    }
+    .toast:hover .progress-fill {
+      animation-play-state: paused;
     }
     .header {
       display: flex;
@@ -314,7 +351,7 @@ function buildNotificationHtml(data: {
       height: 100%;
       background: ${accentColor};
       width: 100%;
-      animation: shrinkProgress 7s linear forwards;
+      animation: shrinkProgress 6.8s linear forwards;
     }
     @keyframes shrinkProgress {
       from { width: 100%; }
@@ -323,7 +360,7 @@ function buildNotificationHtml(data: {
   </style>
 </head>
 <body>
-  <div class="toast" id="toastCard">
+  <div class="toast" id="toastCard" data-tab-id="${safeTabIdAttr}">
     <div class="header">
       <div class="title-box">
         <span class="status-dot"></span>
@@ -345,19 +382,24 @@ function buildNotificationHtml(data: {
     </div>
   </div>
   <script>
+    const card = document.getElementById('toastCard');
+    const tabId = card?.getAttribute('data-tab-id') || '';
     const switchTab = () => {
-      window.electron?.ipcRenderer?.send('notification_click_switch_tab', ${safeTabId});
+      if (tabId) {
+        window.electron?.ipcRenderer?.send('notification_click_switch_tab', tabId);
+      }
     };
-    document.getElementById('toastCard').addEventListener('click', (e) => {
-      if (e.target.id === 'closeBtn') return;
+    card?.addEventListener('click', (e) => {
+      if (e.target && e.target.id === 'closeBtn') return;
       switchTab();
     });
-    document.getElementById('switchBtn').addEventListener('click', (e) => {
+    document.getElementById('switchBtn')?.addEventListener('click', (e) => {
       e.stopPropagation();
       switchTab();
     });
-    document.getElementById('closeBtn').addEventListener('click', (e) => {
+    document.getElementById('closeBtn')?.addEventListener('click', (e) => {
       e.stopPropagation();
+      card?.classList.add('exiting');
       window.electron?.ipcRenderer?.send('dismiss_in_app_toast');
     });
   </script>
@@ -375,21 +417,33 @@ function triggerDesktopNotification(data: {
 }) {
   if (!Notification.isSupported()) return
   try {
-    const iconPath = join(__dirname, '../../resources/icon.png')
-    const hasIcon = existsSync(iconPath)
+    const now = Date.now()
+    const lastTime = lastDesktopNotifications.get(data.tabId) || 0
+    if (now - lastTime < 2000) return
+    lastDesktopNotifications.set(data.tabId, now)
+
+    const iconCandidates = [
+      join(__dirname, '../../resources/icon.png'),
+      join(app.getAppPath(), 'resources/icon.png'),
+      join(app.getAppPath(), 'build/icon.png')
+    ]
+    const iconPath = iconCandidates.find((p) => existsSync(p))
+
+    // Privacy default: generic status text without sensitive chat titles or prompt snippets
+    const { title, body } = formatDesktopNotificationContent(data)
+
     const notif = new Notification({
-      title: 'Nexus AI',
-      subtitle: data.tabTitle,
-      body:
-        data.status === 'waiting-input'
-          ? `${data.tabTitle}: Needs your input or choice`
-          : `${data.tabTitle}: Finished generating response`,
-      urgency: data.status === 'waiting-input' ? 'critical' : 'normal',
+      title,
+      body,
+      urgency: 'normal',
       silent: false,
-      icon: hasIcon ? iconPath : undefined
+      icon: iconPath
     })
 
     notif.on('click', () => {
+      if (!aiViews.has(data.tabId) && !tabDiscardManager.hasView(data.tabId) && !tabDiscardManager.isTabEvicted(data.tabId)) {
+        return
+      }
       if (mainWindow && !mainWindow.isDestroyed()) {
         if (!mainWindow.isVisible()) mainWindow.show()
         if (mainWindow.isMinimized()) mainWindow.restore()
@@ -403,6 +457,47 @@ function triggerDesktopNotification(data: {
     console.error('[Notification] Failed to trigger desktop notification:', e)
   }
 }
+
+const aiToastManager = new AiToastManager(
+  () => {
+    if (!aiNotificationView || aiNotificationView.webContents.isDestroyed()) return null
+    return {
+      isDestroyed: () => !aiNotificationView || aiNotificationView.webContents.isDestroyed(),
+      loadHtml: (html: string) => {
+        aiNotificationView?.webContents.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html))
+      },
+      setVisible: (visible: boolean) => {
+        try {
+          aiNotificationView?.setVisible(visible)
+        } catch {}
+      },
+      setBounds: (bounds) => {
+        try {
+          aiNotificationView?.setBounds(bounds)
+        } catch {}
+      },
+      startExitAnimation: () => {
+        try {
+          aiNotificationView?.webContents.executeJavaScript(
+            "document.getElementById('toastCard')?.classList.add('exiting');"
+          ).catch(() => {})
+        } catch {}
+      }
+    }
+  },
+  () => {
+    const winBounds = mainWindow && !mainWindow.isDestroyed()
+      ? mainWindow.getContentBounds()
+      : { width: 1200, height: 800 }
+    return {
+      x: Math.max(0, winBounds.width - 395),
+      y: 44,
+      width: 380,
+      height: 125
+    }
+  },
+  (data) => buildNotificationHtml(data)
+)
 
 function showInAppToast(data: {
   id: string
@@ -432,54 +527,26 @@ function showInAppToast(data: {
 
     // If user is already on this tab and mainWindow has focus, no need to show HUD toast
     if (activeViewId === data.tabId) {
-      dismissInAppToast()
+      dismissInAppToast(true)
       return
     }
-
-    currentNotificationData = data
-    if (aiNotificationDismissTimer) {
-      clearTimeout(aiNotificationDismissTimer)
-      aiNotificationDismissTimer = null
-    }
-
-    const html = buildNotificationHtml(data)
-    aiNotificationView.webContents.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html))
 
     try {
       mainWindow.contentView.removeChildView(aiNotificationView)
       mainWindow.contentView.addChildView(aiNotificationView)
     } catch {}
 
-    const winBounds = mainWindow.getContentBounds()
-    aiNotificationView.setBounds({
-      x: Math.max(0, winBounds.width - 395),
-      y: 44,
-      width: 380,
-      height: 125
-    })
-    aiNotificationView.setVisible(true)
-    isAiNotificationVisible = true
+    aiToastManager.show(data)
+    currentNotificationData = aiToastManager.getCurrentData()
+    isAiNotificationVisible = aiToastManager.getIsVisible()
     downloadNotificationOverlay?.raiseToFront()
-
-    aiNotificationDismissTimer = setTimeout(() => {
-      dismissInAppToast()
-    }, 7000)
   }
 }
 
-function dismissInAppToast() {
-  if (aiNotificationDismissTimer) {
-    clearTimeout(aiNotificationDismissTimer)
-    aiNotificationDismissTimer = null
-  }
-  currentNotificationData = null
-  isAiNotificationVisible = false
-  if (aiNotificationView && !aiNotificationView.webContents.isDestroyed()) {
-    try {
-      aiNotificationView.setVisible(false)
-      aiNotificationView.setBounds({ x: 0, y: 0, width: 0, height: 0 })
-    } catch {}
-  }
+function dismissInAppToast(immediate = false) {
+  aiToastManager.dismiss(immediate)
+  currentNotificationData = aiToastManager.getCurrentData()
+  isAiNotificationVisible = aiToastManager.getIsVisible()
 }
 // Match the actual OS and bundled Chromium version; do not impersonate Linux on Windows.
 // Strip Electron/product tokens by constructing a regular Chrome-compatible UA.
@@ -527,14 +594,153 @@ export function loadInitialPinnedState(): void {
 }
 loadInitialPinnedState()
 
-const activeAiStatuses = new Map<string, string>()
+const activeAiLifecycles = new Map<string, TabAiLifecycleState>()
+const aiLifecycleTimers = new Map<string, NodeJS.Timeout>()
+export const tabViewGenerations = new Map<string, number>()
+
+export function getTabViewGeneration(tabId: string): number {
+  return tabViewGenerations.get(tabId) ?? 1
+}
+
+export function bumpTabViewGeneration(tabId: string): number {
+  const next = (tabViewGenerations.get(tabId) ?? 0) + 1
+  tabViewGenerations.set(tabId, next)
+  return next
+}
+
+const lastCompletionNotifications = new Map<string, { status: string; revision: number; time: number }>()
+
+function triggerCompletionNotification(tabId: string, status: 'done' | 'waiting-input', snippet?: string) {
+  const now = Date.now()
+  const prev = lastCompletionNotifications.get(tabId)
+  const currentRev = activeAiLifecycles.get(tabId)?.revision ?? 0
+  if (shouldDeduplicateCompletion(prev, status, currentRev, now)) return
+  lastCompletionNotifications.set(tabId, { status, revision: currentRev, time: now })
+
+  const tabTitle = viewTitles.get(tabId) || 'AI Session'
+  const modelKey = viewModelKeys.get(tabId) || 'gemini'
+  showInAppToast({
+    id: `${tabId}-${now}-${Math.random().toString(36).slice(2, 6)}`,
+    tabId,
+    tabTitle,
+    model: modelKey,
+    status,
+    snippet
+  })
+}
+
+export function getTabAiStatus(tabId: string): AiLifecycleStatus {
+  return activeAiLifecycles.get(tabId)?.status ?? 'unknown'
+}
+
+export function setTabAiLifecycle(
+  tabId: string,
+  nextStatus: AiLifecycleStatus,
+  options?: {
+    lastSnippet?: string
+    error?: string
+    viewGeneration?: number
+    skipTimer?: boolean
+  }
+): void {
+  const currentViewGen = tabViewGenerations.get(tabId) ?? 1
+  if (options?.viewGeneration !== undefined && options.viewGeneration < currentViewGen) {
+    // Drop stale updates from an older view/navigation epoch
+    return
+  }
+
+  const existing = activeAiLifecycles.get(tabId)
+  const viewGen = options?.viewGeneration ?? existing?.viewGeneration ?? currentViewGen
+  const nextRev = (existing?.revision ?? 0) + 1
+  const prevStatus = existing?.status ?? 'unknown'
+  const now = Date.now()
+
+  // Clear existing linger timer if any
+  const existingTimer = aiLifecycleTimers.get(tabId)
+  if (existingTimer) {
+    clearTimeout(existingTimer)
+    aiLifecycleTimers.delete(tabId)
+  }
+
+  const isActive = tabId === activeViewId
+  const isBackground = !isActive
+
+  let enteredIdleAt = existing?.enteredIdleAt
+  if (nextStatus === 'idle') {
+    if (!enteredIdleAt) enteredIdleAt = now
+  } else {
+    enteredIdleAt = undefined
+  }
+
+  const nextState: TabAiLifecycleState = {
+    tabId,
+    status: nextStatus,
+    revision: nextRev,
+    viewGeneration: viewGen,
+    lastSnippet: options?.lastSnippet !== undefined ? options.lastSnippet : existing?.lastSnippet,
+    error: options?.error !== undefined ? options.error : existing?.error,
+    updatedAt: now,
+    enteredIdleAt,
+    isBackgroundCompletion: nextStatus === 'done' ? isBackground : false
+  }
+  activeAiLifecycles.set(tabId, nextState)
+
+  // Handle linger timers for 'done'
+  if (nextStatus === 'done' && !options?.skipTimer) {
+    if (isActive) {
+      // Active tab: 6s visible confirmation linger before transitioning to idle
+      const timer = setTimeout(() => {
+        const cur = activeAiLifecycles.get(tabId)
+        const latestGen = tabViewGenerations.get(tabId) ?? 1
+        if (
+          cur &&
+          cur.revision === nextRev &&
+          cur.viewGeneration === viewGen &&
+          latestGen === viewGen &&
+          cur.status === 'done'
+        ) {
+          setTabAiLifecycle(tabId, 'idle', { viewGeneration: viewGen })
+        }
+      }, ACTIVE_TAB_DONE_LINGER_MS)
+      aiLifecycleTimers.set(tabId, timer)
+    }
+  }
+
+  // Inform TabDiscardManager: true if idle, false otherwise
+  tabDiscardManager.onAiStatusChanged(tabId, nextStatus === 'idle')
+
+  // Publish to mainWindow: modern typed event
+  const updatePayload: AiLifecycleStatusUpdate = {
+    tabId,
+    status: nextStatus,
+    revision: nextRev,
+    viewGeneration: viewGen,
+    lastSnippet: nextState.lastSnippet,
+    error: nextState.error,
+    timestamp: now
+  }
+  sendToMainWindow('ai-lifecycle-status', updatePayload)
+
+  // Finding 2: Stop sending legacy completion events for initial unknown, idle, error,
+  // or other non-completion transitions. Generate notifications only for genuine,
+  // deduplicated completion or input-required transitions.
+  const isGenuineCompletion = isGenuineCompletionTransition(prevStatus, nextStatus)
+
+  if (isGenuineCompletion) {
+    triggerCompletionNotification(tabId, nextStatus, nextState.lastSnippet)
+    sendToMainWindow('ai-live-status', tabId, false, nextState.lastSnippet || '')
+  } else if (nextStatus === 'working' && prevStatus !== 'working') {
+    sendToMainWindow('ai-live-status', tabId, true, '')
+  }
+}
 
 export const tabDiscardManager = new TabDiscardManager({
   getUserDataDir: () => getFinalUserDataDir(),
   isPinned: (tabId: string) => pinnedTabIds.has(tabId),
   isBusy: (tabId: string) => {
-    const status = activeAiStatuses.get(tabId)
-    return status === 'working' || status === 'waiting-input'
+    const lifecycle = activeAiLifecycles.get(tabId)
+    // Only 'idle' is eligible for discard; unknown, working, waiting-input, done, error are all protected!
+    return isProtectedLifecycleStatus(lifecycle?.status)
   },
   retentionGraceMs: 15 * 60 * 1000,
   onTeardown: async (tabId, view, contents) => {
@@ -549,7 +755,13 @@ export const tabDiscardManager = new TabDiscardManager({
     viewModelKeys.delete(tabId)
     lastRealBounds.delete(tabId)
     viewTitles.delete(tabId)
-    activeAiStatuses.delete(tabId)
+    const timer = aiLifecycleTimers.get(tabId)
+    if (timer) {
+      clearTimeout(timer)
+      aiLifecycleTimers.delete(tabId)
+    }
+    activeAiLifecycles.delete(tabId)
+    tabViewGenerations.delete(tabId)
 
     // Cleanup orphaned thumbnails
     const safeId = tabId.replace(/[^a-zA-Z0-9._-]/g, '')
@@ -699,12 +911,20 @@ ipcMain.on('show_in_app_toast', (event, data) => {
   showInAppToast(data)
 })
 
-ipcMain.on('dismiss_in_app_toast', () => {
-  dismissInAppToast()
+ipcMain.on('dismiss_in_app_toast', (event) => {
+  const isAllowed =
+    (aiNotificationView && event.sender === aiNotificationView.webContents) ||
+    (mainWindow && event.sender === mainWindow.webContents)
+  if (!isAllowed) return
+  dismissInAppToast(false)
 })
 
-ipcMain.on('notification_click_switch_tab', (_event, tabId) => {
-  dismissInAppToast()
+ipcMain.on('notification_click_switch_tab', (event, tabId) => {
+  const isAllowed =
+    (aiNotificationView && event.sender === aiNotificationView.webContents) ||
+    (mainWindow && event.sender === mainWindow.webContents)
+  if (!isAllowed || typeof tabId !== 'string') return
+  dismissInAppToast(true)
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.focus()
     sendToMainWindow('notification_switch_to_tab', tabId)
@@ -754,6 +974,61 @@ ipcMain.on('show_toast', (_event, msg: string) => {
 
 let tray: Tray | null = null
 let isQuitting = false
+let autoUpdateService: AutoUpdateService | null = null
+
+function updateSupport(): boolean {
+  let packageType = ''
+  try { packageType = readFileSync(join(process.resourcesPath, 'app.asar.unpacked', 'package.json'), 'utf-8') } catch {}
+  const pkg = packageType ? JSON.parse(packageType) : undefined
+  return supportsAutomaticUpdates({
+    packaged: app.isPackaged,
+    platform: process.platform,
+    appImage: process.env.APPIMAGE || undefined,
+    portableExecutable: process.env.PORTABLE_EXECUTABLE_FILE || undefined,
+    packageType: pkg?.build?.linux?.target?.[0]?.target
+  })
+}
+
+function unsupportedUpdateStatus(): UpdateStatus {
+  return { phase: 'unsupported', currentVersion: app.getVersion(), message: 'Automatic updates are not supported on this installation.' }
+}
+
+function startAutoUpdates() {
+  if (autoUpdateService || !updateSupport()) return
+  try {
+    const electronUpdater = require('electron-updater')
+    const { autoUpdater } = electronUpdater
+    // Use configured engine settings where available
+    autoUpdater.autoDownload = true
+    autoUpdater.allowPrerelease = false
+    autoUpdater.allowDowngrade = false
+    const publish = (state: UpdateStatus) => {
+      sendToMainWindow('nexus-update-status', state)
+    }
+    autoUpdateService = new AutoUpdateService({
+      engine: autoUpdater as UpdateEngine,
+      version: app.getVersion(),
+      publish,
+      notifyRestart: () => {
+        if (Notification.isSupported()) {
+          new Notification({ title: 'Nexus update', body: 'Nexus is restarting to install an update. Unsaved input may be lost.' }).show()
+        }
+      },
+      prepareInstall: async () => {
+        // Bound shutdown preparation: fail open if cookie flush hangs.
+        await Promise.race([
+          flushGoogleSessionStore(session.fromPartition('persist:ai-shared')).catch(() => {}),
+          new Promise<void>((resolve) => setTimeout(resolve, 3000))
+        ])
+        isQuitting = true
+      },
+      installFailed: () => { isQuitting = false }
+    })
+    autoUpdateService.start()
+  } catch (error) {
+    console.error('[auto-update] Could not initialize updater:', error)
+  }
+}
 export let currentUiZoom = 1.0;
 let currentWebviewZoom = 1.0;
 let currentGlobalHotkey: string | null = null
@@ -1504,6 +1779,7 @@ app.on('before-quit', () => {
 })
 
 app.on('will-quit', () => {
+  autoUpdateService?.stop()
   downloadNotificationOverlay?.destroy()
   void flushGoogleSessionStore(session.fromPartition('persist:ai-shared')).catch(console.error)
   globalShortcut.unregisterAll()
@@ -1571,6 +1847,53 @@ const DEFAULT_ACTION_KEYS: Record<string, string[]> = {
 let customKeymap: Record<string, string[]> = {}
 let overlaysOpen = false
 
+/**
+ * Idempotent reconciliation of native view presentation state.
+ * Called after activation, valid bounds updates, overlay close, and
+ * window show/restore so the live webview is never left blank.
+ * Never recreates or reloads a live WebContents.
+ */
+function reconcileViewPresentation(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  const isVisible = mainWindow.isVisible() && !mainWindow.isMinimized()
+  const hasOverlay = overlaysOpen
+  const shouldShow = isVisible && !hasOverlay && Boolean(activeViewId)
+
+  // Always keep inactive views hidden
+  for (const [tabId, view] of aiViews) {
+    if (tabId === activeViewId) continue
+    try {
+      if (!view.webContents.isDestroyed()) {
+        view.setVisible(false)
+        view.webContents.setBackgroundThrottling(true)
+        view.webContents.setAudioMuted(true)
+      }
+    } catch {}
+  }
+
+  // Reconcile the active view
+  if (activeViewId) {
+    const view = aiViews.get(activeViewId)
+    const realBounds = lastRealBounds.get(activeViewId)
+    if (view && !view.webContents.isDestroyed()) {
+      // Apply cached bounds only when they are non-zero; never force stale zero geometry
+      if (shouldShow && realBounds && realBounds.width > 0 && realBounds.height > 0) {
+        try { view.setBounds(realBounds) } catch {}
+      }
+      activeViewVisible = shouldShow
+      try {
+        if (typeof view.setVisible === 'function') view.setVisible(shouldShow)
+      } catch {}
+      if (!view.webContents.isDestroyed()) {
+        view.webContents.setBackgroundThrottling?.(!shouldShow)
+        view.webContents.setAudioMuted?.(!shouldShow)
+      }
+    } else {
+      activeViewVisible = false
+    }
+  }
+}
+
 function isValidKeymap(map: unknown): map is Record<string, string[]> {
   if (!map || typeof map !== 'object' || Array.isArray(map)) return false
   return Object.values(map as Record<string, unknown>).every(
@@ -1604,22 +1927,8 @@ ipcMain.on('set_overlays_open', (_event, open: boolean) => {
         }
       } catch {}
     }
-  } else if (activeViewId) {
-    const activeView = aiViews.get(activeViewId)
-    const realBounds = lastRealBounds.get(activeViewId)
-    try {
-      if (activeView && !activeView.webContents.isDestroyed?.()) {
-        if (realBounds && realBounds.width > 0 && realBounds.height > 0) {
-          activeView.setBounds(realBounds)
-          activeViewVisible = true
-        }
-        if (typeof activeView.setVisible === 'function' && activeViewVisible) {
-          activeView.setVisible(true)
-        }
-        activeView.webContents.setBackgroundThrottling?.(!activeViewVisible)
-        activeView.webContents.setAudioMuted?.(!activeViewVisible)
-      }
-    } catch {}
+  } else {
+    reconcileViewPresentation()
   }
 })
 
@@ -2078,13 +2387,7 @@ function createWindow() {
   })
   const resumeActiveView = () => {
     restartActiveArenaTitleSync()
-    if (activeViewId && activeViewVisible) {
-      const active = aiViews.get(activeViewId)
-      if (active && !active.webContents.isDestroyed()) {
-        active.webContents.setBackgroundThrottling(false)
-        active.webContents.setAudioMuted(false)
-      }
-    }
+    reconcileViewPresentation()
   }
   mainWindow.on('show', resumeActiveView)
   mainWindow.on('restore', resumeActiveView)
@@ -2375,6 +2678,8 @@ app.whenReady().then(() => {
 
   const finalHotkey = customHotkey === 'none' || noHotkey ? null : customHotkey || 'Alt+Space'
   updateGlobalHotkey(finalHotkey)
+
+  startAutoUpdates()
 
   app.on('activate', function () {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
@@ -2956,7 +3261,7 @@ function ensureAiView(tabId: string): Electron.WebContentsView {
     injectVirtualizationCss(view, modelKey)
     applyProviderMotionMode(view, modelKey)
     executeCustomInitScript(view, modelKey)
-    injectAiStatusObserver(view, modelKey, providerConfig)
+    injectAiStatusObserver(view, modelKey, providerConfig, tabViewGenerations.get(tabId) ?? 1)
   })
 
   view.webContents.on('did-finish-load', () => {
@@ -2968,10 +3273,12 @@ function ensureAiView(tabId: string): Electron.WebContentsView {
 
     const script = buildWebviewRuntimeJs(modelKey)
     view.webContents.executeJavaScript(script).catch((err) => console.error(err))
-    injectAiStatusObserver(view, modelKey, providerConfig)
+    injectAiStatusObserver(view, modelKey, providerConfig, tabViewGenerations.get(tabId) ?? 1)
   })
 
   view.webContents.on('did-navigate', (_event, url) => {
+    const nextGen = bumpTabViewGeneration(tabId)
+    setTabAiLifecycle(tabId, 'unknown', { viewGeneration: nextGen, skipTimer: true })
     viewCssState.delete(view.webContents)
     resolveModelKey(tabId, url)
     sendToMainWindow('ai-url-updated', tabId, url)
@@ -2980,7 +3287,7 @@ function ensureAiView(tabId: string): Electron.WebContentsView {
   view.webContents.on('did-navigate-in-page', (_event, url) => {
     sendToMainWindow('ai-url-updated', tabId, url)
     const modelKey = viewModelKeys.get(tabId) || resolveModelKey(tabId, url) || ''
-    injectAiStatusObserver(view, modelKey, providerConfig)
+    injectAiStatusObserver(view, modelKey, providerConfig, tabViewGenerations.get(tabId) ?? 1)
   })
   view.webContents.on('did-start-loading', () => {
     sendToMainWindow('ai-loading', tabId, true)
@@ -3005,17 +3312,39 @@ function ensureAiView(tabId: string): Electron.WebContentsView {
   })
 
   // Transactional registration: register with TabDiscardManager BEFORE adding to window or setting in aiViews
+  const viewGen = bumpTabViewGeneration(tabId)
+  setTabAiLifecycle(tabId, 'unknown', { viewGeneration: viewGen, skipTimer: true })
   tabDiscardManager.registerView(tabId, view as unknown as DiscardableView)
 
-  attachAiStatusListener(view.webContents, tabId, (id, isGenerating, lastSnippet) => {
-    const nextStatus = isGenerating
-      ? 'working'
-      : id !== activeViewId && isSnippetAwaitingInput(lastSnippet)
-        ? 'waiting-input'
-        : 'done'
-    activeAiStatuses.set(id, nextStatus)
-    sendToMainWindow('ai-live-status', id, isGenerating, lastSnippet)
-  })
+  attachAiStatusListener(
+    view.webContents,
+    tabId,
+    (id, isGenerating, lastSnippet, report) => {
+      const currentGen = tabViewGenerations.get(id) ?? 1
+      if (report?.viewGeneration !== undefined && report.viewGeneration !== currentGen) {
+        return
+      }
+      if (report?.status) {
+        setTabAiLifecycle(id, report.status, {
+          lastSnippet,
+          error: report.error,
+          viewGeneration: report.viewGeneration ?? currentGen
+        })
+      } else if (report?.initial) {
+        setTabAiLifecycle(id, report.hasReliableHooks ? 'idle' : 'unknown', {
+          viewGeneration: report.viewGeneration ?? currentGen
+        })
+      } else {
+        const nextStatus: AiLifecycleStatus = isGenerating
+          ? 'working'
+          : id !== activeViewId && isSnippetAwaitingInput(lastSnippet)
+            ? 'waiting-input'
+            : 'done'
+        setTabAiLifecycle(id, nextStatus, { lastSnippet, viewGeneration: currentGen })
+      }
+    },
+    () => tabViewGenerations.get(tabId) ?? 1
+  )
 
   if (mainWindow && !mainWindow.isDestroyed()) {
     try {
@@ -4403,8 +4732,34 @@ ipcMain.on('activate_tab', async (_event, tabId, url, bounds, modelKey) => {
   }
 
   activeViewId = tabId
-  if (activeAiStatuses.get(tabId) === 'waiting-input' || activeAiStatuses.get(tabId) === 'done') {
-    activeAiStatuses.set(tabId, 'idle')
+  const currentLifecycle = activeAiLifecycles.get(tabId)
+  const currentGen = tabViewGenerations.get(tabId) ?? 1
+  if (
+    currentLifecycle?.status === 'done' &&
+    currentLifecycle.isBackgroundCompletion &&
+    currentLifecycle.viewGeneration === currentGen
+  ) {
+    currentLifecycle.isBackgroundCompletion = false
+    const existingTimer = aiLifecycleTimers.get(tabId)
+    if (existingTimer) {
+      clearTimeout(existingTimer)
+      aiLifecycleTimers.delete(tabId)
+    }
+    const rev = currentLifecycle.revision
+    const timer = setTimeout(() => {
+      const cur = activeAiLifecycles.get(tabId)
+      const latestGen = tabViewGenerations.get(tabId) ?? 1
+      if (
+        cur &&
+        cur.revision === rev &&
+        cur.viewGeneration === currentGen &&
+        latestGen === currentGen &&
+        cur.status === 'done'
+      ) {
+        setTabAiLifecycle(tabId, 'idle', { viewGeneration: currentGen })
+      }
+    }, VISITED_DONE_LINGER_MS)
+    aiLifecycleTimers.set(tabId, timer)
   }
   if (currentNotificationData?.tabId === tabId) {
     dismissInAppToast()
@@ -4426,6 +4781,7 @@ ipcMain.on('activate_tab', async (_event, tabId, url, bounds, modelKey) => {
   }
 
   restartActiveArenaTitleSync()
+  reconcileViewPresentation()
 
   // 4. Handle Wake / Restoration vs Initial Load
   const wasEvicted = tabDiscardManager.isTabEvicted(tabId)
@@ -4816,6 +5172,8 @@ ipcMain.on('resize_view', (_event, bounds) => {
       focusPromptInView(view)
     }
   }
+  // Reconcile to ensure consistency across all state sources
+  reconcileViewPresentation()
 })
 
 ipcMain.on('toggle_focus_mode', (_event, enabled) => {
@@ -5143,6 +5501,19 @@ ipcMain.handle('list_history', (event) => {
   }
 })
 
+ipcMain.handle('nexus-update-status', () => {
+  if (autoUpdateService) {
+    return autoUpdateService.getStatus()
+  }
+  return unsupportedUpdateStatus()
+})
+
+ipcMain.handle('nexus-update-check', () => {
+  if (autoUpdateService) {
+    return autoUpdateService.check()
+  }
+  return Promise.resolve()
+})
+
 // Universal file-backed app state (tabs, pinned, models, providers, interface-settings, theme)
 // is registered with the Session Write Barrier and Atomic Write Engine in registerStateIpc().
-

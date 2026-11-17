@@ -1,4 +1,4 @@
-export type TabAiStatus = 'idle' | 'working' | 'waiting-input' | 'done'
+export type TabAiStatus = 'idle' | 'working' | 'waiting-input' | 'done' | 'error'
 
 /**
  * Context-Aware Hybrid Linger Durations (in milliseconds):

@@ -240,7 +240,9 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
     [allFiles]
   )
 
-  // Initialize selection: select all files EXCEPT suggested removals by default
+  // Initialize selection: select all non-sensitive files by default.
+  // When all files are sensitive/suggested, do NOT fall back to selecting
+  // everything — only include files without a sensitive reason.
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(() => {
     const initial = new Set<string>()
     for (const f of allFiles) {
@@ -248,8 +250,15 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
         initial.add(f.path)
       }
     }
+    // Only fall back to selecting all NON-sensitive files, never secrets
     if (initial.size === 0 && allFiles.length > 0) {
-      for (const f of allFiles) initial.add(f.path)
+      for (const f of allFiles) {
+        // Include large files even if they have a generic removal reason
+        // but NEVER auto-select .env or secret files
+        const reason = (f as any).removalReason
+        if (reason && reason.includes('Sensitive')) continue
+        initial.add(f.path)
+      }
     }
     return initial
   })
@@ -326,8 +335,13 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
         initial.add(f.path)
       }
     }
+    // Only fall back to selecting non-sensitive files, never secrets
     if (initial.size === 0 && allFiles.length > 0) {
-      for (const f of allFiles) initial.add(f.path)
+      for (const f of allFiles) {
+        const reason = (f as any).removalReason
+        if (reason && reason.includes('Sensitive')) continue
+        initial.add(f.path)
+      }
     }
     setSelectedPaths(initial)
     setExcludeSuggested(suggestedCount > 0)

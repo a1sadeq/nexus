@@ -21,18 +21,12 @@ import { getShortcutKeys, getShortcutMap, onShortcutsChanged } from './lib/short
 import type { Tab, HistoryItem, ModelKey } from './lib/tabs'
 import ChatTabs from './components/ChatTabs'
 import VerticalTabs from './components/VerticalTabs'
-import {
-  updateTabLoadingStatus,
-  acknowledgeTabStatus,
-  isCompletedStatus,
-  ACTIVE_TAB_LINGER_MS,
-  SWITCH_TAB_LINGER_MS,
-  type TabAiStatus
-} from './lib/tabStatus'
+import type { TabAiStatus } from './lib/tabStatus'
 import { BRAND_IDS, modelLabel, modelColor } from './lib/modelVisuals'
 import { BrandIcon, IconPanelLeft, IconPanelLeftClose, IconSearch, IconPlus } from './components/BrandIcons'
 import { pushClosedTab, reopenClosedTab, type ClosedTabEntry } from './lib/tabs'
 import type { SkillDef } from '../../shared/skills'
+import type { AiLifecycleStatusUpdate } from '../../shared/aiLifecycle'
 import { BaseSkillsModal } from './components/BaseSkillsModal'
 import { SkillsPaletteModal } from './components/SkillsPaletteModal'
 import { CategoryManagerModal } from './components/CategoryManagerModal'
@@ -798,34 +792,6 @@ Acknowledge these skills with a concise confirmation in this exact format:
     }
   }, [])
 
-  const statusDismissTimersRef = useRef<Map<string, NodeJS.Timeout>>(new Map())
-
-  const cancelStatusDismissal = useCallback((tabId: string) => {
-    const existing = statusDismissTimersRef.current.get(tabId)
-    if (existing) {
-      clearTimeout(existing)
-      statusDismissTimersRef.current.delete(tabId)
-    }
-  }, [])
-
-  const scheduleStatusDismissal = useCallback((tabId: string, delayMs: number = ACTIVE_TAB_LINGER_MS) => {
-    cancelStatusDismissal(tabId)
-    const timer = setTimeout(() => {
-      statusDismissTimersRef.current.delete(tabId)
-      setTabStatuses((prev) => acknowledgeTabStatus(prev, tabId))
-    }, delayMs)
-    statusDismissTimersRef.current.set(tabId, timer)
-  }, [cancelStatusDismissal])
-
-  useEffect(() => {
-    return () => {
-      for (const timer of statusDismissTimersRef.current.values()) {
-        clearTimeout(timer)
-      }
-      statusDismissTimersRef.current.clear()
-    }
-  }, [])
-
   // Live per-tab title/URL/loading updates from the main process
   useEffect(() => {
     const ipc = window.electron?.ipcRenderer
@@ -953,32 +919,40 @@ Acknowledge these skills with a concise confirmation in this exact format:
     const onLiveStatus = (
       _e: unknown,
       tabId: string,
-      isGenerating: boolean,
-      lastSnippet: string
+      isGenerating: boolean
     ) => {
+      // Legacy compatibility: loading spinner indicator only;
+      // Authoritative lifecycle badges and notifications are owned by onLifecycleStatus.
       if (isGenerating) {
-        cancelStatusDismissal(tabId)
         setLoadingTabId(tabId)
       } else {
-        setLoadingTabId(null)
+        setLoadingTabId((prev) => (prev === tabId ? null : prev))
       }
+    }
+
+    const onLifecycleStatus = (_e: unknown, update: AiLifecycleStatusUpdate) => {
+      if (!update || !update.tabId) return
+      const { tabId, status } = update
+      if (status === 'working') {
+        setLoadingTabId(tabId)
+      } else {
+        setLoadingTabId((prev) => (prev === tabId ? null : prev))
+      }
+
       setTabStatuses((prev) => {
-        const isActive = tabId === activeIdRef.current
-        const updated = updateTabLoadingStatus(prev, tabId, isGenerating, isActive, lastSnippet)
+        let badgeStatus: TabAiStatus = 'idle'
+        if (status === 'working') badgeStatus = 'working'
+        else if (status === 'waiting-input') badgeStatus = 'waiting-input'
+        else if (status === 'done') badgeStatus = 'done'
+        else if (status === 'error') badgeStatus = 'error'
+        else badgeStatus = 'idle'
 
-        // If generation stopped
-        if (!isGenerating) {
-          const status = updated[tabId]
-          const tabItem = tabsRef.current.find((t) => t.id === tabId)
-          const tabTitle = tabItem?.title || 'AI Session'
-          const modelKey = tabItem?.model || 'gemini'
+        const prevStatus = prev[tabId]
+        if (prevStatus === badgeStatus) return prev
 
-          if (isActive) {
-            // Active tab finished: linger for 6 seconds so user has clear visual confirmation, then transition to idle
-            scheduleStatusDismissal(tabId, ACTIVE_TAB_LINGER_MS)
-          }
-
-          // Trigger sound FX if background tab OR if Nexus is not focused/visible (e.g. hidden via shortcut)
+        // Sound effect on genuine completion transition:
+        if (prevStatus === 'working' && (status === 'done' || status === 'waiting-input')) {
+          const isActive = tabId === activeIdRef.current
           if (!isActive || !isWindowFocusedRef.current) {
             if (status === 'waiting-input') {
               sfx.aiPromptAlert()
@@ -986,20 +960,12 @@ Acknowledge these skills with a concise confirmation in this exact format:
               sfx.chime()
             }
           }
-
-          // Trigger notification: in-app HUD toast when focused, or native OS desktop notification when in background or hidden
-          // @ts-ignore
-          window.electron?.ipcRenderer?.send('show_in_app_toast', {
-            id: `${tabId}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-            tabId,
-            tabTitle,
-            model: modelKey,
-            status: status === 'waiting-input' ? 'waiting-input' : 'done',
-            snippet: lastSnippet
-          })
         }
 
-        return updated
+        return {
+          ...prev,
+          [tabId]: badgeStatus
+        }
       })
     }
 
@@ -1007,17 +973,18 @@ Acknowledge these skills with a concise confirmation in this exact format:
     ipc.on('ai-url-updated', onUrl)
     ipc.on('ai-loading', onLoading)
     ipc.on('ai-live-status', onLiveStatus)
+    ipc.on('ai-lifecycle-status', onLifecycleStatus)
     return () => {
       ipc.removeListener('ai-title-updated', onTitle)
       ipc.removeListener('ai-url-updated', onUrl)
       ipc.removeListener('ai-loading', onLoading)
       ipc.removeListener('ai-live-status', onLiveStatus)
+      ipc.removeListener('ai-lifecycle-status', onLifecycleStatus)
     }
   }, [])
 
   const closeTab = (idToClose: string) => {
     setResidentTabIds((prev) => prev.filter((id) => id !== idToClose))
-    cancelStatusDismissal(idToClose)
     setTabStatuses((prev) => {
       if (!(idToClose in prev)) return prev
       const next = { ...prev }
@@ -1124,17 +1091,6 @@ Acknowledge these skills with a concise confirmation in this exact format:
       // @ts-ignore
       window.electron?.ipcRenderer?.send('dismiss_in_app_toast')
 
-      // Context-Aware Hybrid Linger:
-      // If the selected tab was waiting with completed status ('done' or 'waiting-input'),
-      // retain the badge for 4 seconds so the user has immediate visual confirmation of the completed answer,
-      // then smoothly fade back to idle.
-      const currentStatus = tabStatusesRef.current[id]
-      if (isCompletedStatus(currentStatus)) {
-        scheduleStatusDismissal(id, SWITCH_TAB_LINGER_MS)
-      } else {
-        cancelStatusDismissal(id)
-      }
-
       const bounds = containerBounds() || { x: 0, y: 0, width: 0, height: 0 }
       if (url) {
         const modelKey = tabs.find((t) => t.id === id)?.model
@@ -1143,7 +1099,7 @@ Acknowledge these skills with a concise confirmation in this exact format:
       }
       scheduleSnapshotCapture(id)
     },
-    [scheduleSnapshotCapture, tabs, scheduleStatusDismissal, cancelStatusDismissal]
+    [scheduleSnapshotCapture, tabs]
   )
 
   const loadTabUrl = useCallback(
@@ -1770,7 +1726,8 @@ Acknowledge these skills with a concise confirmation in this exact format:
       // Never re-show the native view while an overlay or boot sequence is open:
       // the observer fires on layout changes and would otherwise
       // override the 0x0 hide sent by overlay-open handlers.
-      if (showBootSequence || showHistory || showTabOverview || showSettings || showNewTab || showExport || showUrlBar || showGuide || showSkillsPalette || showBaseSkillsModal || showSkillParamsModal || showSkillEditorModal || showDiagnosticsModal) return
+      // Use the unified anyOverlayOpenRef to include all overlays including folder upload and category manager
+      if (anyOverlayOpenRef.current) return
       const bounds = containerBounds()
       if (bounds && bounds.width > 0 && bounds.height > 0) {
         const payload = JSON.stringify(bounds)

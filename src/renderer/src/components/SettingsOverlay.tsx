@@ -47,6 +47,7 @@ import { ShortcutsMatrix } from './ShortcutsMatrix'
 import { SkillsSettingsSection } from './SkillsSettingsSection'
 import { WorkspaceSettingsSection } from './WorkspaceSettingsSection'
 import { DiagnosticsSettingsSection } from './DiagnosticsSettingsSection'
+import { UpdateSettings } from './UpdateSettings'
 import { StyleStudioCanvas } from './StyleStudioCanvas'
 import { ProviderFeaturesSection } from './ProviderFeaturesSection'
 import { generateAiThemingPrompt } from '../lib/promptGenerator'
@@ -1629,6 +1630,8 @@ export default function SettingsOverlay({
               className="flex flex-col gap-5 max-w-4xl mx-auto w-full h-full text-sm p-4 sm:p-6 overflow-y-auto custom-scrollbar"
               style={{ color: 'var(--text)' }}
             >
+              <UpdateSettings />
+
               <SectionTitle badge="Display Scale">
                 <IconSliders size={13} style={{ color: 'var(--accent)' }} />
                 <span>Global Zoom Levels</span>

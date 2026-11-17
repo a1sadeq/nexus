@@ -115,6 +115,44 @@ let lastDialogTimestamp = 0
 const DIALOG_COOLDOWN_MS = 600
 
 /**
+ * Classifies a scanned file into suggested-removal categories.
+ * Size alone never triggers automatic deselection — large user-authored
+ * source files remain selected; only explicit noise/sensitive patterns do.
+ */
+export function classifyFileForUpload(
+  name: string,
+  ext: string
+): { isSuggestedRemoval: boolean; removalReason?: string } {
+  const lowerName = name.toLowerCase()
+
+  // Sensitive secrets – always flag but UI decides default selection
+  if (lowerName.startsWith('.env')) {
+    return { isSuggestedRemoval: true, removalReason: 'Sensitive / Secrets file' }
+  }
+
+  // Obvious bloat / generated artifacts
+  if (SUGGESTED_REMOVAL_FILENAMES.has(lowerName)) {
+    return { isSuggestedRemoval: true, removalReason: 'Lockfile (large / redundant)' }
+  }
+  if (lowerName.endsWith('.min.js') || lowerName.endsWith('.min.css')) {
+    return { isSuggestedRemoval: true, removalReason: 'Minified asset' }
+  }
+  if (lowerName.endsWith('.map')) {
+    return { isSuggestedRemoval: true, removalReason: 'Source map' }
+  }
+  if (lowerName.endsWith('.log')) {
+    return { isSuggestedRemoval: true, removalReason: 'Log file' }
+  }
+  if (SUGGESTED_REMOVAL_EXTENSIONS.has(ext)) {
+    return { isSuggestedRemoval: true, removalReason: 'Data dump / temporary' }
+  }
+
+  // Size is informational only – never auto-deselect large source files
+  return { isSuggestedRemoval: false }
+}
+
+
+/**
  * Recursively scans a selected folder for text files with a 10,000 file ceiling,
  * prioritizing key source folders and pruning low-priority bloat when nearing capacity.
  */
@@ -180,41 +218,15 @@ export function scanFolder(folderPath: string): FolderScanResult {
         if (buffer.indexOf(0) !== -1 && buffer.indexOf(0) < bytesRead) continue
 
         const relativePath = path.relative(folderPath, fullPath)
-        const lowerName = entry.name.toLowerCase()
-
-        let isSuggestedRemoval = false
-        let removalReason: string | undefined
-
-        if (SUGGESTED_REMOVAL_FILENAMES.has(lowerName)) {
-          isSuggestedRemoval = true
-          removalReason = 'Lockfile (large / redundant)'
-        } else if (lowerName.startsWith('.env')) {
-          isSuggestedRemoval = true
-          removalReason = 'Sensitive / Secrets file'
-        } else if (lowerName.endsWith('.min.js') || lowerName.endsWith('.min.css')) {
-          isSuggestedRemoval = true
-          removalReason = 'Minified asset'
-        } else if (lowerName.endsWith('.map')) {
-          isSuggestedRemoval = true
-          removalReason = 'Source map'
-        } else if (lowerName.endsWith('.log')) {
-          isSuggestedRemoval = true
-          removalReason = 'Log file'
-        } else if (stat.size > 250 * 1024) {
-          isSuggestedRemoval = true
-          removalReason = `Large file (${Math.round(stat.size / 1024)} KB)`
-        } else if (SUGGESTED_REMOVAL_EXTENSIONS.has(ext)) {
-          isSuggestedRemoval = true
-          removalReason = 'Data dump / temporary'
-        }
+        const classification = classifyFileForUpload(entry.name, ext)
 
         files.push({
           path: fullPath,
           relativePath,
           size: stat.size,
           extension: ext || 'no-ext',
-          isSuggestedRemoval,
-          removalReason
+          isSuggestedRemoval: classification.isSuggestedRemoval,
+          removalReason: classification.removalReason
         })
         totalBytes += stat.size
       } catch {
@@ -341,16 +353,8 @@ export async function scanFolderAsync(folderPath: string): Promise<FolderScanRes
         const {bytesRead}=await handle.read(buffer,0,1024,0)
         await handle.close()
         if(buffer.subarray(0,bytesRead).includes(0))continue
-        const lowerName=entry.name.toLowerCase()
-        let removalReason: string|undefined
-        if(SUGGESTED_REMOVAL_FILENAMES.has(lowerName))removalReason='Lockfile (large / redundant)'
-        else if(lowerName.startsWith('.env'))removalReason='Sensitive / Secrets file'
-        else if(lowerName.endsWith('.min.js')||lowerName.endsWith('.min.css'))removalReason='Minified asset'
-        else if(lowerName.endsWith('.map'))removalReason='Source map'
-        else if(lowerName.endsWith('.log'))removalReason='Log file'
-        else if(stat.size>250*1024)removalReason=`Large file (${Math.round(stat.size/1024)} KB)`
-        else if(SUGGESTED_REMOVAL_EXTENSIONS.has(ext))removalReason='Data dump / temporary'
-        files.push({path:fullPath,relativePath:path.relative(folderPath,fullPath),size:stat.size,extension:ext||'no-ext',isSuggestedRemoval:Boolean(removalReason),removalReason})
+        const classification=classifyFileForUpload(entry.name,ext)
+        files.push({path:fullPath,relativePath:path.relative(folderPath,fullPath),size:stat.size,extension:ext||'no-ext',isSuggestedRemoval:classification.isSuggestedRemoval,removalReason:classification.removalReason})
         totalBytes+=stat.size
       } catch { /* Ignore disappearing/unreadable entries. */ }
       if(++operations%40===0)await yieldToMain()

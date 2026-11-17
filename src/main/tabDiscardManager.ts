@@ -67,6 +67,7 @@ export class TabDiscardManager {
   private backgroundSince = new Map<string, number | null>()
   private viewGenerations = new Map<string, number>()
   private activityRevisions = new Map<string, number>()
+  private enteredIdleAt = new Map<string, number>()
   private pendingTickets = new Map<string, EvictionTicket>()
   private evictedTabStates = new Map<string, EvictedTabState>()
 
@@ -79,6 +80,7 @@ export class TabDiscardManager {
   private readonly getUserDataDir: () => string
   private readonly isPinned: (tabId: string) => boolean
   private readonly isBusy: (tabId: string) => boolean
+  private readonly hasCustomIsBusy: boolean
   private readonly onTeardown: (tabId: string, view: DiscardableView, contents: DiscardableWebContents) => void | Promise<void>
   private readonly snapshotTimeoutMs: number
   private readonly retentionGraceMs: number
@@ -96,6 +98,7 @@ export class TabDiscardManager {
   constructor(options: TabDiscardManagerOptions) {
     this.getUserDataDir = options.getUserDataDir
     this.isPinned = options.isPinned || (() => false)
+    this.hasCustomIsBusy = typeof options.isBusy === 'function'
     this.isBusy = options.isBusy || (() => false)
     this.onTeardown = options.onTeardown || ((_id, _view, contents) => closeWebContents(contents))
     this.idleCheckIntervalMs = Math.max(1000, options.idleCheckIntervalMs ?? 30000)
@@ -261,8 +264,12 @@ export class TabDiscardManager {
       const isAct = tabId === this.activeViewId
       const isLoad = this.loadingOrUnavailable(tabId, view)
       const isPin = this.isPinned(tabId)
+      const isBusy = this.isBusy(tabId)
       const isNoRestore = !this.hasUsableRestoreUrl(tabId, view)
-      if (isAct || isLoad || isPin || isNoRestore) {
+      const isClosing = this.closing.has(tabId)
+      const isPending = this.pendingTickets.has(tabId)
+      const isRetry = (this.retryAfter.get(tabId) ?? 0) > this.clock()
+      if (isAct || isLoad || isPin || isBusy || isNoRestore || isClosing || isPending || isRetry) {
         protectedCount++
       } else {
         eligibleCount++
@@ -275,7 +282,7 @@ export class TabDiscardManager {
     if (this.policy.maxActiveTabs > 0 && residentCount > this.policy.maxActiveTabs) {
       if (eligibleCount === 0) {
         effectiveCapExceeded = true
-        exceededReason = 'All resident background tabs are protected (pinned, loading, active, or missing restore URL)'
+        exceededReason = 'All resident background tabs are protected (pinned, loading, active, non-idle/busy, or missing restore URL)'
       }
     }
 
@@ -385,6 +392,7 @@ export class TabDiscardManager {
       this.unavailable.delete(tabId)
       this.lastActivatedAt.delete(tabId)
       this.backgroundSince.delete(tabId)
+      this.enteredIdleAt.delete(tabId)
       this.viewGenerations.delete(tabId)
       this.activityRevisions.delete(tabId)
       this.retryAfter.delete(tabId)
@@ -558,6 +566,25 @@ export class TabDiscardManager {
     }
   }
 
+  public onAiStatusChanged(tabId: string, isIdle: boolean): void {
+    if (isIdle) {
+      if (!this.enteredIdleAt.has(tabId)) {
+        this.enteredIdleAt.set(tabId, this.clock())
+      }
+      this.reconcileCapacity()
+      this.notifyStatusChange()
+    } else {
+      this.enteredIdleAt.delete(tabId)
+      this.pendingTickets.delete(tabId)
+      this.activityRevisions.set(tabId, (this.activityRevisions.get(tabId) || 0) + 1)
+      this.notifyStatusChange()
+    }
+  }
+
+  public getEnteredIdleAt(tabId: string): number | undefined {
+    return this.enteredIdleAt.get(tabId)
+  }
+
   public checkIdleTimeout(): void {
     if (this.policy.tabDiscardMinutes <= 0) return
 
@@ -570,7 +597,13 @@ export class TabDiscardManager {
       const bgSince = this.backgroundSince.get(tabId)
       if (bgSince === null || bgSince === undefined) continue
 
-      const idleDuration = now - bgSince
+      const enteredIdle = this.enteredIdleAt.get(tabId)
+      if (this.hasCustomIsBusy && enteredIdle === undefined) {
+        continue
+      }
+
+      const idleReference = enteredIdle !== undefined ? Math.max(bgSince, enteredIdle) : bgSince
+      const idleDuration = now - idleReference
       if (idleDuration >= thresholdMs) {
         this.requestEviction(tabId, 'idle-timeout')
       }
@@ -655,12 +688,22 @@ export class TabDiscardManager {
       return false
     }
 
-    // Loading/pinning, unavailable wrapper, or unusable URL may change during the snapshot.
+    // Loading/pinning, unavailable wrapper, non-idle/busy, or unusable URL may change during the snapshot.
     const bgSince = this.backgroundSince.get(tabId)
-    if (this.isPinned(tabId) || this.loadingOrUnavailable(tabId, view) ||
-        !this.hasUsableRestoreUrl(tabId, view) ||
-        (ticket.reason === 'idle-timeout' && (this.policy.tabDiscardMinutes <= 0 ||
-         bgSince == null || this.clock() - bgSince < this.policy.tabDiscardMinutes * 60000))) {
+    const enteredIdle = this.enteredIdleAt.get(tabId)
+    const idleReference = enteredIdle !== undefined && bgSince != null ? Math.max(bgSince, enteredIdle) : bgSince
+    if (
+      this.isPinned(tabId) ||
+      this.isBusy(tabId) ||
+      this.loadingOrUnavailable(tabId, view) ||
+      !this.hasUsableRestoreUrl(tabId, view) ||
+      (ticket.reason === 'idle-timeout' &&
+        (this.policy.tabDiscardMinutes <= 0 ||
+          bgSince == null ||
+          (this.hasCustomIsBusy && enteredIdle === undefined) ||
+          idleReference == null ||
+          this.clock() - idleReference < this.policy.tabDiscardMinutes * 60000))
+    ) {
       this.pendingTickets.delete(tabId)
       return false
     }
@@ -693,6 +736,7 @@ export class TabDiscardManager {
       this.unavailable.delete(tabId)
       this.lastActivatedAt.delete(tabId)
       this.backgroundSince.delete(tabId)
+      this.enteredIdleAt.delete(tabId)
       this.retryAfter.delete(tabId)
       this.lastEviction = { tabId, reason: ticket.reason, timestamp: this.clock() }
       this.reconcileCapacity()

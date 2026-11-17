@@ -69,5 +69,19 @@ export const AiStatusBadge: React.FC<Props> = ({
     )
   }
 
+  // 5. Error: Rose color
+  if (status === 'error') {
+    return (
+      <span
+        role="status"
+        aria-label="AI encountered an error"
+        className={`relative flex h-2.5 w-2.5 shrink-0 transition-all duration-300 ${className}`}
+        title="Error"
+      >
+        <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-rose-500 shadow-[0_0_8px_rgba(244,63,94,0.9)] border border-rose-300/50" />
+      </span>
+    )
+  }
+
   return null
 }
