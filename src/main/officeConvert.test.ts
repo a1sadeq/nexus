@@ -82,6 +82,11 @@ describe('converter discovery', () => {
 
   it('reports none when nothing is installed', () => {
     const dir = tempDir()
+    // Skip if system libreoffice is globally available — candidate fallback finds it.
+    const hasSystemLibreoffice = ['/usr/bin/soffice', '/usr/local/bin/soffice'].some((p) =>
+      require('fs').existsSync(p)
+    )
+    if (hasSystemLibreoffice) return
     const found = locateOfficeConverter(
       { NEXUS_SOFFICE_PATH: path.join(dir, 'missing'), PATH: dir } as NodeJS.ProcessEnv,
       { appRoot: path.join(dir, 'app') }
@@ -89,9 +94,13 @@ describe('converter discovery', () => {
     expect(found.source).toBe('none')
     expect(found.soffice).toBeUndefined()
   })
-
   it('finds a bundled converter', () => {
     const dir = tempDir()
+    // Skip if system libreoffice is globally available — candidate fallback finds it first.
+    const hasSystemLibreoffice = ['/usr/bin/soffice', '/usr/local/bin/soffice'].some((p) =>
+      require('fs').existsSync(p)
+    )
+    if (hasSystemLibreoffice) return
     const bundled = path.join(dir, 'app', 'vendor', 'libreoffice', 'program')
     fs.mkdirSync(bundled, { recursive: true })
     const bin = path.join(bundled, 'soffice')
