@@ -1,10 +1,22 @@
-import React, { useState, useMemo, useEffect, useCallback } from 'react'
+import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react'
 import type {
   FolderScanResult,
   BundleChunk,
   PartitionResult,
   UploadChunkProgress
 } from '../../../shared/folderUpload'
+import {
+  classifyUploadKind,
+  deliveryHint,
+  isTextKind,
+  kindLabel,
+  requiresOriginalAttachment,
+  type UploadFileKind
+} from '../../../shared/uploadFileKind'
+import { VideoPrepareDialog } from './VideoPrepareDialog'
+import { OfficePrepareDialog } from './OfficePrepareDialog'
+import { OfficeSelectionDialog } from './OfficeSelectionDialog'
+import { officeKindFromExtension } from '../../../shared/officeFormat'
 import {
   selectMatchingFiles,
   deselectMatchingFiles,
@@ -16,6 +28,37 @@ import {
   getExpandedDirsForSearch,
   getAllDirectoryPaths
 } from '../lib/folderUploadHelpers'
+
+/** Files are delivered by kind: text becomes bundle parts, everything else is attached as-is. */
+const kindOf = (file: { kind?: UploadFileKind; extension: string }): UploadFileKind =>
+  file.kind ?? classifyUploadKind(file.extension)
+
+/**
+ * Default selection for a scan result.
+ * Text files are what gets bundled, so they win by default; binaries are listed and
+ * selectable but not uploaded unless the user asks. A folder with no text at all
+ * (a screenshot drop, say) still needs to be usable, and secrets are never auto-picked.
+ */
+const computeInitialSelection = (files: FolderScanResult['files']): Set<string> => {
+  const isSensitive = (file: FolderScanResult['files'][number]): boolean =>
+    Boolean(file.removalReason?.includes('Sensitive'))
+  const initial = new Set<string>()
+  for (const f of files) {
+    if (!f.isSuggestedRemoval && isTextKind(kindOf(f))) initial.add(f.path)
+  }
+  if (initial.size === 0) {
+    for (const f of files) {
+      if (!f.isSuggestedRemoval && !isSensitive(f)) initial.add(f.path)
+    }
+  }
+  if (initial.size === 0) {
+    for (const f of files) {
+      if (isSensitive(f)) continue
+      initial.add(f.path)
+    }
+  }
+  return initial
+}
 
 export interface FolderUploadModalProps {
   isOpen: boolean
@@ -91,12 +134,26 @@ const TreeNodeRow: React.FC<TreeNodeRowProps> = ({
             }
           >
             {isAll && (
-              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
+              <svg
+                width="10"
+                height="10"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="3"
+              >
                 <polyline points="20 6 9 17 4 12" />
               </svg>
             )}
             {isSome && (
-              <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="4">
+              <svg
+                width="8"
+                height="8"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="4"
+              >
                 <line x1="5" y1="12" x2="19" y2="12" />
               </svg>
             )}
@@ -125,7 +182,9 @@ const TreeNodeRow: React.FC<TreeNodeRowProps> = ({
             </svg>
 
             {/* Folder Icon with depth aesthetic */}
-            <span className={`text-xs shrink-0 ${isDepth1 ? 'text-cyan-400' : 'text-indigo-400/90'}`}>
+            <span
+              className={`text-xs shrink-0 ${isDepth1 ? 'text-cyan-400' : 'text-indigo-400/90'}`}
+            >
               📁
             </span>
 
@@ -176,7 +235,9 @@ const TreeNodeRow: React.FC<TreeNodeRowProps> = ({
                     onChange={() => onToggleFile(f.path)}
                     className="cursor-pointer rounded accent-indigo-500 shrink-0"
                   />
-                  <span className={`truncate font-mono ${isSelected ? 'text-gray-200 font-medium' : 'text-gray-400'}`}>
+                  <span
+                    className={`truncate font-mono ${isSelected ? 'text-gray-200 font-medium' : 'text-gray-400'}`}
+                  >
                     {fileName}
                   </span>
                 </div>
@@ -187,9 +248,15 @@ const TreeNodeRow: React.FC<TreeNodeRowProps> = ({
                       className="px-1.5 py-0.5 rounded text-[10px] font-sans font-medium bg-amber-500/15 border border-amber-500/30 text-amber-300"
                       title={f.removalReason || ''}
                     >
-                      {(f as any).variantKind
-                        ? `Variant`
-                        : f.removalReason || 'Suggested removal'}
+                      {(f as any).variantKind ? `Variant` : f.removalReason || 'Suggested removal'}
+                    </span>
+                  )}
+                  {requiresOriginalAttachment(kindOf(f)) && (
+                    <span
+                      className="px-1.5 py-0.5 rounded text-[10px] font-sans bg-fuchsia-500/15 border border-fuchsia-500/30 text-fuchsia-200"
+                      title={deliveryHint(kindOf(f))}
+                    >
+                      {kindLabel(kindOf(f))}
                     </span>
                   )}
                   <span className="px-1.5 py-0.2 rounded text-[10px] font-mono bg-white/[0.04] text-gray-400 border border-white/5">
@@ -221,14 +288,20 @@ const TreeNodeRow: React.FC<TreeNodeRowProps> = ({
   )
 }
 
-export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
-  isOpen,
-  data,
-  onClose,
-  onConfirm
-}) => {
-  if (!isOpen || !data) return null
+// Keep hooks in a separately mounted component: this modal is rendered even while
+// closed, so an early return before hooks in the same component changes hook order.
+export const FolderUploadModal: React.FC<FolderUploadModalProps> = (props) => {
+  if (!props.isOpen || !props.data) return null
+  return (
+    <OpenFolderUploadModal data={props.data} onClose={props.onClose} onConfirm={props.onConfirm} />
+  )
+}
 
+const OpenFolderUploadModal: React.FC<{
+  data: FolderScanResult
+  onClose: () => void
+  onConfirm: (selectedPaths: string[]) => void
+}> = ({ data, onClose, onConfirm }) => {
   const allFiles = data.files
   const suggestedCount = useMemo(
     () => allFiles.filter((f) => f.isSuggestedRemoval).length,
@@ -243,27 +316,30 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
   // Initialize selection: select all non-sensitive files by default.
   // When all files are sensitive/suggested, do NOT fall back to selecting
   // everything — only include files without a sensitive reason.
-  const [selectedPaths, setSelectedPaths] = useState<Set<string>>(() => {
-    const initial = new Set<string>()
-    for (const f of allFiles) {
-      if (!f.isSuggestedRemoval) {
-        initial.add(f.path)
-      }
-    }
-    // Only fall back to selecting all NON-sensitive files, never secrets
-    if (initial.size === 0 && allFiles.length > 0) {
-      for (const f of allFiles) {
-        // Include large files even if they have a generic removal reason
-        // but NEVER auto-select .env or secret files
-        const reason = (f as any).removalReason
-        if (reason && reason.includes('Sensitive')) continue
-        initial.add(f.path)
-      }
-    }
-    return initial
-  })
+  const [selectedPaths, setSelectedPaths] = useState<Set<string>>(() =>
+    computeInitialSelection(allFiles)
+  )
 
   const [search, setSearch] = useState('')
+  // Video preparation (plan 01): one dialog per chosen video, opened on demand only.
+  const [videoDialogPath, setVideoDialogPath] = useState<string | null>(null)
+  const [videoTarget, setVideoTarget] = useState<{ provider: string | null; model: string | null }>({
+    provider: null,
+    model: null
+  })
+  const selectedVideoPaths = useMemo(
+    () => allFiles.filter((f) => selectedPaths.has(f.path) && kindOf(f) === 'video').map((f) => f.path),
+    [allFiles, selectedPaths]
+  )
+  // Office preparation (plan 02): Word/Excel/PowerPoint are read locally, never bundled as text.
+  const [officeDialogPaths, setOfficeDialogPaths] = useState<string[]>([])
+  const selectedOfficePaths = useMemo(
+    () =>
+      allFiles
+        .filter((f) => selectedPaths.has(f.path) && officeKindFromExtension(f.extension) !== null)
+        .map((f) => f.path),
+    [allFiles, selectedPaths]
+  )
   const [excludeSuggested, setExcludeSuggested] = useState(suggestedCount > 0)
 
   // Build full tree and search tree
@@ -310,40 +386,31 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
   const [isPreviewOpen, setIsPreviewOpen] = useState(false)
   const [previewLoading, setPreviewLoading] = useState(false)
   const [previewContent, setPreviewContent] = useState<string>('')
-  const [previewMeta, setPreviewMeta] = useState<{ fileCount: number; byteSize: number } | null>(null)
+  const [previewMeta, setPreviewMeta] = useState<{ fileCount: number; byteSize: number } | null>(
+    null
+  )
   const [copySuccess, setCopySuccess] = useState(false)
   const [saveStatus, setSaveStatus] = useState<string | null>(null)
   const [savedFilePath, setSavedFilePath] = useState<string | null>(null)
   const [pathCopied, setPathCopied] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
 
+  // Tracks in-flight partition requests so stale results can't overwrite newer ones.
+  const partitionRequestIdRef = useRef(0)
+
   // Chunk Partition Drawer state
   const [isChunksDrawerOpen, setIsChunksDrawerOpen] = useState(false)
   const [maxChunkMb, setMaxChunkMb] = useState<number>(8)
-  const [enableCompression, setEnableCompression] = useState<boolean>(true)
+  const [enableCompression, setEnableCompression] = useState<boolean>(false)
   const [partitionResult, setPartitionResult] = useState<PartitionResult | null>(null)
   const [isPartitioning, setIsPartitioning] = useState(false)
   const [uploadProgress, setUploadProgress] = useState<UploadChunkProgress | null>(null)
-  const [isUploadingSequentially, setIsUploadingSequentially] = useState(false)
+  const [isAttachingAll, setIsAttachingAll] = useState(false)
   const [expandedChunkIndices, setExpandedChunkIndices] = useState<Set<number>>(new Set())
 
   // Sync state if data changes
   useEffect(() => {
-    const initial = new Set<string>()
-    for (const f of allFiles) {
-      if (!f.isSuggestedRemoval) {
-        initial.add(f.path)
-      }
-    }
-    // Only fall back to selecting non-sensitive files, never secrets
-    if (initial.size === 0 && allFiles.length > 0) {
-      for (const f of allFiles) {
-        const reason = (f as any).removalReason
-        if (reason && reason.includes('Sensitive')) continue
-        initial.add(f.path)
-      }
-    }
-    setSelectedPaths(initial)
+    setSelectedPaths(computeInitialSelection(allFiles))
     setExcludeSuggested(suggestedCount > 0)
     setSearch('')
     setCollapsedDirs(getDefaultCollapsedDirs(fullTree, 2))
@@ -360,7 +427,7 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
       (_e: any, progress: UploadChunkProgress) => {
         setUploadProgress(progress)
         if (progress.status === 'completed' && progress.currentChunk === progress.totalChunks) {
-          setIsUploadingSequentially(false)
+          setIsAttachingAll(false)
         }
       }
     )
@@ -390,10 +457,7 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
 
   // Aggregate files by extension
   const extensionStats = useMemo(() => {
-    const map = new Map<
-      string,
-      { ext: string; count: number; bytes: number; paths: string[] }
-    >()
+    const map = new Map<string, { ext: string; count: number; bytes: number; paths: string[] }>()
     for (const f of allFiles) {
       const ext = f.extension.toLowerCase() || 'no-ext'
       const existing = map.get(ext) || { ext, count: 0, bytes: 0, paths: [] }
@@ -406,21 +470,18 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
   }, [allFiles])
 
   // Toggle all files of a specific extension
-  const toggleExtension = useCallback(
-    (extPaths: string[]) => {
-      setSelectedPaths((prev) => {
-        const next = new Set(prev)
-        const allSelected = extPaths.every((p) => next.has(p))
-        if (allSelected) {
-          for (const p of extPaths) next.delete(p)
-        } else {
-          for (const p of extPaths) next.add(p)
-        }
-        return next
-      })
-    },
-    []
-  )
+  const toggleExtension = useCallback((extPaths: string[]) => {
+    setSelectedPaths((prev) => {
+      const next = new Set(prev)
+      const allSelected = extPaths.every((p) => next.has(p))
+      if (allSelected) {
+        for (const p of extPaths) next.delete(p)
+      } else {
+        for (const p of extPaths) next.add(p)
+      }
+      return next
+    })
+  }, [])
 
   // Toggle suggested removal exclusion
   const handleToggleExcludeSuggested = useCallback(() => {
@@ -504,13 +565,15 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
   const selectedStats = useMemo(() => {
     let count = 0
     let bytes = 0
+    let originals = 0
     for (const f of allFiles) {
       if (selectedPaths.has(f.path)) {
         count++
         bytes += f.size
+        if (requiresOriginalAttachment(kindOf(f))) originals++
       }
     }
-    return { count, bytes }
+    return { count, bytes, originals, text: count - originals }
   }, [allFiles, selectedPaths])
 
   const handleConfirm = (): void => {
@@ -518,61 +581,74 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
     onConfirm(Array.from(selectedPaths))
   }
 
-  // Pre-calculate partition whenever drawer opens or settings change
-  const fetchPartitions = useCallback(
-    async (chunkMb: number, compression: boolean) => {
-      if (selectedStats.count === 0) return
-      setIsPartitioning(true)
+  // The displayed parts always correspond to the current selection and settings.
+  // Cleanup invalidates both successful and failed older requests.
+  useEffect(() => {
+    const requestId = ++partitionRequestIdRef.current
+    // Reset the old externally computed result when its inputs change.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setPartitionResult(null)
+    setIsPartitioning(false)
+    if (!isChunksDrawerOpen || selectedPaths.size === 0) return
+
+    setIsPartitioning(true)
+    const run = async (): Promise<void> => {
       try {
         // @ts-ignore
         const result = await window.electron?.ipcRenderer?.invoke('partition_folder_bundle', {
           folderPath: data.folderPath,
           selectedPaths: Array.from(selectedPaths),
-          maxChunkBytes: chunkMb * 1024 * 1024,
-          enableCompression: compression
+          maxChunkBytes: maxChunkMb * 1024 * 1024,
+          enableCompression
         })
-        if (result) {
-          setPartitionResult(result)
-        }
+        if (requestId !== partitionRequestIdRef.current) return
+        setPartitionResult(result || null)
       } catch (err) {
+        if (requestId !== partitionRequestIdRef.current) return
         console.error('Failed to partition folder bundle:', err)
+        setPartitionResult(null)
+        setSaveStatus(
+          'Cannot prepare selected files as text. Remove binary or non-UTF-8 files and try again.'
+        )
       } finally {
-        setIsPartitioning(false)
+        if (requestId === partitionRequestIdRef.current) setIsPartitioning(false)
       }
-    },
-    [data.folderPath, selectedPaths, selectedStats.count]
-  )
+    }
+    void run()
+    return () => {
+      if (partitionRequestIdRef.current === requestId) partitionRequestIdRef.current++
+    }
+  }, [data.folderPath, selectedPaths, maxChunkMb, enableCompression, isChunksDrawerOpen])
 
-  const handleOpenChunksDrawer = (): void => {
-    setIsChunksDrawerOpen(true)
-    fetchPartitions(maxChunkMb, enableCompression)
-  }
+  const handleOpenChunksDrawer = (): void => setIsChunksDrawerOpen(true)
+  const handleChangeMaxChunk = (mb: number): void => setMaxChunkMb(mb)
+  const handleToggleCompression = (): void => setEnableCompression((current) => !current)
 
-  const handleChangeMaxChunk = (mb: number): void => {
-    setMaxChunkMb(mb)
-    fetchPartitions(mb, enableCompression)
-  }
-
-  const handleToggleCompression = (): void => {
-    const nextVal = !enableCompression
-    setEnableCompression(nextVal)
-    fetchPartitions(maxChunkMb, nextVal)
-  }
-
-  // Upload all chunks sequentially
-  const handleUploadAllSequentially = async (): Promise<void> => {
-    if (!partitionResult || partitionResult.chunks.length === 0 || isUploadingSequentially) return
-    setIsUploadingSequentially(true)
+  // Attach every part of the selection to the current message (nothing is sent).
+  const handleAttachAllParts = async (): Promise<void> => {
+    if (!partitionResult || partitionResult.chunks.length === 0 || isAttachingAll) return
+    setIsAttachingAll(true)
+    setSaveStatus(null)
     try {
-      // @ts-ignore
-      await window.electron?.ipcRenderer?.invoke('upload_chunks_sequentially', {
+      // @ts-ignore - window.electron is injected by the preload bridge
+      const result = await window.electron?.ipcRenderer?.invoke('attach_all_chunks', {
         folderName: data.folderName,
-        chunks: partitionResult.chunks
+        chunks: partitionResult.chunks,
+        originalPaths: (partitionResult.originalAttachments ?? []).map((item) => item.path)
       })
+      if (!result?.success) {
+        setSaveStatus(result?.error || result?.message || 'Could not attach the parts.')
+        setTimeout(() => setSaveStatus(null), 5000)
+        return
+      }
+      setSaveStatus(result.message)
+      setTimeout(() => setSaveStatus(null), 6000)
     } catch (err) {
-      console.error('Sequential upload failed:', err)
+      console.error('Attach all parts failed:', err)
+      setSaveStatus('Could not attach the parts. Use Download to attach them manually.')
+      setTimeout(() => setSaveStatus(null), 5000)
     } finally {
-      setIsUploadingSequentially(false)
+      setIsAttachingAll(false)
     }
   }
 
@@ -580,14 +656,16 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
   const handleUploadSingleChunk = async (chunk: BundleChunk): Promise<void> => {
     try {
       // @ts-ignore
-      await window.electron?.ipcRenderer?.invoke('upload_single_chunk', {
+      const result = await window.electron?.ipcRenderer?.invoke('upload_single_chunk', {
         folderName: data.folderName,
         chunk
       })
-      setSaveStatus(`Uploaded Part ${chunk.index}`)
+      if (!result?.success) throw new Error(result?.error || 'Attachment dispatch failed')
+      setSaveStatus(`Part ${chunk.index} dispatched; check the provider for acceptance`)
       setTimeout(() => setSaveStatus(null), 3000)
     } catch (err) {
       console.error('Upload single chunk failed:', err)
+      setSaveStatus('Could not attach the part. Check the provider and retry.')
     }
   }
 
@@ -753,6 +831,19 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
                   {data.folderName}
                 </span>
 
+                {/* Directories not scanned: shown, never silently dropped (plan 03) */}
+                {data.skippedDirs && data.skippedDirs.length > 0 && (
+                  <span
+                    className="px-2 py-0.5 rounded-full text-[11px] font-mono bg-slate-500/15 border border-slate-500/35 text-slate-300 flex items-center gap-1 cursor-help"
+                    title={`Not scanned (${data.skippedDirs.length}):\n${data.skippedDirs
+                      .slice(0, 20)
+                      .map((d) => `${d.relativePath} — ${d.reason}`)
+                      .join('\n')}${data.skippedDirs.length > 20 ? '\n…' : ''}`}
+                  >
+                    <span>🚫 Skipped ({data.skippedDirs.length} dirs)</span>
+                  </span>
+                )}
+
                 {/* Smart Pruned / Truncated indicator */}
                 {data.prunedDirs && data.prunedDirs.length > 0 && (
                   <span
@@ -853,7 +944,14 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
                   className="px-2.5 py-1.5 rounded-lg text-xs font-medium text-cyan-300 hover:text-white bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 transition-colors disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer flex items-center gap-1.5"
                   title={`Select only the ${filteredFiles.length} files matching your search`}
                 >
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                  <svg
+                    width="12"
+                    height="12"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2.5"
+                  >
                     <polyline points="20 6 9 17 4 12" />
                   </svg>
                   <span>Select Matching ({filteredFiles.length})</span>
@@ -865,7 +963,14 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
                   className="px-2.5 py-1.5 rounded-lg text-xs font-medium text-gray-300 hover:text-white bg-white/[0.04] hover:bg-white/[0.08] border border-white/10 transition-colors disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer flex items-center gap-1.5"
                   title={`Deselect only the ${filteredFiles.length} files matching your search`}
                 >
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                  <svg
+                    width="12"
+                    height="12"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2.5"
+                  >
                     <line x1="18" y1="6" x2="6" y2="18" />
                     <line x1="6" y1="6" x2="18" y2="18" />
                   </svg>
@@ -1017,7 +1122,9 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
                             onChange={() => toggleFile(f.path)}
                             className="cursor-pointer rounded accent-indigo-500 shrink-0"
                           />
-                          <span className={`truncate font-mono ${isSelected ? 'text-gray-200 font-medium' : 'text-gray-400'}`}>
+                          <span
+                            className={`truncate font-mono ${isSelected ? 'text-gray-200 font-medium' : 'text-gray-400'}`}
+                          >
                             {f.relativePath}
                           </span>
                         </div>
@@ -1028,6 +1135,14 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
                               title={f.removalReason}
                             >
                               {f.removalReason || 'Suggested removal'}
+                            </span>
+                          )}
+                          {requiresOriginalAttachment(kindOf(f)) && (
+                            <span
+                              className="px-1.5 py-0.5 rounded text-[10px] font-sans bg-fuchsia-500/15 border border-fuchsia-500/30 text-fuchsia-200"
+                              title={deliveryHint(kindOf(f))}
+                            >
+                              {kindLabel(kindOf(f))}
                             </span>
                           )}
                           <span className="px-1.5 py-0.2 rounded text-[10px] font-mono bg-white/[0.04] text-gray-400 border border-white/5">
@@ -1066,12 +1181,54 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
             <span className="text-sm font-semibold text-white">
               {selectedStats.count} of {data.totalFiles} files
             </span>
-            <span className="text-xs text-gray-400">
-              ({formatBytes(selectedStats.bytes)})
-            </span>
+            <span className="text-xs text-gray-400">({formatBytes(selectedStats.bytes)})</span>
+            {selectedStats.originals > 0 && (
+              <span
+                className="text-[11px] font-mono text-fuchsia-300/90"
+                title="Non-text selections are attached as the original file, not converted to text."
+              >
+                · {selectedStats.originals} attached as original
+                {selectedStats.originals === 1 ? '' : 's'}
+              </span>
+            )}
+            {selectedVideoPaths.length > 0 && (
+              <button
+                type="button"
+                onClick={async () => {
+                  // Bind the dialog to the provider the active tab is actually on.
+                  try {
+                    // @ts-ignore - injected by the preload bridge
+                    const target = await window.electron?.ipcRenderer?.invoke('get_active_ai_target')
+                    if (target?.provider) {
+                      setVideoTarget({ provider: target.provider, model: target.model ?? null })
+                    }
+                  } catch {
+                    setVideoTarget({ provider: null, model: null })
+                  }
+                  setVideoDialogPath(selectedVideoPaths[0])
+                }}
+                className="ml-1 px-2.5 py-1 rounded-lg text-[11px] font-medium bg-fuchsia-500/15 border border-fuchsia-500/35 text-fuchsia-200 hover:bg-fuchsia-500/25 transition-colors cursor-pointer"
+                title="Extract timestamped stills locally so the AI can look at this video. Nothing is uploaded until you press Send."
+              >
+                Prepare video{selectedVideoPaths.length > 1 ? ' (first selected)' : ''}
+              </button>
+            )}
+            {selectedOfficePaths.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setOfficeDialogPaths(selectedOfficePaths)}
+                className="ml-1 px-2.5 py-1 rounded-lg text-[11px] font-medium bg-cyan-500/15 border border-cyan-500/35 text-cyan-200 hover:bg-cyan-500/25 transition-colors cursor-pointer"
+                title="Read this Word/Excel/PowerPoint file locally, see what is inside (including hidden sheets, notes and comments) and decide what to send. Nothing is uploaded until you press Send."
+              >
+                Prepare Office{selectedOfficePaths.length > 1 ? ' (first selected)' : ''}
+              </button>
+            )}
             {savedFilePath ? (
               <div className="ml-2 flex items-center gap-1.5 px-3 py-1 rounded-xl bg-cyan-950/40 border border-cyan-500/30 text-cyan-300 text-xs shadow-sm animate-in fade-in">
-                <span className="font-mono text-[11px] truncate max-w-[200px]" title={savedFilePath}>
+                <span
+                  className="font-mono text-[11px] truncate max-w-[200px]"
+                  title={savedFilePath}
+                >
                   {savedFilePath.split('/').pop()}
                 </span>
                 <button
@@ -1082,14 +1239,28 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
                 >
                   {pathCopied ? (
                     <>
-                      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
+                      <svg
+                        width="11"
+                        height="11"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="3"
+                      >
                         <polyline points="20 6 9 17 4 12" />
                       </svg>
                       <span className="text-emerald-300">Copied!</span>
                     </>
                   ) : (
                     <>
-                      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <svg
+                        width="11"
+                        height="11"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                      >
                         <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
                         <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
                       </svg>
@@ -1103,7 +1274,14 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
                   className="px-1.5 py-0.5 rounded-lg bg-white/5 hover:bg-white/10 text-gray-300 hover:text-white transition-colors cursor-pointer text-[11px]"
                   title="Reveal in file manager"
                 >
-                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <svg
+                    width="11"
+                    height="11"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                  >
                     <path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2" />
                   </svg>
                 </button>
@@ -1124,7 +1302,14 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
               className="px-3.5 py-2 rounded-xl text-xs font-medium text-purple-300 hover:text-white bg-purple-500/10 hover:bg-purple-500/20 border border-purple-500/30 transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed shadow-sm"
               title="Inspect, compress, and partition codebase chunks for AI file size limits"
             >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <svg
+                width="14"
+                height="14"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+              >
                 <rect x="2" y="3" width="20" height="14" rx="2" />
                 <line x1="8" y1="21" x2="16" y2="21" />
                 <line x1="12" y1="17" x2="12" y2="21" />
@@ -1140,7 +1325,14 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
               className="px-3.5 py-2 rounded-xl text-xs font-medium text-cyan-300 hover:text-white bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/30 transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed shadow-sm"
               title="Preview the exact formatted text bundle before uploading"
             >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <svg
+                width="14"
+                height="14"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+              >
                 <path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z" />
                 <circle cx="12" cy="12" r="3" />
               </svg>
@@ -1155,7 +1347,14 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
               className="px-3.5 py-2 rounded-xl text-xs font-medium text-amber-300 hover:text-white bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed shadow-sm"
               title="Auto-download complete codebase bundle to Nexus downloads folder and copy path to clipboard"
             >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <svg
+                width="14"
+                height="14"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+              >
                 <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
                 <polyline points="7 10 12 15 17 10" />
                 <line x1="12" y1="15" x2="12" y2="3" />
@@ -1208,7 +1407,14 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
             <div className="px-6 py-4 border-b border-purple-500/20 bg-purple-950/20 flex items-center justify-between">
               <div className="flex items-center gap-3">
                 <div className="w-9 h-9 rounded-xl bg-purple-500/20 border border-purple-500/40 flex items-center justify-center text-purple-300">
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <svg
+                    width="18"
+                    height="18"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                  >
                     <rect x="2" y="3" width="20" height="14" rx="2" />
                     <line x1="8" y1="21" x2="16" y2="21" />
                     <line x1="12" y1="17" x2="12" y2="21" />
@@ -1222,7 +1428,8 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
                     </span>
                   </h3>
                   <p className="text-xs text-gray-400 mt-0.5">
-                    Stream large codebases safely into file-limited AI chats (ChatGPT, Claude, Gemini, DeepSeek)
+                    Stream large codebases safely into file-limited AI chats (ChatGPT, Claude,
+                    Gemini, DeepSeek)
                   </p>
                 </div>
               </div>
@@ -1233,7 +1440,14 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
                 className="p-1.5 rounded-lg text-gray-400 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
                 title="Close drawer"
               >
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <svg
+                  width="18"
+                  height="18"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                >
                   <line x1="18" y1="6" x2="6" y2="18" />
                   <line x1="6" y1="6" x2="18" y2="18" />
                 </svg>
@@ -1277,6 +1491,7 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
                 <input
                   type="checkbox"
                   checked={enableCompression}
+                  onClick={(event) => event.stopPropagation()}
                   onChange={handleToggleCompression}
                   className="cursor-pointer rounded accent-cyan-500"
                 />
@@ -1287,7 +1502,9 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
               {partitionResult && (
                 <div className="flex items-center gap-2 text-xs font-mono bg-white/[0.03] px-3 py-1 rounded-xl border border-white/5">
                   <span className="text-gray-400">Total:</span>
-                  <span className="text-gray-200 font-semibold">{formatBytes(partitionResult.totalBytes)}</span>
+                  <span className="text-gray-200 font-semibold">
+                    {formatBytes(partitionResult.totalBytes)}
+                  </span>
                   {partitionResult.savedBytes > 0 && (
                     <span className="text-emerald-400 text-[11px]">
                       (-{partitionResult.reductionPercent}%)
@@ -1302,7 +1519,14 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
               {isPartitioning ? (
                 <div className="py-20 text-center text-sm text-purple-300 flex items-center justify-center gap-2">
                   <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24" fill="none">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <circle
+                      className="opacity-25"
+                      cx="12"
+                      cy="12"
+                      r="10"
+                      stroke="currentColor"
+                      strokeWidth="4"
+                    />
                     <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
                   </svg>
                   <span>Computing optimal chunks...</span>
@@ -1342,7 +1566,14 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
                             className="px-2.5 py-1 rounded-lg text-xs font-medium text-cyan-300 hover:text-white bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/30 transition-colors cursor-pointer flex items-center gap-1"
                             title="Upload this single part directly to active AI chat"
                           >
-                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                            <svg
+                              width="12"
+                              height="12"
+                              viewBox="0 0 24 24"
+                              fill="none"
+                              stroke="currentColor"
+                              strokeWidth="2.5"
+                            >
                               <line x1="12" y1="19" x2="12" y2="5" />
                               <polyline points="5 12 12 5 19 12" />
                             </svg>
@@ -1356,7 +1587,14 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
                             className="px-2.5 py-1 rounded-lg text-xs font-medium text-amber-300 hover:text-white bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 transition-colors cursor-pointer flex items-center gap-1"
                             title="Save this single part as a text file to disk"
                           >
-                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <svg
+                              width="12"
+                              height="12"
+                              viewBox="0 0 24 24"
+                              fill="none"
+                              stroke="currentColor"
+                              strokeWidth="2"
+                            >
                               <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
                               <polyline points="7 10 12 15 17 10" />
                               <line x1="12" y1="15" x2="12" y2="3" />
@@ -1390,7 +1628,9 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
                       <div className="w-full h-1.5 rounded-full bg-white/5 overflow-hidden">
                         <div
                           className={`h-full rounded-full transition-all duration-300 ${
-                            pct > 90 ? 'bg-amber-500' : 'bg-gradient-to-r from-purple-500 to-cyan-400'
+                            pct > 90
+                              ? 'bg-amber-500'
+                              : 'bg-gradient-to-r from-purple-500 to-cyan-400'
                           }`}
                           style={{ width: `${pct}%` }}
                         />
@@ -1405,7 +1645,9 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
                               className="py-1 px-2 flex items-center justify-between text-xs font-mono text-gray-300"
                             >
                               <span className="truncate">{cf.relativePath}</span>
-                              <span className="text-gray-500 shrink-0 ml-3">{formatBytes(cf.size)}</span>
+                              <span className="text-gray-500 shrink-0 ml-3">
+                                {formatBytes(cf.size)}
+                              </span>
                             </div>
                           ))}
                         </div>
@@ -1421,7 +1663,10 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
               <div className="text-xs text-gray-400 flex items-center gap-2">
                 {savedFilePath && (
                   <div className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-lg bg-cyan-950/60 border border-cyan-500/30 text-cyan-300 text-xs shadow-sm">
-                    <span className="font-mono text-[10px] truncate max-w-[160px]" title={savedFilePath}>
+                    <span
+                      className="font-mono text-[10px] truncate max-w-[160px]"
+                      title={savedFilePath}
+                    >
                       {savedFilePath.split('/').pop()}
                     </span>
                     <button
@@ -1433,13 +1678,13 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
                     </button>
                   </div>
                 )}
-                {isUploadingSequentially ? (
+                {isAttachingAll ? (
                   <span className="text-cyan-300 font-mono animate-pulse">
-                    ⚡ {uploadProgress?.message || 'Uploading chunks sequentially (1.5s delay)...'}
+                    ⚡ {uploadProgress?.message || 'Attaching every part to the current message...'}
                   </span>
                 ) : (
                   <span>
-                    Upload all parts sequentially with automated pacing for AI model ingestion.
+                    All parts attach to the current message. Nothing is sent until you press Send.
                   </span>
                 )}
               </div>
@@ -1455,26 +1700,44 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
 
                 <button
                   type="button"
-                  disabled={
-                    !partitionResult ||
-                    partitionResult.chunks.length === 0 ||
-                    isUploadingSequentially
-                  }
-                  onClick={handleUploadAllSequentially}
+                  disabled={!partitionResult || partitionResult.chunks.length === 0 || isAttachingAll}
+                  onClick={handleAttachAllParts}
                   className="px-5 py-2 rounded-xl text-xs font-medium text-white shadow-lg bg-gradient-to-r from-purple-600 via-indigo-600 to-cyan-600 hover:from-purple-500 hover:to-cyan-500 shadow-purple-500/25 border border-purple-400/30 transition-all flex items-center gap-2 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                 >
-                  {isUploadingSequentially ? (
+                  {isAttachingAll ? (
                     <>
                       <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24" fill="none">
-                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                        <circle
+                          className="opacity-25"
+                          cx="12"
+                          cy="12"
+                          r="10"
+                          stroke="currentColor"
+                          strokeWidth="4"
+                        />
+                        <path
+                          className="opacity-75"
+                          fill="currentColor"
+                          d="M4 12a8 8 0 018-8v8H4z"
+                        />
                       </svg>
-                      <span>Uploading Sequentially...</span>
+                      <span>Attaching Parts...</span>
                     </>
                   ) : (
                     <>
-                      <span>Upload All {partitionResult?.chunks.length || 0} Parts Sequentially</span>
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <span>
+                        {partitionResult && partitionResult.chunks.length > 1
+                          ? `Attach all ${partitionResult.chunks.length} parts`
+                          : 'Attach part'}
+                      </span>
+                      <svg
+                        width="14"
+                        height="14"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                      >
                         <line x1="5" y1="12" x2="19" y2="12" />
                         <polyline points="12 5 19 12 12 19" />
                       </svg>
@@ -1493,7 +1756,14 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
             <div className="px-6 py-4 border-b border-cyan-500/20 bg-cyan-950/20 flex items-center justify-between">
               <div className="flex items-center gap-3">
                 <div className="w-8 h-8 rounded-lg bg-cyan-500/20 border border-cyan-500/40 flex items-center justify-center text-cyan-300">
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <svg
+                    width="16"
+                    height="16"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                  >
                     <polyline points="16 18 22 12 16 6" />
                     <polyline points="8 6 2 12 8 18" />
                   </svg>
@@ -1507,7 +1777,8 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
                   </h3>
                   <p className="text-xs text-gray-400 font-mono mt-0.5">
                     {formatBytes(previewMeta?.byteSize || selectedStats.bytes)} · ~
-                    {Math.ceil((previewMeta?.byteSize || selectedStats.bytes) / 4).toLocaleString()} estimated tokens
+                    {Math.ceil((previewMeta?.byteSize || selectedStats.bytes) / 4).toLocaleString()}{' '}
+                    estimated tokens
                   </p>
                 </div>
               </div>
@@ -1524,14 +1795,28 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
                 >
                   {copySuccess ? (
                     <>
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                      <svg
+                        width="14"
+                        height="14"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2.5"
+                      >
                         <polyline points="20 6 9 17 4 12" />
                       </svg>
                       <span>Copied to Clipboard!</span>
                     </>
                   ) : (
                     <>
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <svg
+                        width="14"
+                        height="14"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                      >
                         <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
                         <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
                       </svg>
@@ -1545,7 +1830,14 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
                   onClick={handleDownloadBundle}
                   className="px-3 py-1.5 rounded-lg text-xs font-medium bg-amber-500/15 border border-amber-500/30 text-amber-200 hover:bg-amber-500/25 transition-all flex items-center gap-1.5 cursor-pointer"
                 >
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <svg
+                    width="14"
+                    height="14"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                  >
                     <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
                     <polyline points="7 10 12 15 17 10" />
                     <line x1="12" y1="15" x2="12" y2="3" />
@@ -1559,7 +1851,14 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
                   className="p-1.5 rounded-lg text-gray-400 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
                   title="Close preview (Esc)"
                 >
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <svg
+                    width="18"
+                    height="18"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                  >
                     <line x1="18" y1="6" x2="6" y2="18" />
                     <line x1="6" y1="6" x2="18" y2="18" />
                   </svg>
@@ -1572,7 +1871,14 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
               {previewLoading ? (
                 <div className="h-full flex items-center justify-center text-cyan-400 gap-2">
                   <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24" fill="none">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <circle
+                      className="opacity-25"
+                      cx="12"
+                      cy="12"
+                      r="10"
+                      stroke="currentColor"
+                      strokeWidth="4"
+                    />
                     <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
                   </svg>
                   <span>Generating pre-flight bundle text...</span>
@@ -1586,6 +1892,36 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = ({
           </div>
         )}
       </div>
+
+      {/* Video preparation (plan 01). Mounted only while a video is chosen, so it holds
+          no state and cannot interfere with the folder flow. */}
+      <VideoPrepareDialog
+        key={videoDialogPath ?? 'none'}
+        isOpen={Boolean(videoDialogPath)}
+        filePath={videoDialogPath}
+        providerKey={videoTarget.provider ?? undefined}
+        modelKey={videoTarget.model ?? undefined}
+        onClose={() => setVideoDialogPath(null)}
+      />
+
+      {/* Office preparation (plan 02). One file gets the detailed dialog; a selection gets the
+          queue dialog, which keeps consent per file. Both are mounted only while open, so a
+          cancelled dialog holds no state and cannot leak a prepared job. */}
+      {officeDialogPaths.length > 1 ? (
+        <OfficeSelectionDialog
+          key={`office-selection-${officeDialogPaths.length}-${officeDialogPaths[0] ?? 'none'}`}
+          isOpen={officeDialogPaths.length > 1}
+          filePaths={officeDialogPaths}
+          onClose={() => setOfficeDialogPaths([])}
+        />
+      ) : (
+        <OfficePrepareDialog
+          key={`office-${officeDialogPaths[0] ?? 'none'}`}
+          isOpen={officeDialogPaths.length === 1}
+          filePath={officeDialogPaths[0] ?? null}
+          onClose={() => setOfficeDialogPaths([])}
+        />
+      )}
     </div>
   )
 }

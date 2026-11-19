@@ -3,6 +3,7 @@ import {
   isProtectedLifecycleStatus,
   mapLifecycleToBadge,
   isGenuineCompletionTransition,
+  isNotifiableCompletion,
   shouldDeduplicateCompletion,
   formatDesktopNotificationContent,
   ACTIVE_TAB_DONE_LINGER_MS,
@@ -346,5 +347,35 @@ describe('aiLifecycle production modules', () => {
       expect(notifications[0].status).toBe('done')
       expect(notifications[0].snippet).toBe('Done with task')
     })
+  })
+})
+
+
+describe('Notification reliability: completions that were never announced', () => {
+  it('announces a completion even when "working" was never observed', () => {
+    // A fast turn, or one that started before the app could observe it, arrives as
+    // unknown -> done. Previously silent; that was the reported "notifications do not work".
+    expect(isNotifiableCompletion('unknown', 'done')).toBe(true)
+    expect(isNotifiableCompletion('unknown', 'waiting-input')).toBe(true)
+  })
+
+  it('still announces the ordinary transition', () => {
+    expect(isNotifiableCompletion('working', 'done')).toBe(true)
+    expect(isNotifiableCompletion('working', 'waiting-input')).toBe(true)
+  })
+
+  it('announces a recovery after an error', () => {
+    expect(isNotifiableCompletion('error', 'done')).toBe(true)
+  })
+
+  it('does not announce non-completions', () => {
+    expect(isNotifiableCompletion('working', 'working')).toBe(false)
+    expect(isNotifiableCompletion('done', 'done')).toBe(false)
+    expect(isNotifiableCompletion('working', 'idle')).toBe(false)
+    expect(isNotifiableCompletion('unknown', 'working')).toBe(false)
+  })
+
+  it('does not treat leaving idle as a completion, because that is a restore', () => {
+    expect(isNotifiableCompletion('idle', 'done')).toBe(false)
   })
 })

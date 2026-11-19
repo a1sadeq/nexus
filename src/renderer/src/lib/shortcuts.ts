@@ -89,6 +89,13 @@ export const DEFAULT_SHORTCUTS: ShortcutDef[] = [
     defaultKeys: ['Ctrl', 'J']
   },
   {
+    id: 'notification-latest',
+    action: 'Open Most Recently Notified Tab',
+    desc: 'Switch to the tab from the latest AI completion notification',
+    category: 'tabs',
+    defaultKeys: ['Ctrl', 'Shift', 'Y']
+  },
+  {
     id: 'tab-move-up',
     action: 'Move Tab Up',
     desc: 'Move the active tab upward in the list',
@@ -164,14 +171,14 @@ export const DEFAULT_SHORTCUTS: ShortcutDef[] = [
   {
     id: 'stop-generation',
     action: 'Stop AI Generation',
-    desc: 'Click the active AI provider\'s stop generation button',
+    desc: "Click the active AI provider's stop generation button",
     category: 'models',
     defaultKeys: ['Ctrl', '.']
   },
   {
     id: 'site-new-chat',
     action: 'Site New Chat',
-    desc: 'Click the active AI provider\'s in-page new chat button',
+    desc: "Click the active AI provider's in-page new chat button",
     category: 'models',
     defaultKeys: ['Ctrl', 'Shift', 'N']
   },
@@ -312,7 +319,9 @@ export function resetAllShortcuts(): void {
   }
 }
 
-export function getEffectiveShortcuts(): Array<ShortcutDef & { keys: string[]; isCustom: boolean }> {
+export function getEffectiveShortcuts(): Array<
+  ShortcutDef & { keys: string[]; isCustom: boolean }
+> {
   const custom = loadCustomShortcuts()
   return DEFAULT_SHORTCUTS.map((s) => {
     const isCustom = Boolean(custom[s.id] && Array.isArray(custom[s.id]) && custom[s.id].length > 0)

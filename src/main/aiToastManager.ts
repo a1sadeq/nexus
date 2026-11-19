@@ -5,6 +5,8 @@ export interface ToastData {
   model: string
   status: 'done' | 'waiting-input'
   snippet?: string
+  /** How long the turn took, when measured. Absent means unknown, not zero. */
+  durationMs?: number
 }
 
 export interface ToastViewTarget {

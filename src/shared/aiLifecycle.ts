@@ -1,3 +1,4 @@
+import { formatNotificationContent } from './notificationContent'
 /**
  * Authoritative AI lifecycle states for tabs in Nexus.
  *
@@ -93,6 +94,26 @@ export function isGenuineCompletionTransition(
 }
 
 /**
+ * Whether a transition should be announced.
+ *
+ * Deliberately looser than `isGenuineCompletionTransition`, which requires the previous status
+ * to be exactly `working`. That requirement loses real completions: a fast turn, or one seen
+ * between polls, arrives as `unknown -> done`, and the user is never told. Announcing it is not
+ * a risk — the callers still deduplicate — whereas staying silent is the bug being fixed.
+ *
+ * Still excluded: no actual change, and leaving `idle` (a restore, not a completion).
+ */
+export function isNotifiableCompletion(
+  prevStatus: AiLifecycleStatus,
+  nextStatus: AiLifecycleStatus
+): nextStatus is 'done' | 'waiting-input' {
+  if (nextStatus !== 'done' && nextStatus !== 'waiting-input') return false
+  if (prevStatus === nextStatus) return false
+  if (prevStatus === 'idle') return false
+  return true
+}
+
+/**
  * Prevents redundant notification popups when rapid duplicate completions fire.
  */
 export function shouldDeduplicateCompletion(
@@ -109,22 +130,20 @@ export function shouldDeduplicateCompletion(
 }
 
 /**
- * Privacy-safe formatter for system desktop notifications.
- * Removes private conversation titles and prompt snippets by default to prevent PII leakage.
+ * The old generic formatter.
+ *
+ * Deprecated rather than deleted: it is the contract a review test pins, and it is genuinely
+ * useful as "no detail at all". It now delegates, so there is one implementation of the wording
+ * instead of two that can drift apart.
  */
 export function formatDesktopNotificationContent(data: {
   tabTitle: string
   status: 'done' | 'waiting-input'
   snippet?: string
 }): { title: string; body: string } {
-  const body =
-    data.status === 'waiting-input'
-      ? 'An AI session requires your input'
-      : 'An AI task has completed'
-
-  return {
-    title: 'Nexus',
-    body
-  }
+  const content = formatNotificationContent(
+    { tabTitle: data.tabTitle, status: data.status, snippet: data.snippet },
+    { detail: 'generic' }
+  )
+  return { title: content.title, body: content.body }
 }
-

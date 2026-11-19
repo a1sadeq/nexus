@@ -1,8 +1,13 @@
-
 import './bootstrap'
 import { DownloadNotificationOverlay } from './downloadNotificationOverlay'
-import { installGoogleSessionPersistence, flushGoogleSessionStore } from './googleSessionPersistence'
-import { isGoogleLoginRecoveryUrl, recoverGoogleSessionFromLatestBrowser } from './googleSessionRecovery'
+import {
+  installGoogleSessionPersistence,
+  flushGoogleSessionStore
+} from './googleSessionPersistence'
+import {
+  isGoogleLoginRecoveryUrl,
+  recoverGoogleSessionFromLatestBrowser
+} from './googleSessionRecovery'
 import { spawn } from 'child_process'
 import { AutoUpdateService, type UpdateEngine } from './autoUpdateService'
 import { supportsAutomaticUpdates } from './autoUpdatePlatform'
@@ -23,7 +28,8 @@ import {
   globalShortcut,
   dialog,
   Notification,
-  nativeTheme
+  nativeTheme,
+  powerMonitor
 } from 'electron'
 import {
   DEFAULT_THEME_APPEARANCE,
@@ -35,7 +41,10 @@ import {
 import { join, basename, extname } from 'path'
 import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, copyFileSync } from 'fs'
 import { buildEngine } from './promptNav'
-import { buildFeatureHookEvidenceScript, type collectFeatureHookEvidence } from './featureHookEvidence'
+import {
+  buildFeatureHookEvidenceScript,
+  type collectFeatureHookEvidence
+} from './featureHookEvidence'
 import { executeHookCapture, hookContextId } from './featureHookCapture'
 import { parseFeatureHookImport } from '../shared/featureHookImport'
 import { TabDiscardManager, type DiscardableView, isUsableRestoreUrl } from './tabDiscardManager'
@@ -44,29 +53,53 @@ import { chromeCompatibleUserAgent, linuxDisplaySwitches, windowChrome } from '.
 import { PreviewCaptureLoop } from './previewCaptureLoop'
 import { buildProviderMotionScript } from './providerMotion'
 import { ActiveTitleSync, buildActiveTitleReadScript } from './activeTitleSync'
-import { getCustomThemeEntry, saveCustomThemeEntry, removeCustomThemeEntry } from './customThemesStore'
+import {
+  getCustomThemeEntry,
+  saveCustomThemeEntry,
+  removeCustomThemeEntry
+} from './customThemesStore'
 import { PROVIDER_THEMES, mergeOverrides, getStructuralVars } from './providerThemes'
-import { type ProviderOverrides, getMergedProviderFeatures, DEFAULT_BUILTIN_PROVIDER_CONFIG, migrateLegacyArenaFeatures } from '../shared/providerConfig'
+import {
+  type ProviderOverrides,
+  getMergedProviderFeatures,
+  DEFAULT_BUILTIN_PROVIDER_CONFIG,
+  migrateLegacyArenaFeatures
+} from '../shared/providerConfig'
 import { splitSelectorList } from '../shared/selectorUtils'
 import { cleanConversationTitle, isDefaultConversationTitle } from '../shared/titleUtils'
 import { consolidateLegacyConfigDir } from './migrations/consolidateLegacyConfigDir'
 import { registerStateIpc, trustWindow } from './stateIpc'
 import { atomicWriteJson } from './atomicWrite'
 import { scheduleStartupAndExitPruning, getCacheStats, pruneAppCaches } from './cachePruningManager'
-import { captureDiagnosticReport, saveDiagnosticsToFile, type ViewContextInfo } from './diagnosticsManager'
-import { injectAiStatusObserver, attachAiStatusListener, isSnippetAwaitingInput } from './aiStatusObserver'
+import {
+  captureDiagnosticReport,
+  saveDiagnosticsToFile,
+  type ViewContextInfo
+} from './diagnosticsManager'
+import {
+  injectAiStatusObserver,
+  attachAiStatusListener,
+  isSnippetAwaitingInput
+} from './aiStatusObserver'
 import {
   type AiLifecycleStatus,
   type TabAiLifecycleState,
   type AiLifecycleStatusUpdate,
   isProtectedLifecycleStatus,
-  isGenuineCompletionTransition,
+  isNotifiableCompletion,
   shouldDeduplicateCompletion,
-  formatDesktopNotificationContent,
   ACTIVE_TAB_DONE_LINGER_MS,
   VISITED_DONE_LINGER_MS
 } from '../shared/aiLifecycle'
 import { AiToastManager } from './aiToastManager'
+import { formatDuration, formatNotificationContent, modelLabel } from '../shared/notificationContent'
+import { createNotificationRecorder } from './notificationDiagnostics'
+import {
+  applyNotificationPreferenceChange,
+  loadNotificationPreferences,
+  saveNotificationPreferences,
+  type NotificationPreferences
+} from './notificationPreferences'
 
 // Page-side helpers embedded into every injected script. Built from the tested
 // shared source via toString() — self-contained, no closures.
@@ -86,18 +119,37 @@ import {
   cancelGoogleSignIn
 } from './googleAuth'
 import { reloadProviderViews } from './providerViewReloader'
-import {
-  readCookiesFromCustomDirectory
-} from './cookieImport'
+import { readCookiesFromCustomDirectory } from './cookieImport'
 import {
   handleFolderUpload,
   handleFileUpload,
   bundleAndInjectSelectedFiles,
   generateBundleTextAsync,
-  handleMixedUpload,
   partitionCodebaseFiles,
-  uploadChunksSequentially
+  uploadChunksSequentially,
+  attachChunksAsOneMessage,
+  handleFilesUpload,
+  recoverAbandonedPicker,
+  splitSelectionByDelivery
 } from './uploadManager'
+import { cleanupAllUploadTempDirs, cleanupStaleUploadTempDirs } from './uploadAttachAll'
+import { forceViewRepaint } from './viewRepaint'
+import { VideoJobManager } from './videoJob'
+import { sweepStaleJobDirs } from './videoPrepare'
+import { locateMediaTools } from './videoProbe'
+import { OfficeJobManager } from './officeJob'
+import { prepareOfficeDocument } from './officePrepare'
+import { prepareOfficeSelection } from './officeBatch'
+import type { OfficeConsent } from '../shared/officePreview'
+import { sweepStaleConversionDirs } from './officeConvert'
+import {
+  assessVideoCapability,
+  emptyCapabilityStore,
+  upsertObservation,
+  validateObservation,
+  type CapabilityStore
+} from '../shared/videoCapability'
+import type { VideoPace } from '../shared/videoPlan'
 import type { ConfirmFolderUploadPayload, BundleChunk } from '../shared/folderUpload'
 import { type CompressionOptions } from '../shared/contextCompressor'
 import { projectSnapshotToMarkdown } from '../shared/contextSnapshot'
@@ -141,7 +193,12 @@ registerStateIpc((key, payload) => {
 let mainWindow: BrowserWindow | null = null
 
 function sendToMainWindow(channel: string, ...args: any[]) {
-  if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
+  if (
+    mainWindow &&
+    !mainWindow.isDestroyed() &&
+    mainWindow.webContents &&
+    !mainWindow.webContents.isDestroyed()
+  ) {
     mainWindow.webContents.send(channel, ...args)
   }
 }
@@ -153,6 +210,14 @@ const viewModelKeys = new Map<string, string>()
 let providerConfig: import('../shared/providerConfig').ProviderConfigMap = {}
 
 let aiNotificationView: Electron.WebContentsView | null = null
+let powerResumeHookRegistered = false
+// Video preparation jobs (plan 01). Frames live in temp dirs owned by the manager.
+const videoJobs = new VideoJobManager()
+let videoPrepController: AbortController | null = null
+// Office preparation (plan 02): prepared text parts and the optional PDF live here until the
+// user presses Send; nothing is uploaded by preparing or previewing.
+const officeJobs = new OfficeJobManager()
+let officePrepController: AbortController | null = null
 let downloadNotificationOverlay: DownloadNotificationOverlay | null = null
 let isAiNotificationVisible = false
 let currentNotificationData: {
@@ -165,6 +230,75 @@ let currentNotificationData: {
 } | null = null
 
 const lastDesktopNotifications = new Map<string, number>()
+// When each tab last entered 'working', so a notification can say how long the turn took.
+// Absent means "not measured", which is different from zero and is reported as absent.
+const aiWorkingSince = new Map<string, number>()
+const notificationRecorder = createNotificationRecorder()
+let notificationPreferencesCache: NotificationPreferences | null = null
+
+function notificationPreferencesPath(): string {
+  return join(app.getPath('userData'), 'notifications.json')
+}
+
+function notificationPreferences(): NotificationPreferences {
+  if (!notificationPreferencesCache) {
+    notificationPreferencesCache = loadNotificationPreferences(notificationPreferencesPath())
+  }
+  return notificationPreferencesCache
+}
+
+function updateNotificationPreferences(change: unknown): NotificationPreferences {
+  const next = applyNotificationPreferenceChange(notificationPreferences(), change)
+  notificationPreferencesCache = next
+  saveNotificationPreferences(notificationPreferencesPath(), next)
+  return next
+}
+// Keep recent native notification objects alive for click delivery. The OS may
+// retain them after the close event, so release on click/failure or expiry.
+const nativeNotificationTimers = new Map<Notification, NodeJS.Timeout>()
+const NATIVE_NOTIFICATION_RETENTION_MS = 15 * 60 * 1000
+const MAX_RETAINED_NATIVE_NOTIFICATIONS = 64
+let warnedNotificationsUnsupported = false
+let lastNotifiedTabId: string | null = null
+
+function releaseNativeNotification(notification: Notification): void {
+  const timer = nativeNotificationTimers.get(notification)
+  if (timer) clearTimeout(timer)
+  nativeNotificationTimers.delete(notification)
+}
+
+function retainNativeNotification(notification: Notification): void {
+  while (nativeNotificationTimers.size >= MAX_RETAINED_NATIVE_NOTIFICATIONS) {
+    const oldest = nativeNotificationTimers.keys().next().value
+    if (!oldest) break
+    releaseNativeNotification(oldest)
+  }
+  const timer = setTimeout(
+    () => releaseNativeNotification(notification),
+    NATIVE_NOTIFICATION_RETENTION_MS
+  )
+  timer.unref?.()
+  nativeNotificationTimers.set(notification, timer)
+}
+
+function nativeNotificationClickHandler(notification: Notification, tabId: string): () => void {
+  // Capture only the tab identifier, not the title or message snippet.
+  return () => {
+    releaseNativeNotification(notification)
+    if (
+      !aiViews.has(tabId) &&
+      !tabDiscardManager.hasView(tabId) &&
+      !tabDiscardManager.isTabEvicted(tabId)
+    )
+      return
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      if (!mainWindow.isVisible()) mainWindow.show()
+      if (mainWindow.isMinimized()) mainWindow.restore()
+      mainWindow.focus()
+      sendToMainWindow('notification_switch_to_tab', tabId)
+    }
+  }
+}
 
 function buildNotificationHtml(data: {
   id: string
@@ -173,14 +307,27 @@ function buildNotificationHtml(data: {
   model: string
   status: 'done' | 'waiting-input'
   snippet?: string
+  durationMs?: number
 }): string {
   const isWaitingInput = data.status === 'waiting-input'
   const accentColor = isWaitingInput ? '#ef4444' : '#10b981'
   const glowColor = isWaitingInput ? 'rgba(239, 68, 68, 0.4)' : 'rgba(16, 185, 129, 0.3)'
   const statusLabel = isWaitingInput ? 'Needs Input' : 'Response Ready'
-  const safeTitle = data.tabTitle.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
-  const rawSnippet = data.snippet || (isWaitingInput ? 'Waiting for your choice or confirmation' : 'Generation completed.')
-  const safeSnippet = rawSnippet.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+  // The same facts the desktop notification reports, so the two never disagree.
+  const factLabel = [modelLabel(data.model), formatDuration(data.durationMs)]
+    .filter((part) => part.length > 0)
+    .join(' · ')
+  const escapeHtmlText = (value: string): string =>
+    value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+  const safeTitle = escapeHtmlText(data.tabTitle)
+  const rawSnippet =
+    data.snippet ||
+    (isWaitingInput ? 'Waiting for your choice or confirmation' : 'Generation completed.')
+  const safeSnippet = rawSnippet
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
   const safeTabIdAttr = data.tabId.replace(/&/g, '&amp;').replace(/"/g, '&quot;')
 
   return `<!DOCTYPE html>
@@ -294,6 +441,15 @@ function buildNotificationHtml(data: {
       background: rgba(255, 255, 255, 0.15);
       color: #ffffff;
     }
+    .facts {
+      font-size: 10px;
+      font-weight: 600;
+      color: #94a3b8;
+      letter-spacing: 0.02em;
+      margin-left: auto;
+      margin-right: 8px;
+      white-space: nowrap;
+    }
     .snippet {
       font-size: 11px;
       color: #cbd5e1;
@@ -367,6 +523,7 @@ function buildNotificationHtml(data: {
         <span class="tab-title">${safeTitle}</span>
       </div>
       <span class="badge">${statusLabel}</span>
+      ${factLabel ? `<span class="facts">${escapeHtmlText(factLabel)}</span>` : ''}
       <button type="button" class="close-btn" id="closeBtn" title="Dismiss">✕</button>
     </div>
     <div class="snippet">${safeSnippet}</div>
@@ -407,19 +564,48 @@ function buildNotificationHtml(data: {
 </html>`
 }
 
-function triggerDesktopNotification(data: {
+interface DesktopNotificationInput {
   id?: string
   tabId: string
   tabTitle: string
   model: string
   status: 'done' | 'waiting-input'
   snippet?: string
-}) {
-  if (!Notification.isSupported()) return
+}
+
+/**
+ * Show a native notification. Returns whether the OS took it, because the caller uses that to
+ * decide whether an in-app toast is still needed — silence should never be the only outcome.
+ */
+function triggerDesktopNotification(data: DesktopNotificationInput): boolean {
+  const preferences = notificationPreferences()
+  const record = (outcome: Parameters<typeof notificationRecorder.record>[0]['outcome']): false => {
+    notificationRecorder.record({
+      tabId: data.tabId,
+      status: data.status,
+      detail: preferences.detail,
+      outcome
+    })
+    return false
+  }
+
+  if (!preferences.desktopEnabled) return record('disabled')
+
+  if (!Notification.isSupported()) {
+    notificationRecorder.setEnvironment({ nativeSupported: false, platform: process.platform })
+    if (!warnedNotificationsUnsupported) {
+      warnedNotificationsUnsupported = true
+      console.warn('[Notification] Native notifications are unsupported in this environment.')
+    }
+    return record('unsupported')
+  }
+  notificationRecorder.setEnvironment({ nativeSupported: true, platform: process.platform })
+
+  let notif: Notification | null = null
   try {
     const now = Date.now()
     const lastTime = lastDesktopNotifications.get(data.tabId) || 0
-    if (now - lastTime < 2000) return
+    if (now - lastTime < 2000) return record('throttled')
     lastDesktopNotifications.set(data.tabId, now)
 
     const iconCandidates = [
@@ -427,36 +613,67 @@ function triggerDesktopNotification(data: {
       join(app.getAppPath(), 'resources/icon.png'),
       join(app.getAppPath(), 'build/icon.png')
     ]
-    const iconPath = iconCandidates.find((p) => existsSync(p))
+    const iconPath = iconCandidates.find((candidate) => existsSync(candidate))
 
-    // Privacy default: generic status text without sensitive chat titles or prompt snippets
-    const { title, body } = formatDesktopNotificationContent(data)
+    const startedAt = aiWorkingSince.get(data.tabId)
+    const { title, body, urgency } = formatNotificationContent(
+      {
+        tabTitle: data.tabTitle,
+        model: data.model,
+        status: data.status,
+        snippet: data.snippet,
+        durationMs: startedAt === undefined ? undefined : Math.max(0, now - startedAt)
+      },
+      { detail: preferences.detail }
+    )
 
-    const notif = new Notification({
+    notif = new Notification({
       title,
       body,
-      urgency: 'normal',
+      urgency,
       silent: false,
       icon: iconPath
     })
 
-    notif.on('click', () => {
-      if (!aiViews.has(data.tabId) && !tabDiscardManager.hasView(data.tabId) && !tabDiscardManager.isTabEvicted(data.tabId)) {
-        return
-      }
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        if (!mainWindow.isVisible()) mainWindow.show()
-        if (mainWindow.isMinimized()) mainWindow.restore()
-        mainWindow.focus()
-        sendToMainWindow('notification_switch_to_tab', data.tabId)
-      }
+    const nativeNotification = notif
+    retainNativeNotification(nativeNotification)
+    nativeNotification.on('failed', (_event, error) => {
+      releaseNativeNotification(nativeNotification)
+      const message =
+        typeof error === 'string' ? error : String((error as Error | undefined)?.message ?? '')
+      if (message) notificationRecorder.setFailure(message)
+      notificationRecorder.record({
+        tabId: data.tabId,
+        status: data.status,
+        detail: preferences.detail,
+        outcome: 'failed'
+      })
+      console.warn('[Notification] Native notification failed; check OS notification permissions.')
     })
+    nativeNotification.on('click', nativeNotificationClickHandler(nativeNotification, data.tabId))
 
-    notif.show()
+    nativeNotification.show()
+    notificationRecorder.record({
+      tabId: data.tabId,
+      status: data.status,
+      detail: preferences.detail,
+      outcome: 'shown'
+    })
+    return true
   } catch (e) {
+    if (notif) releaseNativeNotification(notif)
+    notificationRecorder.setFailure(e instanceof Error ? e.message : 'unknown failure')
+    notificationRecorder.record({
+      tabId: data.tabId,
+      status: data.status,
+      detail: preferences.detail,
+      outcome: 'failed'
+    })
     console.error('[Notification] Failed to trigger desktop notification:', e)
+    return false
   }
 }
+
 
 const aiToastManager = new AiToastManager(
   () => {
@@ -464,7 +681,9 @@ const aiToastManager = new AiToastManager(
     return {
       isDestroyed: () => !aiNotificationView || aiNotificationView.webContents.isDestroyed(),
       loadHtml: (html: string) => {
-        aiNotificationView?.webContents.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html))
+        aiNotificationView?.webContents.loadURL(
+          'data:text/html;charset=utf-8,' + encodeURIComponent(html)
+        )
       },
       setVisible: (visible: boolean) => {
         try {
@@ -478,17 +697,18 @@ const aiToastManager = new AiToastManager(
       },
       startExitAnimation: () => {
         try {
-          aiNotificationView?.webContents.executeJavaScript(
-            "document.getElementById('toastCard')?.classList.add('exiting');"
-          ).catch(() => {})
+          aiNotificationView?.webContents
+            .executeJavaScript("document.getElementById('toastCard')?.classList.add('exiting');")
+            .catch(() => {})
         } catch {}
       }
     }
   },
   () => {
-    const winBounds = mainWindow && !mainWindow.isDestroyed()
-      ? mainWindow.getContentBounds()
-      : { width: 1200, height: 800 }
+    const winBounds =
+      mainWindow && !mainWindow.isDestroyed()
+        ? mainWindow.getContentBounds()
+        : { width: 1200, height: 800 }
     return {
       x: Math.max(0, winBounds.width - 395),
       y: 44,
@@ -499,48 +719,58 @@ const aiToastManager = new AiToastManager(
   (data) => buildNotificationHtml(data)
 )
 
-function showInAppToast(data: {
-  id: string
-  tabId: string
-  tabTitle: string
-  model: string
-  status: 'done' | 'waiting-input'
-  snippet?: string
-}) {
+function showInAppToast(data: DesktopNotificationInput & { id: string }) {
   if (!mainWindow || mainWindow.isDestroyed()) return
 
+  const preferences = notificationPreferences()
   // Check if Nexus mainWindow has OS focus and is visible and not minimized
   const isAppActiveAndVisible = Boolean(
-    mainWindow.isVisible() &&
-    !mainWindow.isMinimized() &&
-    mainWindow.isFocused()
+    mainWindow.isVisible() && !mainWindow.isMinimized() && mainWindow.isFocused()
+  )
+  const isSameActiveTab = Boolean(
+    isAppActiveAndVisible && activeViewId === data.tabId && activeViewVisible && !overlaysOpen
   )
 
-  if (!isAppActiveAndVisible) {
-    // When user is NOT focusing on Nexus (minimized, hidden via shortcut, or in background), fire native OS desktop notification!
-    triggerDesktopNotification(data)
+  if (isSameActiveTab) {
+    // The user is looking at the tab that produced this: a second alert is noise.
+    notificationRecorder.record({
+      tabId: data.tabId,
+      status: data.status,
+      detail: preferences.detail,
+      outcome: 'active-tab',
+      reason: 'the tab that finished was the one you were looking at'
+    })
+    dismissInAppToast(true)
+    return
   }
 
-  // Inside-Nexus HUD overlay toast (only shown when focused on Nexus and looking at another tab or canvas)
-  if (isAppActiveAndVisible) {
-    if (overlaysOpen || !aiNotificationView) return
+  lastNotifiedTabId = data.tabId
 
-    // If user is already on this tab and mainWindow has focus, no need to show HUD toast
-    if (activeViewId === data.tabId) {
-      dismissInAppToast(true)
-      return
+  const nativeShown = triggerDesktopNotification(data)
+
+  // The HUD is shown when Nexus is in front on another tab, and — importantly — whenever the
+  // OS could not show anything, so a platform without a notification daemon is not silent.
+  if (!isAppActiveAndVisible && nativeShown) return
+  if (overlaysOpen || !aiNotificationView) {
+    if (!nativeShown) {
+      console.warn('[Notification] No native notification and the in-app toast is unavailable.')
     }
-
-    try {
-      mainWindow.contentView.removeChildView(aiNotificationView)
-      mainWindow.contentView.addChildView(aiNotificationView)
-    } catch {}
-
-    aiToastManager.show(data)
-    currentNotificationData = aiToastManager.getCurrentData()
-    isAiNotificationVisible = aiToastManager.getIsVisible()
-    downloadNotificationOverlay?.raiseToFront()
+    return
   }
+
+  try {
+    // Existing children are reordered to the top without remove/re-attach.
+    mainWindow.contentView.addChildView(aiNotificationView)
+  } catch {}
+
+  const startedAt = aiWorkingSince.get(data.tabId)
+  aiToastManager.show({
+    ...data,
+    durationMs: startedAt === undefined ? undefined : Math.max(0, Date.now() - startedAt)
+  })
+  currentNotificationData = aiToastManager.getCurrentData()
+  isAiNotificationVisible = aiToastManager.getIsVisible()
+  downloadNotificationOverlay?.raiseToFront()
 }
 
 function dismissInAppToast(immediate = false) {
@@ -608,9 +838,16 @@ export function bumpTabViewGeneration(tabId: string): number {
   return next
 }
 
-const lastCompletionNotifications = new Map<string, { status: string; revision: number; time: number }>()
+const lastCompletionNotifications = new Map<
+  string,
+  { status: string; revision: number; time: number }
+>()
 
-function triggerCompletionNotification(tabId: string, status: 'done' | 'waiting-input', snippet?: string) {
+function triggerCompletionNotification(
+  tabId: string,
+  status: 'done' | 'waiting-input',
+  snippet?: string
+) {
   const now = Date.now()
   const prev = lastCompletionNotifications.get(tabId)
   const currentRev = activeAiLifecycles.get(tabId)?.revision ?? 0
@@ -672,6 +909,11 @@ export function setTabAiLifecycle(
     enteredIdleAt = undefined
   }
 
+  // Remember when a turn started so the notification can report how long it took. Cleared on
+  // any status that ends the turn, so a stale start can never inflate a later duration.
+  if (nextStatus === 'working' && prevStatus !== 'working') aiWorkingSince.set(tabId, now)
+  if (nextStatus !== 'working') aiWorkingSince.delete(tabId)
+
   const nextState: TabAiLifecycleState = {
     tabId,
     status: nextStatus,
@@ -724,7 +966,9 @@ export function setTabAiLifecycle(
   // Finding 2: Stop sending legacy completion events for initial unknown, idle, error,
   // or other non-completion transitions. Generate notifications only for genuine,
   // deduplicated completion or input-required transitions.
-  const isGenuineCompletion = isGenuineCompletionTransition(prevStatus, nextStatus)
+  // Looser than `isGenuineCompletionTransition`: a turn seen as `unknown -> done` (fast, or
+  // missed between polls) is a real completion and used to be announced to nobody.
+  const isGenuineCompletion = isNotifiableCompletion(prevStatus, nextStatus)
 
   if (isGenuineCompletion) {
     triggerCompletionNotification(tabId, nextStatus, nextState.lastSnippet)
@@ -881,21 +1125,49 @@ ipcMain.handle('get_resource_diagnostics', (event) => {
       if (contents && !contents.isDestroyed()) {
         owned.set(contents.id, { kind: 'ai-view', tabId, provider: viewModelKeys.get(tabId) })
       }
-    } catch { /* stale native wrapper: manager status retains ownership */ }
+    } catch {
+      /* stale native wrapper: manager status retains ownership */
+    }
   }
   const contents = electronWebContents.getAllWebContents().flatMap((wc) => {
     try {
       if (wc.isDestroyed()) return []
-      return [{ id: wc.id, pid: wc.getOSProcessId(), type: wc.getType(),
-        owner: owned.get(wc.id) || { kind: 'popup-or-other' } }]
-    } catch { return [] }
+      return [
+        {
+          id: wc.id,
+          pid: wc.getOSProcessId(),
+          type: wc.getType(),
+          owner: owned.get(wc.id) || { kind: 'popup-or-other' }
+        }
+      ]
+    } catch {
+      return []
+    }
   })
-  return { success: true, capturedAt: new Date().toISOString(),
-    electron: process.versions.electron, discard: tabDiscardManager.getStatus(),
-    preview: previewLoop.getStatus(), contents, processes: app.getAppMetrics() }
+  return {
+    success: true,
+    capturedAt: new Date().toISOString(),
+    electron: process.versions.electron,
+    discard: tabDiscardManager.getStatus(),
+    preview: previewLoop.getStatus(),
+    contents,
+    processes: app.getAppMetrics()
+  }
 })
 
 // IPC endpoints for in-app notification toasts & app focus detection
+ipcMain.handle('notification_diagnostics', () => {
+  const snapshot = notificationRecorder.snapshot()
+  return { ...snapshot, preferences: notificationPreferences(), summary: notificationRecorder.summary() }
+})
+
+ipcMain.handle('notification_preferences', () => notificationPreferences())
+
+ipcMain.on('set_notification_preferences', (event, change) => {
+  if (!mainWindow || event.sender !== mainWindow.webContents) return
+  updateNotificationPreferences(change)
+})
+
 ipcMain.handle('is_app_focused', () => {
   return Boolean(
     mainWindow &&
@@ -968,7 +1240,7 @@ ipcMain.on('show_toast', (_event, msg: string) => {
         t.style.marginTop = '-10px';
       }, 3000);
     })();
-  `;
+  `
   view.webContents.executeJavaScript(code).catch(() => {})
 })
 
@@ -978,7 +1250,12 @@ let autoUpdateService: AutoUpdateService | null = null
 
 function updateSupport(): boolean {
   let packageType = ''
-  try { packageType = readFileSync(join(process.resourcesPath, 'app.asar.unpacked', 'package.json'), 'utf-8') } catch {}
+  try {
+    packageType = readFileSync(
+      join(process.resourcesPath, 'app.asar.unpacked', 'package.json'),
+      'utf-8'
+    )
+  } catch {}
   const pkg = packageType ? JSON.parse(packageType) : undefined
   return supportsAutomaticUpdates({
     packaged: app.isPackaged,
@@ -990,7 +1267,11 @@ function updateSupport(): boolean {
 }
 
 function unsupportedUpdateStatus(): UpdateStatus {
-  return { phase: 'unsupported', currentVersion: app.getVersion(), message: 'Automatic updates are not supported on this installation.' }
+  return {
+    phase: 'unsupported',
+    currentVersion: app.getVersion(),
+    message: 'Automatic updates are not supported on this installation.'
+  }
 }
 
 function startAutoUpdates() {
@@ -1011,7 +1292,10 @@ function startAutoUpdates() {
       publish,
       notifyRestart: () => {
         if (Notification.isSupported()) {
-          new Notification({ title: 'Nexus update', body: 'Nexus is restarting to install an update. Unsaved input may be lost.' }).show()
+          new Notification({
+            title: 'Nexus update',
+            body: 'Nexus is restarting to install an update. Unsaved input may be lost.'
+          }).show()
         }
       },
       prepareInstall: async () => {
@@ -1022,15 +1306,17 @@ function startAutoUpdates() {
         ])
         isQuitting = true
       },
-      installFailed: () => { isQuitting = false }
+      installFailed: () => {
+        isQuitting = false
+      }
     })
     autoUpdateService.start()
   } catch (error) {
     console.error('[auto-update] Could not initialize updater:', error)
   }
 }
-export let currentUiZoom = 1.0;
-let currentWebviewZoom = 1.0;
+export let currentUiZoom = 1.0
+let currentWebviewZoom = 1.0
 let currentGlobalHotkey: string | null = null
 
 function toggleMainWindow() {
@@ -1077,9 +1363,13 @@ ipcMain.handle('get_global_hotkey', () => currentGlobalHotkey)
 ipcMain.handle('set_global_hotkey', (_event, newHotkey: string) => {
   const configPath = join(app.getPath('userData'), 'config.json')
   let cfg: any = {}
-  try { cfg = JSON.parse(readFileSync(configPath, 'utf-8')) } catch {}
+  try {
+    cfg = JSON.parse(readFileSync(configPath, 'utf-8'))
+  } catch {}
   cfg.hotkey = newHotkey
-  try { writeFileSync(configPath, JSON.stringify(cfg, null, 2)) } catch {}
+  try {
+    writeFileSync(configPath, JSON.stringify(cfg, null, 2))
+  } catch {}
 
   return updateGlobalHotkey(newHotkey)
 })
@@ -1093,6 +1383,7 @@ ipcMain.on('open_active_devtools', () => {
 
 ipcMain.on('trigger_active_upload_folder', async (event) => {
   if (!isValidMainWindowSender(event)) return
+  recoverAbandonedPicker(mainWindow)
   if (activeViewId && mainWindow && !mainWindow.isDestroyed()) {
     const view = aiViews.get(activeViewId)
     if (view && !view.webContents.isDestroyed()) {
@@ -1114,68 +1405,86 @@ ipcMain.on('confirm_folder_upload', async (event, payload: ConfirmFolderUploadPa
     if (view && !view.webContents.isDestroyed()) {
       const modelKey = viewModelKeys.get(activeViewId) || ''
       const feats = getMergedProviderFeatures(modelKey, providerConfig[modelKey])
-      await bundleAndInjectSelectedFiles(view, payload.folderPath, payload.selectedPaths, feats.attachmentSelector)
+      await bundleAndInjectSelectedFiles(
+        view,
+        payload.folderPath,
+        payload.selectedPaths,
+        feats.attachmentSelector
+      ).catch((err) => {
+        console.error('Folder upload confirm failed:', err)
+      })
     }
   }
 })
 
 ipcMain.handle('preview_folder_bundle', async (event, payload: ConfirmFolderUploadPayload) => {
-  if (!isValidMainWindowSender(event)) return { text: '', fileCount: 0, byteSize: 0, filesIncluded: [] }
+  if (!isValidMainWindowSender(event))
+    return { text: '', fileCount: 0, byteSize: 0, filesIncluded: [], omittedFromTextBundle: [] }
   if (!payload || !Array.isArray(payload.selectedPaths) || payload.selectedPaths.length === 0) {
-    return { text: '', fileCount: 0, byteSize: 0, filesIncluded: [] }
+    return { text: '', fileCount: 0, byteSize: 0, filesIncluded: [], omittedFromTextBundle: [] }
   }
-  return await generateBundleTextAsync(payload.folderPath, payload.selectedPaths)
+  // Non-text selections are never decoded as text; they are attached as originals instead.
+  const { textPaths, originals } = splitSelectionByDelivery(payload.folderPath, payload.selectedPaths)
+  const preview = await generateBundleTextAsync(payload.folderPath, textPaths)
+  return { ...preview, omittedFromTextBundle: originals.map((item) => item.relativePath) }
 })
 
-ipcMain.handle('save_folder_bundle_to_disk', async (event, payload: ConfirmFolderUploadPayload & { useDialog?: boolean }) => {
-  if (!isValidMainWindowSender(event)) return { success: false, error: 'Unauthorized sender' }
-  if (!payload || !Array.isArray(payload.selectedPaths) || payload.selectedPaths.length === 0) {
-    return { success: false, error: 'No files selected to bundle.' }
-  }
-  if (!mainWindow || mainWindow.isDestroyed()) {
-    return { success: false, error: 'Main window is not available.' }
-  }
-  const folderName = path.basename(payload.folderPath).replace(/[^a-zA-Z0-9_-]/g, '_')
-  const targetDir = activeProjectDir || join(app.getPath('downloads'), 'nexus')
-
-  try {
-    if (!existsSync(targetDir)) {
-      mkdirSync(targetDir, { recursive: true })
+ipcMain.handle(
+  'save_folder_bundle_to_disk',
+  async (event, payload: ConfirmFolderUploadPayload & { useDialog?: boolean }) => {
+    if (!isValidMainWindowSender(event)) return { success: false, error: 'Unauthorized sender' }
+    if (!payload || !Array.isArray(payload.selectedPaths) || payload.selectedPaths.length === 0) {
+      return { success: false, error: 'No files selected to bundle.' }
     }
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      return { success: false, error: 'Main window is not available.' }
+    }
+    const folderName = path.basename(payload.folderPath).replace(/[^a-zA-Z0-9_-]/g, '_')
+    const targetDir = activeProjectDir || join(app.getPath('downloads'), 'nexus')
 
-    let filePath: string
-    if (payload.useDialog) {
-      const { canceled, filePath: dialogPath } = await dialog.showSaveDialog(mainWindow, {
-        title: 'Save Codebase Bundle',
-        defaultPath: join(targetDir, `${folderName}_codebase_bundle.txt`),
-        filters: [
-          { name: 'Text Bundle (*.txt)', extensions: ['txt'] },
-          { name: 'All Files (*.*)', extensions: ['*'] }
-        ]
-      })
-      if (canceled || !dialogPath) {
-        return { success: false, canceled: true }
+    try {
+      if (!existsSync(targetDir)) {
+        mkdirSync(targetDir, { recursive: true })
       }
-      filePath = dialogPath
-    } else {
-      // Auto-download directly to nexus downloads folder
-      filePath = join(targetDir, `${folderName}_codebase_bundle_${Date.now()}.txt`)
-    }
 
-    const { text, fileCount, byteSize } = await generateBundleTextAsync(payload.folderPath, payload.selectedPaths)
-    fs.writeFileSync(filePath, text, 'utf-8')
-    clipboard.writeText(filePath)
-    return { success: true, savedPath: filePath, fileCount, byteSize, copiedToClipboard: true }
-  } catch (err: any) {
-    console.error('Failed to save codebase bundle to disk:', err)
-    return { success: false, error: err?.message || 'Failed to write bundle file.' }
+      let filePath: string
+      if (payload.useDialog) {
+        const { canceled, filePath: dialogPath } = await dialog.showSaveDialog(mainWindow, {
+          title: 'Save Codebase Bundle',
+          defaultPath: join(targetDir, `${folderName}_codebase_bundle.txt`),
+          filters: [
+            { name: 'Text Bundle (*.txt)', extensions: ['txt'] },
+            { name: 'All Files (*.*)', extensions: ['*'] }
+          ]
+        })
+        if (canceled || !dialogPath) {
+          return { success: false, canceled: true }
+        }
+        filePath = dialogPath
+      } else {
+        // Auto-download directly to nexus downloads folder
+        filePath = join(targetDir, `${folderName}_codebase_bundle_${Date.now()}.txt`)
+      }
+
+      const { textPaths } = splitSelectionByDelivery(payload.folderPath, payload.selectedPaths)
+      const { text, fileCount, byteSize } = await generateBundleTextAsync(
+        payload.folderPath,
+        textPaths
+      )
+      fs.writeFileSync(filePath, text, 'utf-8')
+      clipboard.writeText(filePath)
+      return { success: true, savedPath: filePath, fileCount, byteSize, copiedToClipboard: true }
+    } catch (err: any) {
+      console.error('Failed to save codebase bundle to disk:', err)
+      return { success: false, error: err?.message || 'Failed to write bundle file.' }
+    }
   }
-})
+)
 
 ipcMain.handle(
   'partition_folder_bundle',
   async (
-    _event,
+    event,
     payload: {
       folderPath: string
       selectedPaths: string[]
@@ -1183,6 +1492,7 @@ ipcMain.handle(
       enableCompression?: boolean
     }
   ) => {
+    if (!isValidMainWindowSender(event)) return null
     if (!payload || !Array.isArray(payload.selectedPaths) || payload.selectedPaths.length === 0) {
       return null
     }
@@ -1190,14 +1500,15 @@ ipcMain.handle(
       payload.folderPath,
       payload.selectedPaths,
       payload.maxChunkBytes || 8 * 1024 * 1024,
-      payload.enableCompression ?? true
+      payload.enableCompression ?? false
     )
   }
 )
 
 ipcMain.handle(
   'upload_chunks_sequentially',
-  async (_event, payload: { folderName: string; chunks: BundleChunk[] }) => {
+  async (event, payload: { folderName: string; chunks: BundleChunk[]; originalPaths?: string[] }) => {
+    if (!isValidMainWindowSender(event)) return { success: false, error: 'Unauthorized sender' }
     if (
       activeViewId &&
       mainWindow &&
@@ -1226,7 +1537,8 @@ ipcMain.handle(
 
 ipcMain.handle(
   'upload_single_chunk',
-  async (_event, payload: { folderName: string; chunk: BundleChunk }) => {
+  async (event, payload: { folderName: string; chunk: BundleChunk }) => {
+    if (!isValidMainWindowSender(event)) return { success: false, error: 'Unauthorized sender' }
     if (activeViewId && mainWindow && !mainWindow.isDestroyed() && payload?.chunk) {
       const view = aiViews.get(activeViewId)
       if (view && !view.webContents.isDestroyed()) {
@@ -1247,8 +1559,467 @@ ipcMain.handle(
 )
 
 ipcMain.handle(
+  'attach_all_chunks',
+  async (
+    event,
+    payload: { folderName: string; chunks: BundleChunk[]; originalPaths?: string[] }
+  ) => {
+    if (!isValidMainWindowSender(event)) return { success: false, error: 'Unauthorized sender' }
+    if (!activeViewId || !mainWindow || mainWindow.isDestroyed())
+      return { success: false, error: 'Active AI view is not available' }
+    if (!payload || !Array.isArray(payload.chunks) || payload.chunks.length === 0)
+      return { success: false, error: 'No parts to attach' }
+
+    const view = aiViews.get(activeViewId)
+    if (!view || view.webContents.isDestroyed())
+      return { success: false, error: 'Active AI view is not available' }
+
+    const modelKey = viewModelKeys.get(activeViewId) || ''
+    const feats = getMergedProviderFeatures(modelKey, providerConfig[modelKey])
+    const originalFiles = Array.isArray(payload.originalPaths) ? payload.originalPaths : []
+    const result = await attachChunksAsOneMessage(
+      view,
+      payload.chunks,
+      payload.folderName,
+      feats.attachmentSelector,
+      originalFiles
+    )
+    return result
+  }
+)
+
+// ---------------------------------------------------------------------------
+// Video preparation (plan 01)
+//
+// Two rules this block exists to enforce:
+//  1. preparation is local and read-only on the user's file; nothing leaves the
+//     machine until the user presses Send in the provider UI;
+//  2. a provider is never assumed to accept video — the verdict comes from recorded
+//     observations, and defaults to `unknown`.
+// ---------------------------------------------------------------------------
+
+function videoCapabilityFile(): string {
+  return join(app.getPath('userData'), 'video-capability.json')
+}
+
+function loadVideoCapabilityStore(): CapabilityStore {
+  try {
+    const raw = readFileSync(videoCapabilityFile(), 'utf-8')
+    const parsed = JSON.parse(raw) as CapabilityStore
+    if (!parsed || parsed.version !== 1 || !Array.isArray(parsed.observations)) {
+      return emptyCapabilityStore()
+    }
+    // Drop anything malformed rather than trusting a hand-edited file.
+    return {
+      version: 1,
+      observations: parsed.observations.filter((entry) => validateObservation(entry) === null)
+    }
+  } catch {
+    return emptyCapabilityStore()
+  }
+}
+
+function saveVideoCapabilityStore(store: CapabilityStore): void {
+  try {
+    writeFileSync(videoCapabilityFile(), JSON.stringify(store, null, 2), 'utf-8')
+  } catch (error) {
+    console.warn('[video] could not persist capability observations:', error)
+  }
+}
+
+/** Which local tools exist — the UI must be able to say exactly what is missing. */
+ipcMain.handle('get_media_tool_status', (event) => {
+  if (!isValidMainWindowSender(event)) return { authorized: false }
+  const tools = locateMediaTools()
+  return {
+    authorized: true,
+    ffprobe: Boolean(tools.ffprobe),
+    ffmpeg: Boolean(tools.ffmpeg),
+    source: tools.source ?? 'none'
+  }
+})
+
+ipcMain.handle('get_video_capability', (event, payload: { provider?: string; model?: string } = {}) => {
+  if (!isValidMainWindowSender(event)) return { authorized: false }
+  const store = loadVideoCapabilityStore()
+  const verdict = assessVideoCapability(
+    { provider: payload.provider ?? 'unknown-provider', model: payload.model, kind: 'video' },
+    store.observations
+  )
+  return { authorized: true, verdict }
+})
+
+/**
+ * Record what the user actually observed. Deliberately explicit about the fact: an
+ * accept-attribute hint must never be stored as acceptance, so the caller has to say
+ * which fact it saw and the store rejects anything malformed.
+ */
+ipcMain.handle(
+  'record_video_capability_observation',
+  (
+    event,
+    payload: {
+      provider?: string
+      model?: string
+      status?: 'supported' | 'unsupported'
+      fact?: string
+      source?: string
+      notes?: string
+    } = {}
+  ) => {
+    if (!isValidMainWindowSender(event)) return { authorized: false, success: false }
+    const observation = {
+      provider: (payload.provider ?? '').trim(),
+      model: payload.model || undefined,
+      kind: 'video' as const,
+      status: payload.status,
+      fact: payload.fact,
+      source: payload.source,
+      observedAt: new Date().toISOString(),
+      notes: payload.notes
+    }
+    const error = validateObservation(observation)
+    if (error) return { authorized: true, success: false, error }
+    const store = upsertObservation(loadVideoCapabilityStore(), observation as never)
+    saveVideoCapabilityStore(store)
+    const verdict = assessVideoCapability(
+      { provider: observation.provider, model: observation.model, kind: 'video' },
+      store.observations
+    )
+    return { authorized: true, success: true, verdict }
+  }
+)
+
+ipcMain.handle(
+  'prepare_video',
+  async (
+    event,
+    payload: { filePath?: string; pace?: VideoPace; provider?: string; model?: string; userNote?: string } = {}
+  ) => {
+    if (!isValidMainWindowSender(event)) {
+      return { ok: false, reason: 'unauthorized', message: 'Unauthorized sender' }
+    }
+    if (!payload?.filePath) {
+      return { ok: false, reason: 'missing-path', message: 'No video file was selected.' }
+    }
+
+    // One preparation at a time: frame extraction is CPU- and disk-heavy.
+    videoPrepController?.abort()
+    const controller = new AbortController()
+    videoPrepController = controller
+    try {
+      const store = loadVideoCapabilityStore()
+      const result = await videoJobs.prepareJob({
+        filePath: payload.filePath,
+        pace: payload.pace ?? 'balanced',
+        provider: payload.provider,
+        model: payload.model,
+        observations: store.observations,
+        userNote: payload.userNote,
+        signal: controller.signal
+      })
+      if (result.ok) {
+        console.log(`[video] prepared ${result.summary.jobId}: ${result.summary.frameCount} still(s)`)
+      } else {
+        console.warn(`[video] preparation failed (${result.reason}): ${result.message}`)
+      }
+      return result
+    } finally {
+      if (videoPrepController === controller) videoPrepController = null
+    }
+  }
+)
+
+ipcMain.on('cancel_video_preparation', (event) => {
+  if (!isValidMainWindowSender(event)) return
+  videoPrepController?.abort()
+  videoPrepController = null
+  videoJobs.disposeAll()
+})
+
+ipcMain.on('discard_video_job', (event, jobId: string) => {
+  if (!isValidMainWindowSender(event)) return
+  if (typeof jobId === 'string' && jobId) videoJobs.discard(jobId)
+})
+
+ipcMain.handle(
+  'attach_prepared_video',
+  async (
+    event,
+    payload: { jobId?: string; userNote?: string; includeManifest?: boolean; manifestText?: string } = {}
+  ) => {
+    if (!isValidMainWindowSender(event)) return { success: false, message: 'Unauthorized sender' }
+    if (!payload?.jobId) return { success: false, message: 'No prepared video was selected.' }
+    if (!activeViewId || !mainWindow || mainWindow.isDestroyed()) {
+      return { success: false, message: 'Active AI view is not available' }
+    }
+    const view = aiViews.get(activeViewId)
+    if (!view || view.webContents.isDestroyed()) {
+      return { success: false, message: 'Active AI view is not available' }
+    }
+    const modelKey = viewModelKeys.get(activeViewId) || ''
+    const feats = getMergedProviderFeatures(modelKey, providerConfig[modelKey])
+    const result = await videoJobs.attachPreparedVideo({
+      jobId: payload.jobId,
+      view,
+      customSelector: feats.attachmentSelector,
+      userNote: payload.userNote,
+      includeManifest: payload.includeManifest,
+      manifestText: typeof payload.manifestText === 'string' ? payload.manifestText : undefined
+    })
+    console.log(`[video] attach ${payload.jobId}: ${result.success ? 'ok' : 'failed'} — ${result.message}`)
+    return result
+  }
+)
+
+/**
+ * Office preparation (plan 02, stage 3).
+ *
+ * Read locally, decide out loud, attach only on request. Document contents are never logged:
+ * only the file name, the kind and the counts the dialog already shows.
+ */
+ipcMain.handle(
+  'prepare_office',
+  async (
+    event,
+    payload: {
+      filePath?: string
+      consent?: Record<string, unknown>
+      wantPdf?: boolean
+      discardJobId?: string
+      maxCharsPerPart?: number
+    } = {}
+  ) => {
+    if (!isValidMainWindowSender(event)) {
+      return { ok: false, reason: 'unauthorized', message: 'Unauthorized sender' }
+    }
+    if (!payload?.filePath) {
+      return { ok: false, reason: 'missing-path', message: 'No Office file was selected.' }
+    }
+
+    // One preparation at a time: parsing a large workbook is CPU- and disk-heavy.
+    officePrepController?.abort()
+    const controller = new AbortController()
+    officePrepController = controller
+    // Re-preparing the same file (consent change) replaces the previous job.
+    if (typeof payload.discardJobId === 'string' && payload.discardJobId) {
+      officeJobs.discard(payload.discardJobId)
+    }
+    try {
+      const result = await prepareOfficeDocument({
+        filePath: payload.filePath,
+        consent: payload.consent,
+        wantPdf: payload.wantPdf === true,
+        maxCharsPerPart:
+          typeof payload.maxCharsPerPart === 'number' ? payload.maxCharsPerPart : undefined,
+        signal: controller.signal
+      })
+      if (result.ok) {
+        const jobId = officeJobs.add({
+          fileName: result.preview.fileName,
+          parts: result.parts,
+          preview: result.preview,
+          jobDir: result.jobDir,
+          pdfPath: result.pdfPath
+        })
+        console.log(
+          `[office] prepared ${jobId}: ${result.preview.kind}, ${result.parts.length} part(s)`
+        )
+        return { ...result.preview, ok: true as const, jobId }
+      }
+      console.warn(`[office] preparation refused (${result.reason}): ${result.message}`)
+      return { ...result, jobId: undefined }
+    } catch (error) {
+      console.error('[office] preparation threw:', error instanceof Error ? error.message : 'unknown')
+      return { ok: false, reason: 'unexpected', message: 'Preparation failed unexpectedly.' }
+    } finally {
+      if (officePrepController === controller) officePrepController = null
+    }
+  }
+)
+
+ipcMain.handle('read_office_part', (event, payload: { jobId?: string; index?: number } = {}) => {
+  if (!isValidMainWindowSender(event)) return { ok: false, message: 'Unauthorized sender' }
+  if (!payload?.jobId || typeof payload.index !== 'number') {
+    return { ok: false, message: 'No part was requested.' }
+  }
+  return officeJobs.partText(payload.jobId, payload.index)
+})
+
+ipcMain.on('discard_office_job', (event, jobId: string) => {
+  if (!isValidMainWindowSender(event)) return
+  if (typeof jobId === 'string' && jobId) officeJobs.discard(jobId)
+})
+
+ipcMain.on('cancel_office_preparation', (event) => {
+  if (!isValidMainWindowSender(event)) return
+  officePrepController?.abort()
+  officePrepController = null
+  officeJobs.disposeAll()
+})
+
+ipcMain.handle(
+  'attach_prepared_office',
+  async (
+    event,
+    payload: {
+      jobId?: string
+      attachPdf?: boolean
+      includeManifest?: boolean
+      manifestText?: string
+    } = {}
+  ) => {
+    if (!isValidMainWindowSender(event)) return { success: false, message: 'Unauthorized sender' }
+    if (!payload?.jobId) return { success: false, message: 'No prepared file was selected.' }
+    if (!activeViewId || !mainWindow || mainWindow.isDestroyed()) {
+      return { success: false, message: 'Active AI view is not available' }
+    }
+    const view = aiViews.get(activeViewId)
+    if (!view || view.webContents.isDestroyed()) {
+      return { success: false, message: 'Active AI view is not available' }
+    }
+    const modelKey = viewModelKeys.get(activeViewId) || ''
+    const feats = getMergedProviderFeatures(modelKey, providerConfig[modelKey])
+    const result = await officeJobs.attachPreparedOffice({
+      jobId: payload.jobId,
+      view,
+      customSelector: feats.attachmentSelector,
+      includeManifest: payload.includeManifest,
+      manifestText: typeof payload.manifestText === 'string' ? payload.manifestText : undefined,
+      attachPdf: payload.attachPdf === true
+    })
+    // Only the outcome is logged — never the document text.
+    console.log(
+      `[office] insert ${payload.jobId}: ${result.success ? 'ok' : 'failed'} — ${result.message}`
+    )
+    return result
+  }
+)
+
+/**
+ * Mixed selections (plan 02, stage 4): a folder drop is rarely only spreadsheets.
+ * Each Office file is prepared on its own terms, in the user's order, with its own consent;
+ * everything else keeps its normal upload route and is reported back by name.
+ */
+ipcMain.handle(
+  'prepare_office_selection',
+  async (
+    event,
+    payload: {
+      filePaths?: string[]
+      consentByPath?: Record<string, Record<string, unknown>>
+      wantPdf?: boolean
+      maxFiles?: number
+    } = {}
+  ) => {
+    if (!isValidMainWindowSender(event)) {
+      return { ok: false, message: 'Unauthorized sender' }
+    }
+    const filePaths = Array.isArray(payload?.filePaths)
+      ? payload.filePaths.filter((entry): entry is string => typeof entry === 'string' && entry.length > 0)
+      : []
+    if (filePaths.length === 0) {
+      return { ok: false, message: 'No files were selected.' }
+    }
+
+    officePrepController?.abort()
+    const controller = new AbortController()
+    officePrepController = controller
+    try {
+      const result = await prepareOfficeSelection({
+        filePaths,
+        consentByPath: payload.consentByPath as
+          | Record<string, Partial<OfficeConsent>>
+          | undefined,
+        wantPdf: payload.wantPdf === true,
+        maxFiles: typeof payload.maxFiles === 'number' ? payload.maxFiles : undefined,
+        signal: controller.signal,
+        onProgress: (entry, index, total) => {
+          // Progress goes to the dialog, never to the log: file names only.
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            sendToMainWindow('office_selection_progress', {
+              fileName: entry.fileName,
+              index,
+              total,
+              status: entry.status
+            })
+          }
+        }
+      })
+
+      // Register each prepared file as its own job so the user can inspect or discard them
+      // individually, then hand the ids back in selection order.
+      for (const file of result.prepared) {
+        const jobId = officeJobs.add({
+          fileName: file.preview.fileName,
+          parts: file.parts,
+          preview: file.preview,
+          jobDir: file.jobDir,
+          pdfPath: file.pdfPath
+        })
+        const entry = result.report.entries.find((candidate) => candidate.filePath === file.filePath)
+        if (entry) entry.jobId = jobId
+      }
+
+      console.log(
+        `[office] selection prepared: ${result.report.ready}/${result.report.entries.length} file(s), ${result.report.totalParts} part(s)`
+      )
+      return { ok: true as const, ...result }
+    } catch (error) {
+      console.error('[office] selection failed:', error instanceof Error ? error.message : 'unknown')
+      return { ok: false, message: 'Preparing the selection failed unexpectedly.' }
+    } finally {
+      if (officePrepController === controller) officePrepController = null
+    }
+  }
+)
+
+ipcMain.handle(
+  'attach_prepared_office_selection',
+  async (event, payload: { jobIds?: string[]; attachPdf?: boolean; manifestText?: string } = {}) => {
+    if (!isValidMainWindowSender(event)) return { success: false, message: 'Unauthorized sender' }
+    const jobIds = Array.isArray(payload?.jobIds)
+      ? payload.jobIds.filter((entry): entry is string => typeof entry === 'string' && entry.length > 0)
+      : []
+    if (jobIds.length === 0) return { success: false, message: 'No prepared files were selected.' }
+    if (!activeViewId || !mainWindow || mainWindow.isDestroyed()) {
+      return { success: false, message: 'Active AI view is not available' }
+    }
+    const view = aiViews.get(activeViewId)
+    if (!view || view.webContents.isDestroyed()) {
+      return { success: false, message: 'Active AI view is not available' }
+    }
+    const modelKey = viewModelKeys.get(activeViewId) || ''
+    const feats = getMergedProviderFeatures(modelKey, providerConfig[modelKey])
+    const result = await officeJobs.attachPreparedOfficeMany({
+      jobIds,
+      view,
+      customSelector: feats.attachmentSelector,
+      manifestText: typeof payload.manifestText === 'string' ? payload.manifestText : undefined,
+      attachPdf: payload.attachPdf === true
+    })
+    console.log(
+      `[office] insert selection (${jobIds.length}): ${result.success ? 'ok' : 'failed'} — ${result.message}`
+    )
+    return result
+  }
+)
+
+/**
+ * Which provider/model the active tab is on. Video capability is scoped per provider, so
+ * the dialog must not guess it. Reported as `unknown` when no tab is active.
+ */
+ipcMain.handle('get_active_ai_target', (event) => {
+  if (!isValidMainWindowSender(event)) return { authorized: false }
+  if (!activeViewId) return { authorized: true, tabId: null, provider: null, model: null }
+  const modelKey = viewModelKeys.get(activeViewId) || null
+  return { authorized: true, tabId: activeViewId, provider: modelKey, model: modelKey }
+})
+
+ipcMain.handle(
   'save_single_chunk_to_disk',
-  async (_event, payload: { folderName: string; chunk: BundleChunk; useDialog?: boolean }) => {
+  async (event, payload: { folderName: string; chunk: BundleChunk; useDialog?: boolean }) => {
+    if (!isValidMainWindowSender(event)) return { success: false, error: 'Unauthorized sender' }
     if (!mainWindow || mainWindow.isDestroyed() || !payload?.chunk) {
       return { success: false, error: 'Main window is not available.' }
     }
@@ -1293,6 +2064,7 @@ ipcMain.handle(
 )
 
 ipcMain.on('trigger_active_upload', async () => {
+  recoverAbandonedPicker(mainWindow)
   if (activeViewId && mainWindow && !mainWindow.isDestroyed()) {
     const view = aiViews.get(activeViewId)
     if (view && !view.webContents.isDestroyed()) {
@@ -1308,7 +2080,11 @@ ipcMain.handle('shell_open', async (event, url: string) => {
   if (!url || typeof url !== 'string') return
   try {
     const parsed = new URL(url)
-    if (parsed.protocol === 'http:' || parsed.protocol === 'https:' || parsed.protocol === 'mailto:') {
+    if (
+      parsed.protocol === 'http:' ||
+      parsed.protocol === 'https:' ||
+      parsed.protocol === 'mailto:'
+    ) {
       await shell.openExternal(url)
     } else {
       console.warn('[Security] Blocked non-http/https external open URL:', url)
@@ -1328,7 +2104,10 @@ ipcMain.handle('test_provider_live_hooks', async (_event, modelKey: string) => {
   }
   if (!targetView) {
     for (const [tabId, view] of aiViews) {
-      if (viewModelKeys.get(tabId) === modelKey) { targetView = view; break }
+      if (viewModelKeys.get(tabId) === modelKey) {
+        targetView = view
+        break
+      }
     }
   }
   if (!targetView && activeViewId && aiViews.has(activeViewId)) {
@@ -1390,13 +2169,17 @@ async function clickActiveViewFeature(
     }
     return { ok: false, reason: 'no_match' };
   })()`
-  return view.webContents.executeJavaScript(script, true).catch(() => ({ ok: false, reason: 'error' }))
+  return view.webContents
+    .executeJavaScript(script, true)
+    .catch(() => ({ ok: false, reason: 'error' }))
 }
 
 ipcMain.handle('ai_stop_generation', () => clickActiveViewFeature('stopGenerationSelector'))
 ipcMain.handle('ai_site_new_chat', () => clickActiveViewFeature('newChatSelector'))
 
-function isValidMainWindowSender(event: Electron.IpcMainEvent | Electron.IpcMainInvokeEvent): boolean {
+function isValidMainWindowSender(
+  event: Electron.IpcMainEvent | Electron.IpcMainInvokeEvent
+): boolean {
   if (!mainWindow || mainWindow.isDestroyed()) return false
   if (event.sender !== mainWindow.webContents) return false
   if (event.senderFrame && event.senderFrame !== mainWindow.webContents.mainFrame) {
@@ -1441,20 +2224,20 @@ ipcMain.on('claim_window_focus', () => {
 })
 
 ipcMain.on('set_ui_zoom', (_, zoom) => {
-  currentUiZoom = zoom;
+  currentUiZoom = zoom
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.setZoomFactor(zoom);
+    mainWindow.webContents.setZoomFactor(zoom)
   }
-});
+})
 
 ipcMain.on('set_webview_zoom', (_, zoom) => {
-  currentWebviewZoom = zoom;
+  currentWebviewZoom = zoom
   for (const view of aiViews.values()) {
     if (view && view.webContents) {
-      view.webContents.setZoomFactor(zoom);
+      view.webContents.setZoomFactor(zoom)
     }
   }
-});
+})
 
 ipcMain.handle('get_platform', () => {
   return process.platform
@@ -1502,9 +2285,10 @@ function registerDownloadHandler(targetSession: Electron.Session) {
 
   targetSession.on('will-download', (_event, item, _webContents) => {
     const rawFilename = item.getFilename() || 'download'
-    const targetDir = activeProjectDir && existsSync(activeProjectDir)
-      ? activeProjectDir
-      : join(app.getPath('downloads'), 'nexus')
+    const targetDir =
+      activeProjectDir && existsSync(activeProjectDir)
+        ? activeProjectDir
+        : join(app.getPath('downloads'), 'nexus')
 
     try {
       mkdirSync(targetDir, { recursive: true })
@@ -1540,7 +2324,13 @@ function registerDownloadHandler(targetSession: Electron.Session) {
         }
 
         sendToMainWindow('download_completed', downloadInfo)
-        downloadNotificationOverlay?.show({ id: downloadInfo.id, filename: downloadInfo.filename, fullPath: downloadInfo.fullPath, size: downloadInfo.fileSize, destination: downloadInfo.directory })
+        downloadNotificationOverlay?.show({
+          id: downloadInfo.id,
+          filename: downloadInfo.filename,
+          fullPath: downloadInfo.fullPath,
+          size: downloadInfo.fileSize,
+          destination: downloadInfo.directory
+        })
       } else if (state === 'interrupted' || state === 'cancelled') {
         console.warn(`[Nexus Downloads] Download ${state}: ${rawFilename}`)
       }
@@ -1655,20 +2445,32 @@ async function injectSkillPromptIntoWebview(
 ipcMain.handle('switch_to_tauri', () => {
   console.log('Switching to Tauri (Nexus Lite)...')
 
-  const projectRoot = process.env.NODE_ENV === 'development'
-    ? path.join(__dirname, '../../')
-    : path.join(app.getAppPath(), '../../') // Might need adjustment in prod
+  const projectRoot =
+    process.env.NODE_ENV === 'development'
+      ? path.join(__dirname, '../../')
+      : path.join(app.getAppPath(), '../../') // Might need adjustment in prod
 
-  const releaseBin = process.platform === 'win32'
-    ? path.join(projectRoot, 'src-tauri/target/release/nexus.exe')
-    : path.join(projectRoot, 'src-tauri/target/release/nexus')
+  const releaseBin =
+    process.platform === 'win32'
+      ? path.join(projectRoot, 'src-tauri/target/release/nexus.exe')
+      : path.join(projectRoot, 'src-tauri/target/release/nexus')
 
-  let child;
+  let child
   if (fs.existsSync(releaseBin)) {
-    child = spawn(releaseBin, [], { detached: true, stdio: 'ignore', cwd: projectRoot, shell: true })
+    child = spawn(releaseBin, [], {
+      detached: true,
+      stdio: 'ignore',
+      cwd: projectRoot,
+      shell: true
+    })
   } else {
     const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm'
-    child = spawn(npmCmd, ['run', 'tauri', 'dev'], { detached: true, stdio: 'ignore', cwd: projectRoot, shell: true })
+    child = spawn(npmCmd, ['run', 'tauri', 'dev'], {
+      detached: true,
+      stdio: 'ignore',
+      cwd: projectRoot,
+      shell: true
+    })
   }
   child.unref()
   setTimeout(() => {
@@ -1776,11 +2578,25 @@ skillsEngine.onSkillsChanged(() => {
 
 app.on('before-quit', () => {
   isQuitting = true
+  // Never leave prepared frames on disk after the app exits.
+  try {
+    videoJobs.disposeAll()
+  } catch {
+    /* nothing left to clean */
+  }
+  // ...and never leave a converted PDF behind either.
+  try {
+    officeJobs.disposeAll()
+  } catch {
+    /* nothing left to clean */
+  }
 })
 
 app.on('will-quit', () => {
   autoUpdateService?.stop()
   downloadNotificationOverlay?.destroy()
+  // Remove staged upload parts so bundled source does not linger in the temp folder.
+  cleanupAllUploadTempDirs()
   void flushGoogleSessionStore(session.fromPartition('persist:ai-shared')).catch(console.error)
   globalShortcut.unregisterAll()
 })
@@ -1840,6 +2656,7 @@ const DEFAULT_ACTION_KEYS: Record<string, string[]> = {
   'site-new-chat': ['Ctrl', 'Shift', 'N'],
   'tab-prev': ['Ctrl', 'K'],
   'tab-next': ['Ctrl', 'J'],
+  'notification-latest': ['Ctrl', 'Shift', 'Y'],
   'tab-move-up': ['Ctrl', 'Shift', 'K'],
   'tab-move-down': ['Ctrl', 'Shift', 'J']
 }
@@ -1877,8 +2694,16 @@ function reconcileViewPresentation(): void {
     const realBounds = lastRealBounds.get(activeViewId)
     if (view && !view.webContents.isDestroyed()) {
       // Apply cached bounds only when they are non-zero; never force stale zero geometry
+      let previousBounds: Electron.Rectangle | null = null
+      try {
+        previousBounds = view.getBounds()
+      } catch {
+        /* bounds unavailable on this platform/build */
+      }
       if (shouldShow && realBounds && realBounds.width > 0 && realBounds.height > 0) {
-        try { view.setBounds(realBounds) } catch {}
+        try {
+          view.setBounds(realBounds)
+        } catch {}
       }
       activeViewVisible = shouldShow
       try {
@@ -1887,6 +2712,31 @@ function reconcileViewPresentation(): void {
       if (!view.webContents.isDestroyed()) {
         view.webContents.setBackgroundThrottling?.(!shouldShow)
         view.webContents.setAudioMuted?.(!shouldShow)
+      }
+      // Re-applying identical geometry does NOT make Chromium produce a frame, so a
+      // surface discarded while the window was hidden/occluded stays blank ("dark tab")
+      // until something flips visibility. When the geometry genuinely changed the
+      // compositor already repaints, so only the no-change case needs a forced paint.
+      const geometryChanged =
+        !previousBounds ||
+        !realBounds ||
+        previousBounds.x !== realBounds.x ||
+        previousBounds.y !== realBounds.y ||
+        previousBounds.width !== realBounds.width ||
+        previousBounds.height !== realBounds.height
+      if (shouldShow && !geometryChanged) {
+        forceViewRepaint(view, {
+          bounds: realBounds && realBounds.width > 0 && realBounds.height > 0 ? realBounds : null,
+          reason: 'reconcile-presentation',
+          log: (message) => console.log(`[viewRepaint] ${message}`)
+        })
+        try {
+          if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
+            mainWindow.webContents.invalidate?.()
+          }
+        } catch {
+          /* surface already gone; the view repaint above is the part that matters */
+        }
       }
     } else {
       activeViewVisible = false
@@ -1953,6 +2803,7 @@ const CODE_KEY_MAP: Record<string, string> = {
   KeyI: 'i',
   KeyN: 'n',
   KeyO: 'o',
+  KeyY: 'y',
   BracketRight: ']',
   BracketLeft: '[',
   Comma: ',',
@@ -1983,9 +2834,21 @@ function keyMatches(input: Electron.Input, keys: string[]): boolean {
   const target = nonMods[0].toLowerCase()
   const eventKey = (input.key || '').toLowerCase()
   if (eventKey && eventKey === target) return true
-  if (target === 'b' && (eventKey === 'b' || input.code === 'KeyB' || input.code?.toLowerCase() === 'keyb')) return true
-  if (target === 'i' && (eventKey === 'i' || input.code === 'KeyI' || input.code?.toLowerCase() === 'keyi')) return true
-  if (target === 'o' && (eventKey === 'o' || input.code === 'KeyO' || input.code?.toLowerCase() === 'keyo')) return true
+  if (
+    target === 'b' &&
+    (eventKey === 'b' || input.code === 'KeyB' || input.code?.toLowerCase() === 'keyb')
+  )
+    return true
+  if (
+    target === 'i' &&
+    (eventKey === 'i' || input.code === 'KeyI' || input.code?.toLowerCase() === 'keyi')
+  )
+    return true
+  if (
+    target === 'o' &&
+    (eventKey === 'o' || input.code === 'KeyO' || input.code?.toLowerCase() === 'keyo')
+  )
+    return true
   if (eventKey === ' ' && target === 'space') return true
   const codeKey = CODE_KEY_MAP[input.code || '']
   return Boolean(codeKey) && codeKey.toLowerCase() === target
@@ -1997,7 +2860,11 @@ function matchesAction(input: Electron.Input, id: string): boolean {
   return modifiersMatch(input, keys) && keyMatches(input, keys)
 }
 
-export function routeGlobalShortcut(event: Electron.Event, input: Electron.Input, _source: 'window' | 'view'): boolean {
+export function routeGlobalShortcut(
+  event: Electron.Event,
+  input: Electron.Input,
+  _source: 'window' | 'view'
+): boolean {
   if (input.type !== 'keyDown') return false
 
   const isCtrlOrMeta = Boolean(input.control || input.meta)
@@ -2014,14 +2881,36 @@ export function routeGlobalShortcut(event: Electron.Event, input: Electron.Input
   // While a fullscreen overlay is open the renderer owns the keyboard.
   if (overlaysOpen) return false
 
+  // In-app shortcut: switch to the latest notified tab, if it still exists.
+  // Never register a system-wide hotkey or silently wake a closed tab.
+  if (matchesAction(input, 'notification-latest') && lastNotifiedTabId) {
+    const tabId = lastNotifiedTabId
+    const tabExists =
+      aiViews.has(tabId) ||
+      tabDiscardManager.hasView(tabId) ||
+      tabDiscardManager.isTabEvicted(tabId)
+    if (tabExists) {
+      event.preventDefault()
+      if (!input.isAutoRepeat) {
+        dismissInAppToast(true)
+        sendToMainWindow('notification_switch_to_tab', tabId)
+      }
+      return true
+    }
+    lastNotifiedTabId = null
+  }
+
   // Alt+J / Alt+K -> In-chat prompt navigation (only when active webview is visible)
-  const isAltJK = input.alt && !input.control && !input.shift && !input.meta && (
-    keyLower === 'j' || keyLower === 'k' || code === 'KeyJ' || code === 'KeyK'
-  )
+  const isAltJK =
+    input.alt &&
+    !input.control &&
+    !input.shift &&
+    !input.meta &&
+    (keyLower === 'j' || keyLower === 'k' || code === 'KeyJ' || code === 'KeyK')
   if (isAltJK) {
     if (activeViewId && activeViewVisible) {
       event.preventDefault()
-      const dir: 'older' | 'newer' = (keyLower === 'k' || code === 'KeyK') ? 'older' : 'newer'
+      const dir: 'older' | 'newer' = keyLower === 'k' || code === 'KeyK' ? 'older' : 'newer'
       const view = aiViews.get(activeViewId)
       if (view && !view.webContents.isDestroyed()) {
         const modelKey = viewModelKeys.get(activeViewId) || ''
@@ -2068,16 +2957,16 @@ export function routeGlobalShortcut(event: Electron.Event, input: Electron.Input
     return true
   }
 
-  // Ctrl+O -> Upload File directly in main (guarded against repeat & renderer bounce)
+  // Ctrl+O -> Upload files (files-only native picker; multi-select supported)
   if (matchesAction(input, 'upload-file')) {
     event.preventDefault()
     if (input.isAutoRepeat) return true
+    // A picker that never returned must not keep the shortcut dead until restart.
+    recoverAbandonedPicker(mainWindow)
     if (activeViewId && mainWindow && !mainWindow.isDestroyed()) {
       const view = aiViews.get(activeViewId)
       if (view && !view.webContents.isDestroyed()) {
-        const modelKey = viewModelKeys.get(activeViewId) || ''
-        const feats = getMergedProviderFeatures(modelKey, providerConfig[modelKey])
-        handleMixedUpload(view, mainWindow, feats.attachmentSelector).catch((err) => {
+        handleFilesUpload(view, mainWindow).catch((err) => {
           console.error('Failed to handle file upload:', err)
         })
       }
@@ -2089,6 +2978,7 @@ export function routeGlobalShortcut(event: Electron.Event, input: Electron.Input
   if (matchesAction(input, 'upload-folder')) {
     event.preventDefault()
     if (input.isAutoRepeat) return true
+    recoverAbandonedPicker(mainWindow)
     if (activeViewId && mainWindow && !mainWindow.isDestroyed()) {
       const view = aiViews.get(activeViewId)
       if (view && !view.webContents.isDestroyed()) {
@@ -2143,7 +3033,10 @@ export function routeGlobalShortcut(event: Electron.Event, input: Electron.Input
   if (matchesAction(input, 'tab-prev') || matchesAction(input, 'tab-next')) {
     event.preventDefault()
     const prev = matchesAction(input, 'tab-prev')
-    sendToMainWindow('execute-global-action', { action: 'navigate_tab', direction: prev ? 'prev' : 'next' })
+    sendToMainWindow('execute-global-action', {
+      action: 'navigate_tab',
+      direction: prev ? 'prev' : 'next'
+    })
     return true
   }
 
@@ -2161,7 +3054,12 @@ export function routeGlobalShortcut(event: Electron.Event, input: Electron.Input
     (isCtrlOrMeta && input.alt && input.shift && (keyLower === 'i' || code === 'KeyI'))
   ) {
     event.preventDefault()
-    if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
+    if (
+      mainWindow &&
+      !mainWindow.isDestroyed() &&
+      mainWindow.webContents &&
+      !mainWindow.webContents.isDestroyed()
+    ) {
       mainWindow.webContents.openDevTools({ mode: 'detach' })
     }
     return true
@@ -2185,23 +3083,42 @@ export function routeGlobalShortcut(event: Electron.Event, input: Electron.Input
   const digitKeyMatch = keyLower.match(/^[1-9]$/)
   const digitNum = digitCodeMatch
     ? parseInt(digitCodeMatch[1], 10)
-    : (digitKeyMatch ? parseInt(digitKeyMatch[0], 10) : null)
+    : digitKeyMatch
+      ? parseInt(digitKeyMatch[0], 10)
+      : null
 
   if (digitNum !== null && !input.shift) {
     const targetIndex = digitNum === 9 ? -1 : digitNum - 1
     if (isCtrlOrMeta && !input.alt) {
       event.preventDefault()
-      sendToMainWindow('execute-global-action', { action: 'switch_tab_index', index: targetIndex, isPinned: false })
+      sendToMainWindow('execute-global-action', {
+        action: 'switch_tab_index',
+        index: targetIndex,
+        isPinned: false
+      })
       return true
     } else if (input.alt && !isCtrlOrMeta) {
       event.preventDefault()
-      sendToMainWindow('execute-global-action', { action: 'switch_tab_index', index: targetIndex, isPinned: true })
+      sendToMainWindow('execute-global-action', {
+        action: 'switch_tab_index',
+        index: targetIndex,
+        isPinned: true
+      })
       return true
     }
   }
 
   // Zoom: Ctrl+Minus, Ctrl+Equal, Ctrl+0, Numpad (Shift = UI zoom)
-  if (isCtrlOrMeta && !input.alt && (code === 'Minus' || code === 'Equal' || code === 'Digit0' || code === 'NumpadAdd' || code === 'NumpadSubtract' || code === 'Numpad0')) {
+  if (
+    isCtrlOrMeta &&
+    !input.alt &&
+    (code === 'Minus' ||
+      code === 'Equal' ||
+      code === 'Digit0' ||
+      code === 'NumpadAdd' ||
+      code === 'NumpadSubtract' ||
+      code === 'Numpad0')
+  ) {
     event.preventDefault()
     sendToMainWindow('execute-global-action', { action: 'zoom', code, shift: input.shift })
     return true
@@ -2270,8 +3187,13 @@ function createWindow() {
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       nodeIntegration: false,
-      contextIsolation: true
+      contextIsolation: true,
+      // Loading a background toast must not take focus from the active input.
+      focusOnNavigation: false
     }
+  })
+  aiNotificationView.webContents.on('before-input-event', (event, input) => {
+    routeGlobalShortcut(event, input, 'window')
   })
   aiNotificationView.setBackgroundColor('#00000000')
   aiNotificationView.setVisible(false)
@@ -2280,13 +3202,17 @@ function createWindow() {
 
   // Construct once during window startup. This must not live in the
   // AI-notification presenter, or downloads before an AI alert are dropped.
-  downloadNotificationOverlay = new DownloadNotificationOverlay(mainWindow, join(__dirname, '../preload/index.js'), () => {
-    if (!mainWindow || mainWindow.isDestroyed()) return
-    if (aiNotificationView) {
-      mainWindow.contentView.removeChildView(aiNotificationView)
-      mainWindow.contentView.addChildView(aiNotificationView)
+  downloadNotificationOverlay = new DownloadNotificationOverlay(
+    mainWindow,
+    join(__dirname, '../preload/index.js'),
+    () => {
+      if (!mainWindow || mainWindow.isDestroyed()) return
+      if (aiNotificationView) {
+        mainWindow.contentView.removeChildView(aiNotificationView)
+        mainWindow.contentView.addChildView(aiNotificationView)
+      }
     }
-  })
+  )
 
   mainWindow.on('resize', () => {
     if (aiNotificationView && currentNotificationData && isAiNotificationVisible) {
@@ -2320,6 +3246,12 @@ function createWindow() {
       if (view && !view.webContents.isDestroyed()) {
         view.webContents.focus()
         focusPromptInView(view)
+        // Coming back from another app can present a stale surface on some drivers.
+        forceViewRepaint(view, {
+          bounds: lastRealBounds.get(activeViewId) ?? null,
+          reason: 'window-focus',
+          log: (message) => console.log(`[viewRepaint] ${message}`)
+        })
       }
     } else if (mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
       mainWindow.focusOnWebView()
@@ -2388,12 +3320,43 @@ function createWindow() {
   const resumeActiveView = () => {
     restartActiveArenaTitleSync()
     reconcileViewPresentation()
+    try {
+      if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
+        mainWindow.webContents.invalidate?.()
+      }
+    } catch {
+      /* window tearing down — nothing to repaint */
+    }
   }
   mainWindow.on('show', resumeActiveView)
   mainWindow.on('restore', resumeActiveView)
+  // Waking from sleep is another way to come back to a surface the compositor dropped.
+  // Registered once per app, not per window, and only touches the visible view.
+  if (!powerResumeHookRegistered) {
+    powerResumeHookRegistered = true
+    try {
+      powerMonitor.on('resume', () => {
+        if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible()) return
+        resumeActiveView()
+        try {
+          mainWindow.webContents?.invalidate?.()
+        } catch {
+          /* webContents already destroyed after wake */
+        }
+      })
+    } catch (error) {
+      console.warn('[viewRepaint] powerMonitor resume hook unavailable:', error)
+    }
+  }
   mainWindow.on('blur', () => previewLoop.stop())
   const resumePreview = () => {
-    if (previewViewId && mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() && !mainWindow.isMinimized()) {
+    if (
+      previewViewId &&
+      mainWindow &&
+      !mainWindow.isDestroyed() &&
+      mainWindow.isVisible() &&
+      !mainWindow.isMinimized()
+    ) {
       previewLoop.start(previewViewId)
     }
   }
@@ -2405,7 +3368,7 @@ function createWindow() {
     previewLoop.stop()
     arenaTitleSync.stop()
     mainWindow = null
-    currentUiZoom = 1.0; // reset on destroy if needed
+    currentUiZoom = 1.0 // reset on destroy if needed
   })
 
   mainWindow.on('app-command', (_e, cmd) => {
@@ -2483,6 +3446,19 @@ app.whenReady().then(() => {
   loadThemeFromDisk()
   loadProviderConfigFromDisk()
   tabDiscardManager.init()
+  // Frames from a crashed/killed session must not sit in the temp dir forever.
+  try {
+    const swept = sweepStaleJobDirs()
+    if (swept.length) console.log(`[video] swept ${swept.length} stale preparation dir(s)`)
+  } catch (error) {
+    console.warn('[video] stale sweep failed:', error)
+  }
+  try {
+    const sweptOffice = sweepStaleConversionDirs()
+    if (sweptOffice.length) console.log(`[office] swept ${sweptOffice.length} stale conversion dir(s)`)
+  } catch (error) {
+    console.warn('[office] stale sweep failed:', error)
+  }
   tabDiscardManager.onStatusChange((status) => {
     sendToMainWindow('tab_discard_status_updated', {
       residentTabIds: status.residentTabIds,
@@ -2490,6 +3466,8 @@ app.whenReady().then(() => {
     })
   })
   scheduleStartupAndExitPruning(getFinalUserDataDir())
+  // Clear upload part directories left behind by earlier sessions (crash or force-quit).
+  cleanupStaleUploadTempDirs()
   // Retain persistent partition cache across launches to avoid cold-load network re-download penalties.
 
   // thumb:// serves JPEG thumbnails from the disk-backed thumbnails dir.
@@ -2527,23 +3505,21 @@ app.whenReady().then(() => {
   })
 
   // Task B3: Network Telemetry Blocker
-  session
-    .fromPartition('persist:ai-shared')
-    .webRequest.onBeforeRequest(
-      {
-        urls: [
-          '*://sentry.io/*',
-          '*://*.sentry.io/*',
-          '*://google-analytics.com/*',
-          '*://*.google-analytics.com/*',
-          '*://posthog.com/*',
-          '*://*.posthog.com/*'
-        ]
-      },
-      (_details, callback) => {
-        callback({ cancel: true })
-      }
-    )
+  session.fromPartition('persist:ai-shared').webRequest.onBeforeRequest(
+    {
+      urls: [
+        '*://sentry.io/*',
+        '*://*.sentry.io/*',
+        '*://google-analytics.com/*',
+        '*://*.google-analytics.com/*',
+        '*://posthog.com/*',
+        '*://*.posthog.com/*'
+      ]
+    },
+    (_details, callback) => {
+      callback({ cancel: true })
+    }
+  )
 
   session.fromPartition('persist:ai-shared').webRequest.onBeforeSendHeaders((details, callback) => {
     const requestHeaders = { ...details.requestHeaders }
@@ -2587,15 +3563,18 @@ app.whenReady().then(() => {
   // on Windows Hello or unsupported hardware security key modals.
   const setupWebAuthnCancellation = (targetSession: Electron.Session) => {
     try {
-      targetSession.on('select-webauthn-account' as any, (_event: any, _details: any, callback: any) => {
-        if (typeof callback === 'function') {
-          try {
-            callback() // Invoking with no args cancels the WebAuthn ceremony cleanly
-          } catch {
-            // ignore
+      targetSession.on(
+        'select-webauthn-account' as any,
+        (_event: any, _details: any, callback: any) => {
+          if (typeof callback === 'function') {
+            try {
+              callback() // Invoking with no args cancels the WebAuthn ceremony cleanly
+            } catch {
+              // ignore
+            }
           }
         }
-      })
+      )
       targetSession.on('select-webauthn-authenticator' as any, (_event: any, callback: any) => {
         if (typeof callback === 'function') {
           try {
@@ -2646,7 +3625,12 @@ app.whenReady().then(() => {
 
   tray = new Tray(icon)
   const contextMenu = Menu.buildFromTemplate([
-    { label: 'Show / Hide Nexus', click: () => { toggleMainWindow() } },
+    {
+      label: 'Show / Hide Nexus',
+      click: () => {
+        toggleMainWindow()
+      }
+    },
     {
       label: 'Quit',
       click: () => {
@@ -2690,7 +3674,10 @@ app.on('window-all-closed', () => {
   // e.preventDefault() not needed, removing app.quit() is enough
 })
 
-function focusPromptInView(view: Electron.WebContentsView | null | undefined, modelKey?: string): void {
+function focusPromptInView(
+  view: Electron.WebContentsView | null | undefined,
+  modelKey?: string
+): void {
   if (!view || view.webContents.isDestroyed()) return
   let keyToUse = modelKey
   if (!keyToUse && activeViewId) {
@@ -2787,9 +3774,12 @@ function buildWebviewRuntimeJs(modelKey?: string): string {
   const customComp = feats.composerSelector ? JSON.stringify(feats.composerSelector) : 'null'
   const customTitleSel = feats.chatTitleSelector ? JSON.stringify(feats.chatTitleSelector) : 'null'
   const requestedInterval = feats.chatTitlePollingIntervalMs
-  const pollInterval = requestedInterval === 0 ? 0
-    : typeof requestedInterval === 'number' && Number.isFinite(requestedInterval)
-      ? Math.max(500, Math.min(60000, requestedInterval)) : 1500
+  const pollInterval =
+    requestedInterval === 0
+      ? 0
+      : typeof requestedInterval === 'number' && Number.isFinite(requestedInterval)
+        ? Math.max(500, Math.min(60000, requestedInterval))
+        : 1500
   const enableSlash = feats.enableSlashFocus !== false
   const enableRetention = feats.enableFocusRetention !== false
   const virtSelector = feats.virtualizationSelector
@@ -3009,16 +3999,30 @@ try {
 `
 }
 
-function shouldIgnoreProviderTitle(title: string, defaultTitles: string[] = [], modelKey?: string): boolean {
+function shouldIgnoreProviderTitle(
+  title: string,
+  defaultTitles: string[] = [],
+  modelKey?: string
+): boolean {
   if (typeof isDefaultConversationTitle === 'function') {
     return isDefaultConversationTitle(title, modelKey, defaultTitles)
   }
-  if (!title || !title.trim() || title.trim().toLowerCase() === 'loading' || title.trim().toLowerCase() === 'loading...') return true
+  if (
+    !title ||
+    !title.trim() ||
+    title.trim().toLowerCase() === 'loading' ||
+    title.trim().toLowerCase() === 'loading...'
+  )
+    return true
   const rawLower = title.toLowerCase().trim()
   if (rawLower.startsWith('http://') || rawLower.startsWith('https://')) return true
-  const cleaned = (typeof cleanConversationTitle === 'function'
-    ? cleanConversationTitle(title, modelKey)
-    : title.replace(/^(chatgpt|kimi\s*ai|kimi|claude|gemini|google\s*gemini|deepseek|perplexity|qwen\s*studio|qwen|arena\s*ai|arena|z\.ai|z\s*chat|glm)\s*[-|–—:•·]\s*/i, '')
+  const cleaned = (
+    typeof cleanConversationTitle === 'function'
+      ? cleanConversationTitle(title, modelKey)
+      : title.replace(
+          /^(chatgpt|kimi\s*ai|kimi|claude|gemini|google\s*gemini|deepseek|perplexity|qwen\s*studio|qwen|arena\s*ai|arena|z\.ai|z\s*chat|glm)\s*[-|–—:•·]\s*/i,
+          ''
+        )
   ).trim()
   if (!cleaned) return true
   const lower = cleaned.toLowerCase()
@@ -3026,7 +4030,23 @@ function shouldIgnoreProviderTitle(title: string, defaultTitles: string[] = [], 
     const dLower = (t || '').toLowerCase().trim()
     return lower === dLower || rawLower === dLower
   })
-  const genericNoise = /^new chat\b/i.test(lower) || lower === 'untitled' || lower === 'chat' || lower === 'chatgpt' || lower === 'qwen' || lower === 'claude' || lower === 'gemini' || lower === 'google gemini' || lower === 'kimi' || lower === 'kimi ai' || lower === 'deepseek' || lower === 'perplexity' || lower === 'arena' || lower === 'arena ai' || lower === 'z.ai' || lower === 'z chat'
+  const genericNoise =
+    /^new chat\b/i.test(lower) ||
+    lower === 'untitled' ||
+    lower === 'chat' ||
+    lower === 'chatgpt' ||
+    lower === 'qwen' ||
+    lower === 'claude' ||
+    lower === 'gemini' ||
+    lower === 'google gemini' ||
+    lower === 'kimi' ||
+    lower === 'kimi ai' ||
+    lower === 'deepseek' ||
+    lower === 'perplexity' ||
+    lower === 'arena' ||
+    lower === 'arena ai' ||
+    lower === 'z.ai' ||
+    lower === 'z chat'
   return isDefault || genericNoise
 }
 
@@ -3043,12 +4063,21 @@ function ensureAiView(tabId: string): Electron.WebContentsView {
       console.warn(`[ensureAiView] Accessor check failed for tab ${tabId}:`, err)
       // If the accessor throws, but the manager still retains this view as live,
       // return the existing view instead of creating an orphan replacement.
-      if (tabDiscardManager && typeof tabDiscardManager.hasView === 'function' && tabDiscardManager.hasView(tabId)) {
+      if (
+        tabDiscardManager &&
+        typeof tabDiscardManager.hasView === 'function' &&
+        tabDiscardManager.hasView(tabId)
+      ) {
         return view
       }
     }
 
-    if (!isDestroyed && tabDiscardManager && typeof tabDiscardManager.hasView === 'function' && tabDiscardManager.hasView(tabId)) {
+    if (
+      !isDestroyed &&
+      tabDiscardManager &&
+      typeof tabDiscardManager.hasView === 'function' &&
+      tabDiscardManager.hasView(tabId)
+    ) {
       return view
     }
 
@@ -3070,7 +4099,7 @@ function ensureAiView(tabId: string): Electron.WebContentsView {
   view.webContents.setMaxListeners(50)
 
   view.webContents.userAgent = AI_UA
-  view.webContents.setZoomFactor(currentWebviewZoom);
+  view.webContents.setZoomFactor(currentWebviewZoom)
   setViewBackground(view)
   view.setVisible(false)
   view.webContents.setBackgroundThrottling(true)
@@ -3088,7 +4117,12 @@ function ensureAiView(tabId: string): Electron.WebContentsView {
       { type: 'separator' },
       { role: 'selectAll' },
       { type: 'separator' },
-      { label: 'Go Back', click: () => { if (view.webContents.canGoBack()) view.webContents.goBack() } },
+      {
+        label: 'Go Back',
+        click: () => {
+          if (view.webContents.canGoBack()) view.webContents.goBack()
+        }
+      },
       { label: 'Reload Page', click: () => view.webContents.reload() },
       { type: 'separator' },
       { label: 'Inspect Element', click: () => view.webContents.inspectElement(params.x, params.y) }
@@ -3099,7 +4133,9 @@ function ensureAiView(tabId: string): Electron.WebContentsView {
 
   view.webContents.on('render-process-gone', (_e, details) => {
     if (tabId === activeViewId) {
-      console.log(`[Lifecycle] Active tab ${tabId} discarded by OS (${details.reason}). Auto-reloading...`)
+      console.log(
+        `[Lifecycle] Active tab ${tabId} discarded by OS (${details.reason}). Auto-reloading...`
+      )
       try {
         view.webContents.reload()
       } catch (err) {
@@ -3111,15 +4147,20 @@ function ensureAiView(tabId: string): Electron.WebContentsView {
   // Catch newly created popup windows (like OAuth or target="_blank" links)
   view.webContents.on('did-create-window', (popupWindow) => {
     popupWindow.on('closed', () => {
-      if (activeViewId === tabId && activeViewVisible && !overlaysOpen && !view.webContents.isDestroyed()) {
+      if (
+        activeViewId === tabId &&
+        activeViewVisible &&
+        !overlaysOpen &&
+        !view.webContents.isDestroyed()
+      ) {
         view.webContents.focus()
         focusPromptInView(view)
       }
     })
     popupWindow.webContents.on('before-input-event', (event, input) => {
       if (input.control && input.key.toLowerCase() === 'l' && input.type === 'keyDown') {
-        event.preventDefault();
-        const currentUrl = popupWindow.webContents.getURL();
+        event.preventDefault()
+        const currentUrl = popupWindow.webContents.getURL()
 
         // Spawn a tiny frameless window as the URL bar to completely bypass CSP
         const win = new BrowserWindow({
@@ -3134,9 +4175,9 @@ function ensureAiView(tabId: string): Electron.WebContentsView {
             contextIsolation: true,
             preload: join(__dirname, '../preload/index.js')
           }
-        });
+        })
 
-        const safeUrlJson = JSON.stringify(currentUrl || '');
+        const safeUrlJson = JSON.stringify(currentUrl || '')
         const html = `
           <!DOCTYPE html>
           <html>
@@ -3167,41 +4208,41 @@ function ensureAiView(tabId: string): Electron.WebContentsView {
             </script>
           </body>
           </html>
-        `;
+        `
 
         const navHandler = (e: Electron.IpcMainEvent, url: string) => {
-          if (e.sender !== win.webContents) return;
+          if (e.sender !== win.webContents) return
           if (typeof url === 'string' && url.trim()) {
-            let finalUrl = url.trim();
+            let finalUrl = url.trim()
             if (!/^https?:\/\//i.test(finalUrl)) {
-              finalUrl = 'https://' + finalUrl;
+              finalUrl = 'https://' + finalUrl
             }
             try {
-              const parsed = new URL(finalUrl);
+              const parsed = new URL(finalUrl)
               if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
-                popupWindow.webContents.loadURL(parsed.href);
+                popupWindow.webContents.loadURL(parsed.href)
               }
             } catch {}
           }
-          if (!win.isDestroyed()) win.close();
-        };
+          if (!win.isDestroyed()) win.close()
+        }
         const closeHandler = (e: Electron.IpcMainEvent) => {
-          if (e.sender !== win.webContents) return;
-          if (!win.isDestroyed()) win.close();
-        };
+          if (e.sender !== win.webContents) return
+          if (!win.isDestroyed()) win.close()
+        }
 
-        ipcMain.once('popup-nav-' + win.id, navHandler);
-        ipcMain.once('popup-close-' + win.id, closeHandler);
+        ipcMain.once('popup-nav-' + win.id, navHandler)
+        ipcMain.once('popup-close-' + win.id, closeHandler)
 
         win.on('closed', () => {
-          ipcMain.removeListener('popup-nav-' + win.id, navHandler);
-          ipcMain.removeListener('popup-close-' + win.id, closeHandler);
-        });
+          ipcMain.removeListener('popup-nav-' + win.id, navHandler)
+          ipcMain.removeListener('popup-close-' + win.id, closeHandler)
+        })
 
-        win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
+        win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html))
       }
-    });
-  });
+    })
+  })
 
   // Allow OAuth popup windows to open with window.opener in the shared AI partition
   view.webContents.setWindowOpenHandler((_details) => {
@@ -3235,7 +4276,12 @@ function ensureAiView(tabId: string): Electron.WebContentsView {
     const keyLower = (input.key || '').toLowerCase()
     const isB = keyLower === 'b' || input.code === 'KeyB' || input.code?.toLowerCase() === 'keyb'
     const globalKeys = ['b', 'd', 's', 'n', 'o']
-    if (input.type === 'keyDown' && isControlOrMeta && !input.alt && (globalKeys.includes(keyLower) || isB)) {
+    if (
+      input.type === 'keyDown' &&
+      isControlOrMeta &&
+      !input.alt &&
+      (globalKeys.includes(keyLower) || isB)
+    ) {
       event.preventDefault()
     }
   })
@@ -3245,7 +4291,10 @@ function ensureAiView(tabId: string): Electron.WebContentsView {
     const globalOv = providerConfig['ALL'] || providerConfig['global'] || {}
     const feats = getMergedProviderFeatures(modelKey, providerConfig[modelKey], globalOv)
     if (shouldIgnoreProviderTitle(title, feats.defaultChatTitles || [], modelKey)) return
-    const cleanTitle = (typeof cleanConversationTitle === 'function' ? cleanConversationTitle(title, modelKey) : title.trim()) || title.trim()
+    const cleanTitle =
+      (typeof cleanConversationTitle === 'function'
+        ? cleanConversationTitle(title, modelKey)
+        : title.trim()) || title.trim()
     viewTitles.set(tabId, cleanTitle) // Fix #1: Track titles for proper idle eviction
     if (activeViewId === tabId) arenaTitleSync.invalidate()
     sendToMainWindow('ai-title-updated', tabId, cleanTitle)
@@ -3256,7 +4305,8 @@ function ensureAiView(tabId: string): Electron.WebContentsView {
       view.webContents,
       resolveEffectiveColorScheme(activeAppearance, nativeTheme.shouldUseDarkColors)
     )
-    const modelKey = viewModelKeys.get(tabId) || resolveModelKey(tabId, view.webContents.getURL()) || ''
+    const modelKey =
+      viewModelKeys.get(tabId) || resolveModelKey(tabId, view.webContents.getURL()) || ''
     applyWebviewTheme(view, modelKey)
     injectVirtualizationCss(view, modelKey)
     applyProviderMotionMode(view, modelKey)
@@ -3265,7 +4315,8 @@ function ensureAiView(tabId: string): Electron.WebContentsView {
   })
 
   view.webContents.on('did-finish-load', () => {
-    const modelKey = viewModelKeys.get(tabId) || resolveModelKey(tabId, view.webContents.getURL()) || ''
+    const modelKey =
+      viewModelKeys.get(tabId) || resolveModelKey(tabId, view.webContents.getURL()) || ''
     applyWebviewTheme(view, modelKey)
     if (activeViewId === tabId && activeViewVisible && !overlaysOpen) {
       focusPromptInView(view, modelKey)
@@ -3503,8 +4554,12 @@ function setViewBackground(view) {
 // view (no duplicate page), streams ~3fps to the renderer panel.
 const previewLoop = new PreviewCaptureLoop<string>({
   intervalMs: 1000,
-  canCapture: () => !!mainWindow && !mainWindow.isDestroyed() &&
-    mainWindow.isVisible() && !mainWindow.isMinimized() && mainWindow.isFocused(),
+  canCapture: () =>
+    !!mainWindow &&
+    !mainWindow.isDestroyed() &&
+    mainWindow.isVisible() &&
+    !mainWindow.isMinimized() &&
+    mainWindow.isFocused(),
   capture: async (tabId) => {
     const view = aiViews.get(tabId)
     if (!view || view.webContents.isDestroyed()) return null
@@ -3591,12 +4646,18 @@ function persistProviderConfig() {
     mkdirSync(dir, { recursive: true })
 
     // SAFETY GUARD: Refuse to overwrite non-empty providers.json with an empty object!
-    if (!providerConfig || typeof providerConfig !== 'object' || Object.keys(providerConfig).length === 0) {
+    if (
+      !providerConfig ||
+      typeof providerConfig !== 'object' ||
+      Object.keys(providerConfig).length === 0
+    ) {
       if (existsSync(filePath)) {
         try {
           const existing = readFileSync(filePath, 'utf-8').trim()
           if (existing && existing !== '{}') {
-            console.warn('[ProviderConfig] Refusing to overwrite non-empty providers.json with empty config.')
+            console.warn(
+              '[ProviderConfig] Refusing to overwrite non-empty providers.json with empty config.'
+            )
             return
           }
         } catch {}
@@ -3625,9 +4686,12 @@ function updateWebviewTitlePoller(view: Electron.WebContentsView, modelKey: stri
   const feats = getMergedProviderFeatures(modelKey, providerConfig[modelKey], globalOv)
   const customTitleSel = feats.chatTitleSelector ? JSON.stringify(feats.chatTitleSelector) : 'null'
   const requestedInterval = feats.chatTitlePollingIntervalMs
-  const pollInterval = requestedInterval === 0 ? 0
-    : typeof requestedInterval === 'number' && Number.isFinite(requestedInterval)
-      ? Math.max(500, Math.min(60000, requestedInterval)) : 1500
+  const pollInterval =
+    requestedInterval === 0
+      ? 0
+      : typeof requestedInterval === 'number' && Number.isFinite(requestedInterval)
+        ? Math.max(500, Math.min(60000, requestedInterval))
+        : 1500
   const script = `(() => {
     ${PAGE_HELPERS}
     if (window.__nexusTitleInterval) {
@@ -3678,7 +4742,10 @@ let providerMotionSequence = 0
 function applyProviderMotionMode(view: Electron.WebContentsView, modelKey: string): void {
   if (view.webContents.isDestroyed()) return
   const feats = getMergedProviderFeatures(modelKey, providerConfig[modelKey])
-  const script = buildProviderMotionScript(feats.pauseCssAnimations === true, ++providerMotionSequence)
+  const script = buildProviderMotionScript(
+    feats.pauseCssAnimations === true,
+    ++providerMotionSequence
+  )
   view.webContents.executeJavaScript(script).catch((err) => {
     console.warn('[provider-motion] Could not update provider animation setting:', err)
   })
@@ -3691,12 +4758,14 @@ function injectVirtualizationCss(view: Electron.WebContentsView, modelKey: strin
   if (!sel) return
   const css = `${sel} { content-visibility: auto; contain-intrinsic-size: auto 800px; }`
   view.webContents
-    .executeJavaScript(`(() => {
+    .executeJavaScript(
+      `(() => {
       let s = document.getElementById('__nexus_virtualization');
       if (!s) { s = document.createElement('style'); s.id = '__nexus_virtualization'; document.head.appendChild(s); }
       const css = ${JSON.stringify(css)};
       if (s.textContent !== css) s.textContent = css;
-    })()`)
+    })()`
+    )
     .catch(() => {})
 }
 
@@ -3706,13 +4775,15 @@ function executeCustomInitScript(view: Electron.WebContentsView, modelKey: strin
   const script = feats.customInitScript
   if (!script || !script.trim()) return
   view.webContents
-    .executeJavaScript(`(() => {
+    .executeJavaScript(
+      `(() => {
       try {
         ${script}
       } catch (err) {
         console.error('[Nexus Custom Init Script Error]', err);
       }
-    })()`)
+    })()`
+    )
     .catch((err) => {
       console.warn(`[nexus] customInitScript failed for ${modelKey}:`, err)
     })
@@ -3813,7 +4884,17 @@ function buildWebviewThemeCss(themeData, url, viewWidthPx, overrides, modelKey?:
       let skip = false
       if (!insideComment && insideBlock === 0) {
         if (/^--[\w-]+\s*:/.test(trimmed)) skip = true
-        else if (trimmed.length > 0 && !trimmed.startsWith('/') && !trimmed.startsWith('@') && !trimmed.includes('{') && !trimmed.includes('}') && !trimmed.includes(':') && !trimmed.includes(';') && !trimmed.endsWith(',')) skip = true
+        else if (
+          trimmed.length > 0 &&
+          !trimmed.startsWith('/') &&
+          !trimmed.startsWith('@') &&
+          !trimmed.includes('{') &&
+          !trimmed.includes('}') &&
+          !trimmed.includes(':') &&
+          !trimmed.includes(';') &&
+          !trimmed.endsWith(',')
+        )
+          skip = true
       }
 
       if (trimmed.includes('*/')) insideComment = false
@@ -3859,13 +4940,17 @@ function genericFallbackCss(v, dark) {
       --radius: ${v.radius ?? 8}px;
     }
     html { color-scheme: ${dark ? 'dark' : 'light'} !important; }
-    ${doColor ? `
+    ${
+      doColor
+        ? `
     html { background-color: var(--nexus-bg) !important; color-scheme: ${dark ? 'dark' : 'light'} !important; }
     body { background-color: var(--nexus-bg) !important; ${bodyTypography} }
     ::selection { background: var(--nexus-accent) !important; color: var(--nexus-bg) !important; }
     a { color: var(--nexus-accent) !important; }
     input, textarea, [contenteditable="true"] { caret-color: var(--nexus-accent) !important; }
-    ` : ''}
+    `
+        : ''
+    }
 
     * { scrollbar-color: var(--nexus-surface2) var(--nexus-surface) !important; scrollbar-width: thin !important; }
     ::-webkit-scrollbar { width: 5px; height: 5px; }
@@ -3897,7 +4982,9 @@ function genericFallbackCss(v, dark) {
           : ''
     }
 
-    ${v.themeSelectors?.appContainer ? `
+    ${
+      v.themeSelectors?.appContainer
+        ? `
     /* Custom App Container & Canvas Transparency Overwrite */
     #root, #__next, #app, body > div, body > main,
     ${v.themeSelectors.appContainer},
@@ -3906,44 +4993,70 @@ function genericFallbackCss(v, dark) {
     ${v.themeSelectors.appContainer} main {
       ${doColor ? 'background-color: transparent !important; background-image: none !important;' : ''}
     }
-    ` : ''}
+    `
+        : ''
+    }
 
-    ${v.themeSelectors?.chatWrapper ? `
+    ${
+      v.themeSelectors?.chatWrapper
+        ? `
     /* Custom Central Chat Column Overwrite */
     ${v.themeSelectors.chatWrapper} {
       ${doColor ? 'background-color: transparent !important; background-image: none !important;' : ''}
-      ${doStruct ? `
+      ${
+        doStruct
+          ? `
       width: 100% !important;
       max-width: 100% !important;
       box-sizing: border-box !important;
       padding-left: calc(max(1rem, 50% - (var(--nexus-ai-width) / 2))) !important;
       padding-right: calc(max(1rem, 50% - (var(--nexus-ai-width) / 2))) !important;
-      ` : ''}
-    }` : ''}
+      `
+          : ''
+      }
+    }`
+        : ''
+    }
 
-    ${v.themeSelectors?.sidebar ? `
+    ${
+      v.themeSelectors?.sidebar
+        ? `
     /* Custom Sidebar Overwrite */
     ${v.themeSelectors.sidebar} {
       ${doColor ? 'background-color: var(--nexus-surface) !important; border-color: var(--nexus-border) !important;' : ''}
-    }` : ''}
+    }`
+        : ''
+    }
 
-    ${v.themeSelectors?.header ? `
+    ${
+      v.themeSelectors?.header
+        ? `
     /* Custom Header Overwrite */
     ${v.themeSelectors.header} {
       ${doColor ? 'background-color: transparent !important; border-bottom: 1px solid var(--nexus-border) !important;' : ''}
-    }` : ''}
+    }`
+        : ''
+    }
 
-    ${v.themeSelectors?.modelDropdown ? `
+    ${
+      v.themeSelectors?.modelDropdown
+        ? `
     /* Custom Model Dropdown / Badge Overwrite */
     ${v.themeSelectors.modelDropdown} {
       ${doColor ? 'background-color: var(--nexus-surface) !important; color: var(--nexus-text) !important; border: 1px solid var(--nexus-border) !important;' : ''}
       ${doBubble ? 'border-radius: var(--radius) !important;' : ''}
-    }` : ''}
+    }`
+        : ''
+    }
 
-    ${v.themeSelectors?.userMessage ? `
+    ${
+      v.themeSelectors?.userMessage
+        ? `
     /* Custom User Message Overwrite */
     ${v.themeSelectors.userMessage} {
-      ${doBubble ? `
+      ${
+        doBubble
+          ? `
       background: var(--nexus-bubble-bg) !important;
       background-color: var(--nexus-bubble-bg-color) !important;
       background-image: var(--nexus-bubble-bg) !important;
@@ -3951,9 +5064,13 @@ function genericFallbackCss(v, dark) {
       border-radius: var(--radius) !important;
       box-shadow: var(--nexus-bubble-shadow) !important;
       padding: 12px 16px !important;
-      ` : ''}
+      `
+          : ''
+      }
       ${doColor ? 'color: var(--nexus-text) !important;' : ''}
-      ${doStruct ? `
+      ${
+        doStruct
+          ? `
       width: max-content !important;
       max-width: var(--nexus-user-width) !important;
       margin-left: auto !important;
@@ -3961,86 +5078,136 @@ function genericFallbackCss(v, dark) {
       margin-bottom: var(--nexus-message-gap) !important;
       word-break: break-word !important;
       overflow-wrap: break-word !important;
-      ` : ''}
-    }` : ''}
+      `
+          : ''
+      }
+    }`
+        : ''
+    }
 
-    ${v.themeSelectors?.aiMessage ? `
+    ${
+      v.themeSelectors?.aiMessage
+        ? `
     /* Custom AI Message Overwrite */
     ${v.themeSelectors.aiMessage} {
       ${doStruct ? `width: 100% !important; max-width: 100% !important; margin-left: 0 !important; margin-right: 0 !important; margin-bottom: var(--nexus-message-gap) !important; box-sizing: border-box !important;` : ''}
     }
-    ${splitSelectorList(v.themeSelectors.aiMessage).map(s => `${s} div, ${s} p, ${s} article`).join(', ')} {
+    ${splitSelectorList(v.themeSelectors.aiMessage)
+      .map((s) => `${s} div, ${s} p, ${s} article`)
+      .join(', ')} {
       ${doStruct ? 'max-width: 100% !important;' : ''}
-    }` : ''}
+    }`
+        : ''
+    }
 
-    ${v.themeSelectors?.markdownProse ? `
+    ${
+      v.themeSelectors?.markdownProse
+        ? `
     /* Custom Markdown Prose Typography Overwrite */
     ${v.themeSelectors.markdownProse} {
       ${doColor ? 'color: var(--nexus-text) !important;' : ''}
       ${doStruct ? 'max-width: 100% !important;' : ''}
     }
-    ${splitSelectorList(v.themeSelectors.markdownProse).map((s: string) => `${s} p, ${s} li, ${s} span`).join(', ')} {
+    ${splitSelectorList(v.themeSelectors.markdownProse)
+      .map((s: string) => `${s} p, ${s} li, ${s} span`)
+      .join(', ')} {
       ${doColor ? 'color: inherit !important;' : ''}
     }
-    ${splitSelectorList(v.themeSelectors.markdownProse).map((s: string) => `${s} h1, ${s} h2, ${s} h3, ${s} h4`).join(', ')} {
+    ${splitSelectorList(v.themeSelectors.markdownProse)
+      .map((s: string) => `${s} h1, ${s} h2, ${s} h3, ${s} h4`)
+      .join(', ')} {
       ${doColor ? 'color: var(--nexus-text) !important;' : ''}
       font-weight: 700 !important;
     }
-    ${splitSelectorList(v.themeSelectors.markdownProse).map((s: string) => `${s} table, ${s} th, ${s} td`).join(', ')} {
+    ${splitSelectorList(v.themeSelectors.markdownProse)
+      .map((s: string) => `${s} table, ${s} th, ${s} td`)
+      .join(', ')} {
       ${doColor ? 'border-color: var(--nexus-border) !important;' : ''}
-    }` : ''}
+    }`
+        : ''
+    }
 
-    ${v.themeSelectors?.thinkingBlock ? `
+    ${
+      v.themeSelectors?.thinkingBlock
+        ? `
     /* Custom Thinking / Reasoning Block Overwrite */
     ${v.themeSelectors.thinkingBlock} {
       ${doBubble ? 'border-radius: var(--radius) !important; border: 1px solid var(--nexus-border) !important;' : ''}
       ${doColor ? 'background-color: var(--nexus-surface2) !important; color: var(--nexus-text2) !important;' : ''}
-    }` : ''}
+    }`
+        : ''
+    }
 
-    ${v.themeSelectors?.codeBlock ? `
+    ${
+      v.themeSelectors?.codeBlock
+        ? `
     /* Custom Code Block Overwrite */
     ${v.themeSelectors.codeBlock} {
       ${doBubble ? 'border-radius: var(--radius) !important; box-shadow: var(--nexus-code-shadow) !important; margin: var(--nexus-code-margin) !important; padding: 14px 18px !important; border: var(--nexus-code-border) !important;' : ''}
       ${doColor ? 'background: var(--nexus-code-bg) !important; color: var(--nexus-text) !important;' : ''}
       ${doStruct ? 'overflow-x: auto !important;' : ''}
     }
-    ${splitSelectorList(v.themeSelectors.codeBlock).map((s: string) => `${s} code`).join(', ')} {
+    ${splitSelectorList(v.themeSelectors.codeBlock)
+      .map((s: string) => `${s} code`)
+      .join(', ')} {
       ${doColor ? 'background: transparent !important; color: inherit !important;' : ''}
       font-size: inherit !important;
       padding: 0 !important;
       border: none !important;
-    }` : ''}
+    }`
+        : ''
+    }
 
-    ${v.themeSelectors?.composer ? `
+    ${
+      v.themeSelectors?.composer
+        ? `
     /* Custom Composer Overwrite */
     ${v.themeSelectors.composer} {
       ${doColor ? 'background-color: var(--nexus-surface) !important; color: var(--nexus-text) !important;' : ''}
       ${doBubble ? 'border: 1px solid var(--nexus-border) !important; border-radius: var(--radius) !important; transition: box-shadow 0.3s ease, border-color 0.3s ease !important;' : ''}
       ${doStruct ? `width: 100% !important; max-width: var(--nexus-ai-width) !important; margin-left: auto !important; margin-right: auto !important; box-sizing: border-box !important;` : ''}
     }
-    ${splitSelectorList(v.themeSelectors.composer).map((s: string) => `form:focus-within ${s}`).join(', ')},
-    ${splitSelectorList(v.themeSelectors.composer).map((s: string) => `${s}:focus`).join(', ')} {
+    ${splitSelectorList(v.themeSelectors.composer)
+      .map((s: string) => `form:focus-within ${s}`)
+      .join(', ')},
+    ${splitSelectorList(v.themeSelectors.composer)
+      .map((s: string) => `${s}:focus`)
+      .join(', ')} {
       ${doBubble ? 'border: var(--nexus-composer-focus-border) !important; border-bottom: var(--nexus-composer-focus-border-bottom) !important; box-shadow: var(--nexus-composer-focus-shadow) !important; outline: none !important;' : ''}
-    }` : ''}
+    }`
+        : ''
+    }
 
-    ${v.themeSelectors?.sendButton ? `
+    ${
+      v.themeSelectors?.sendButton
+        ? `
     /* Custom Send Button Overwrite */
     ${v.themeSelectors.sendButton} {
       ${doColor ? 'background-color: var(--nexus-accent) !important; color: var(--nexus-bg) !important; border-color: transparent !important;' : ''}
       ${doBubble ? 'border-radius: var(--radius) !important; box-shadow: 0 0 12px var(--nexus-accent) !important;' : ''}
-    }` : ''}
+    }`
+        : ''
+    }
 
-    ${v.themeSelectors?.actionButtons ? `
+    ${
+      v.themeSelectors?.actionButtons
+        ? `
     /* Custom Action Buttons / Toolbar Overwrite */
     ${v.themeSelectors.actionButtons} {
       ${doColor ? 'color: var(--nexus-text2) !important;' : ''}
     }
-    ${splitSelectorList(v.themeSelectors.actionButtons).map((s: string) => `${s} button, ${s} svg`).join(', ')} {
+    ${splitSelectorList(v.themeSelectors.actionButtons)
+      .map((s: string) => `${s} button, ${s} svg`)
+      .join(', ')} {
       ${doColor ? 'color: var(--nexus-text2) !important;' : ''}
     }
-    ${splitSelectorList(v.themeSelectors.actionButtons).map((s: string) => `${s} button:hover, ${s} svg:hover`).join(', ')} {
+    ${splitSelectorList(v.themeSelectors.actionButtons)
+      .map((s: string) => `${s} button:hover, ${s} svg:hover`)
+      .join(', ')} {
       ${doColor ? 'color: var(--nexus-accent) !important;' : ''}
-    }` : ''}
+    }`
+        : ''
+    }
   `
 }
 // Keyed insertCSS management: exactly ONE theme stylesheet per view, always
@@ -4094,7 +5261,10 @@ function getOverridesForModel(modelKey?: string, url?: string): ProviderOverride
 
       // Dynamic fallback: match against user-configured models from models.json
       try {
-        const modelsRaw = fs.readFileSync(path.join(app.getPath('userData'), 'models.json'), 'utf-8')
+        const modelsRaw = fs.readFileSync(
+          path.join(app.getPath('userData'), 'models.json'),
+          'utf-8'
+        )
         const models = JSON.parse(modelsRaw)
         if (Array.isArray(models)) {
           for (const m of models) {
@@ -4114,7 +5284,11 @@ function getOverridesForModel(modelKey?: string, url?: string): ProviderOverride
   return undefined
 }
 
-function resolveModelKey(tabId: string, url?: string, explicitModelKey?: string): string | undefined {
+function resolveModelKey(
+  tabId: string,
+  url?: string,
+  explicitModelKey?: string
+): string | undefined {
   if (explicitModelKey) {
     if (tabId) viewModelKeys.set(tabId, explicitModelKey)
     return explicitModelKey
@@ -4141,7 +5315,10 @@ function resolveModelKey(tabId: string, url?: string, explicitModelKey?: string)
       // Dynamic fallback: match against user-configured models from models.json
       if (!inferredKey) {
         try {
-          const modelsRaw = fs.readFileSync(path.join(app.getPath('userData'), 'models.json'), 'utf-8')
+          const modelsRaw = fs.readFileSync(
+            path.join(app.getPath('userData'), 'models.json'),
+            'utf-8'
+          )
           const models = JSON.parse(modelsRaw)
           if (Array.isArray(models)) {
             for (const m of models) {
@@ -4229,21 +5406,24 @@ function applyWebviewTheme(view, modelKey?: string) {
   })
   viewCssChains.set(wc, nextChain)
 }
-ipcMain.handle('set_titlebar_overlay_theme', (_event, colors: { color: string; symbolColor: string }) => {
-  if (process.platform === 'win32' && mainWindow && !mainWindow.isDestroyed()) {
-    try {
-      mainWindow.setTitleBarOverlay({
-        color: colors.color || '#11151e',
-        symbolColor: colors.symbolColor || '#e9edf4',
-        height: 36
-      })
-      return true
-    } catch (err) {
-      console.warn('[setTitleBarOverlay] failed:', err)
+ipcMain.handle(
+  'set_titlebar_overlay_theme',
+  (_event, colors: { color: string; symbolColor: string }) => {
+    if (process.platform === 'win32' && mainWindow && !mainWindow.isDestroyed()) {
+      try {
+        mainWindow.setTitleBarOverlay({
+          color: colors.color || '#11151e',
+          symbolColor: colors.symbolColor || '#e9edf4',
+          height: 36
+        })
+        return true
+      } catch (err) {
+        console.warn('[setTitleBarOverlay] failed:', err)
+      }
     }
+    return false
   }
-  return false
-})
+)
 
 ipcMain.handle('get_theme_appearance', () => activeAppearance)
 
@@ -4255,7 +5435,10 @@ ipcMain.handle('set_theme_appearance', (_event, mode: unknown) => {
     const effective = resolveEffectiveColorScheme(mode, nativeTheme.shouldUseDarkColors)
     for (const [tabId, view] of aiViews) {
       applyColorSchemeEmulation(view.webContents, effective)
-      applyWebviewTheme(view, viewModelKeys.get(tabId) || resolveModelKey(tabId, view.webContents.getURL()))
+      applyWebviewTheme(
+        view,
+        viewModelKeys.get(tabId) || resolveModelKey(tabId, view.webContents.getURL())
+      )
     }
   }
   return activeAppearance
@@ -4274,7 +5457,7 @@ ipcMain.handle('get_provider_config', () => providerConfig)
 
 ipcMain.handle('get_full_provider_css', (_event, modelKey: string, providerUrl?: string) => {
   const theme = webviewTheme
-  const keyToUse = (!modelKey || modelKey === 'ALL') ? 'gemini' : modelKey
+  const keyToUse = !modelKey || modelKey === 'ALL' ? 'gemini' : modelKey
   const overrides = getOverridesForModel(keyToUse)
   const defaultUrls: Record<string, string> = {
     chatgpt: 'https://chatgpt.com',
@@ -4287,7 +5470,8 @@ ipcMain.handle('get_full_provider_css', (_event, modelKey: string, providerUrl?:
     mistral: 'https://chat.mistral.ai',
     grok: 'https://grok.com'
   }
-  const sampleUrl = providerUrl || (keyToUse && defaultUrls[keyToUse.toLowerCase()]) || 'https://gemini.google.com'
+  const sampleUrl =
+    providerUrl || (keyToUse && defaultUrls[keyToUse.toLowerCase()]) || 'https://gemini.google.com'
   if (theme && theme.colors) {
     return buildWebviewThemeCss(theme, sampleUrl, 1200, overrides, keyToUse)
   }
@@ -4295,7 +5479,7 @@ ipcMain.handle('get_full_provider_css', (_event, modelKey: string, providerUrl?:
 })
 
 ipcMain.handle('get_full_provider_js', (_event, modelKey?: string) => {
-  const keyToUse = (!modelKey || modelKey === 'ALL') ? undefined : modelKey
+  const keyToUse = !modelKey || modelKey === 'ALL' ? undefined : modelKey
   return buildWebviewRuntimeJs(keyToUse)
 })
 
@@ -4328,12 +5512,18 @@ ipcMain.handle('execute_live_provider_js', async (event, modelKey: string, code:
   if (targetView && !targetView.webContents.isDestroyed()) {
     try {
       const res = await targetView.webContents.executeJavaScript(code)
-      return { success: true, result: res !== undefined ? String(res) : 'Executed successfully (no return value)' }
+      return {
+        success: true,
+        result: res !== undefined ? String(res) : 'Executed successfully (no return value)'
+      }
     } catch (err: any) {
       return { success: false, error: err?.message || String(err) }
     }
   }
-  return { success: false, error: `No active webview tab found for ${modelKey || 'provider'}. Please open a tab first.` }
+  return {
+    success: false,
+    error: `No active webview tab found for ${modelKey || 'provider'}. Please open a tab first.`
+  }
 })
 
 ipcMain.handle('get_custom_theme_entry', (_event, modelKey: string) => {
@@ -4426,97 +5616,139 @@ ipcMain.handle('reset_custom_theme_file', (_event, modelKey: string) => {
 
 // Only the trusted settings renderer may request read-only evidence or selector validation.
 for (const channel of ['capture_feature_hook_evidence', 'validate_feature_hook_selectors']) {
-  ipcMain.handle(channel, async (event, modelKey: string, providerUrl?: string, proposed?: unknown, expectedContext?: string) => {
-    try {
-      if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== event.sender.mainFrame) {
-        return { success: false, reason: 'untrusted_sender' }
+  ipcMain.handle(
+    channel,
+    async (
+      event,
+      modelKey: string,
+      providerUrl?: string,
+      proposed?: unknown,
+      expectedContext?: string
+    ) => {
+      try {
+        if (
+          !mainWindow ||
+          event.sender !== mainWindow.webContents ||
+          event.senderFrame !== event.sender.mainFrame
+        ) {
+          return { success: false, reason: 'untrusted_sender' }
+        }
+        if (typeof modelKey !== 'string' || typeof providerUrl !== 'string')
+          return { success: false, reason: 'invalid_request' }
+        if (!activeViewId) return { success: false, reason: 'no_active_tab' }
+        const view = aiViews.get(activeViewId)
+        if (!view || view.webContents.isDestroyed())
+          return { success: false, reason: 'no_active_tab' }
+        const contents = view.webContents
+        const actualUrl = contents.getURL(),
+          actual = new URL(actualUrl),
+          requested = new URL(providerUrl)
+        if (!/^https?:$/.test(actual.protocol) || !/^https?:$/.test(requested.protocol))
+          return { success: false, reason: 'unsupported_url' }
+        // A stale provider key must not authorize an unrelated navigated hostname.
+        // Explicit provider redirect aliases can be added separately after verification.
+        if (actual.hostname.toLowerCase() !== requested.hostname.toLowerCase())
+          return { success: false, reason: 'active_provider_mismatch' }
+        const id = activeViewId,
+          contextId = hookContextId(contents)
+        if (expectedContext && expectedContext !== contextId)
+          return { success: false, reason: 'context_changed_revalidate' }
+        const features =
+          channel === 'validate_feature_hook_selectors'
+            ? parseFeatureHookImport(JSON.stringify(proposed)).selectors
+            : getMergedProviderFeatures(modelKey, providerConfig[modelKey])
+        const evidence = (await executeHookCapture(
+          contents,
+          buildFeatureHookEvidenceScript(features as Record<string, unknown>)
+        )) as ReturnType<typeof collectFeatureHookEvidence>
+        if (
+          contents.isDestroyed() ||
+          activeViewId !== id ||
+          contents.getURL() !== actualUrl ||
+          hookContextId(contents) !== contextId
+        ) {
+          return { success: false, reason: 'tab_changed_during_capture' }
+        }
+        if (
+          !evidence ||
+          evidence.version !== 2 ||
+          evidence.origin !== actual.origin ||
+          !evidence.validations ||
+          JSON.stringify(evidence).length > 64000
+        ) {
+          return { success: false, reason: 'invalid_evidence' }
+        }
+        return { success: true, evidence, contextId }
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : 'capture_failed'
+        console.warn('Feature hook request failed:', reason.slice(0, 180))
+        return { success: false, reason: reason.slice(0, 180) }
       }
-      if (typeof modelKey !== 'string' || typeof providerUrl !== 'string') return { success: false, reason: 'invalid_request' }
-      if (!activeViewId) return { success: false, reason: 'no_active_tab' }
-      const view = aiViews.get(activeViewId)
-      if (!view || view.webContents.isDestroyed()) return { success: false, reason: 'no_active_tab' }
-      const contents = view.webContents
-      const actualUrl = contents.getURL(), actual = new URL(actualUrl), requested = new URL(providerUrl)
-      if (!/^https?:$/.test(actual.protocol) || !/^https?:$/.test(requested.protocol)) return { success: false, reason: 'unsupported_url' }
-      // A stale provider key must not authorize an unrelated navigated hostname.
-      // Explicit provider redirect aliases can be added separately after verification.
-      if (actual.hostname.toLowerCase() !== requested.hostname.toLowerCase()) return { success: false, reason: 'active_provider_mismatch' }
-      const id = activeViewId, contextId = hookContextId(contents)
-      if (expectedContext && expectedContext !== contextId) return { success: false, reason: 'context_changed_revalidate' }
-      const features = channel === 'validate_feature_hook_selectors'
-        ? parseFeatureHookImport(JSON.stringify(proposed)).selectors
-        : getMergedProviderFeatures(modelKey, providerConfig[modelKey])
-      const evidence = await executeHookCapture(contents, buildFeatureHookEvidenceScript(features as Record<string, unknown>)) as ReturnType<typeof collectFeatureHookEvidence>
-      if (contents.isDestroyed() || activeViewId !== id || contents.getURL() !== actualUrl || hookContextId(contents) !== contextId) {
-        return { success: false, reason: 'tab_changed_during_capture' }
-      }
-      if (!evidence || evidence.version !== 2 || evidence.origin !== actual.origin || !evidence.validations || JSON.stringify(evidence).length > 64000) {
-        return { success: false, reason: 'invalid_evidence' }
-      }
-      return { success: true, evidence, contextId }
-    } catch (error) {
-      const reason = error instanceof Error ? error.message : 'capture_failed'
-      console.warn('Feature hook request failed:', reason.slice(0, 180))
-      return { success: false, reason: reason.slice(0, 180) }
     }
-  })
+  )
 }
 
-ipcMain.handle('extract_provider_live_dom', async (_event, modelKey: string, providerUrl?: string) => {
-  try {
-    let targetView: Electron.WebContentsView | null = null
+ipcMain.handle(
+  'extract_provider_live_dom',
+  async (_event, modelKey: string, providerUrl?: string) => {
+    try {
+      let targetView: Electron.WebContentsView | null = null
 
-    // 1. Prefer active view if it matches the requested modelKey
-    if (activeViewId && aiViews.has(activeViewId) && viewModelKeys.get(activeViewId) === modelKey) {
-      targetView = aiViews.get(activeViewId)!
-    }
-
-    // 2. Match by model key in other active views
-    if (!targetView) {
-      for (const [tabId, view] of aiViews) {
-        if (viewModelKeys.get(tabId) === modelKey) {
-          targetView = view
-          break
-        }
+      // 1. Prefer active view if it matches the requested modelKey
+      if (
+        activeViewId &&
+        aiViews.has(activeViewId) &&
+        viewModelKeys.get(activeViewId) === modelKey
+      ) {
+        targetView = aiViews.get(activeViewId)!
       }
-    }
 
-    // 3. Match by URL host if not matched by key (check active view first)
-    if (!targetView && providerUrl) {
-      try {
-        const targetHost = new URL(providerUrl).host.toLowerCase()
-        if (activeViewId && aiViews.has(activeViewId)) {
-          const active = aiViews.get(activeViewId)!
-          const vUrl = active.webContents.getURL()
-          if (vUrl && new URL(vUrl).host.toLowerCase() === targetHost) {
-            targetView = active
+      // 2. Match by model key in other active views
+      if (!targetView) {
+        for (const [tabId, view] of aiViews) {
+          if (viewModelKeys.get(tabId) === modelKey) {
+            targetView = view
+            break
           }
         }
-        if (!targetView) {
-          for (const [, view] of aiViews) {
-            const vUrl = view.webContents.getURL()
+      }
+
+      // 3. Match by URL host if not matched by key (check active view first)
+      if (!targetView && providerUrl) {
+        try {
+          const targetHost = new URL(providerUrl).host.toLowerCase()
+          if (activeViewId && aiViews.has(activeViewId)) {
+            const active = aiViews.get(activeViewId)!
+            const vUrl = active.webContents.getURL()
             if (vUrl && new URL(vUrl).host.toLowerCase() === targetHost) {
-              targetView = view
-              break
+              targetView = active
             }
           }
-        }
-      } catch {}
-    }
-
-    // 4. Fallback to active view if model matches or no target found
-    if (!targetView && activeViewId && aiViews.has(activeViewId)) {
-      const active = aiViews.get(activeViewId)!
-      if (viewModelKeys.get(activeViewId) === modelKey) {
-        targetView = active
+          if (!targetView) {
+            for (const [, view] of aiViews) {
+              const vUrl = view.webContents.getURL()
+              if (vUrl && new URL(vUrl).host.toLowerCase() === targetHost) {
+                targetView = view
+                break
+              }
+            }
+          }
+        } catch {}
       }
-    }
 
-    if (!targetView || targetView.webContents.isDestroyed()) {
-      return { success: false, reason: 'no_open_tab' }
-    }
+      // 4. Fallback to active view if model matches or no target found
+      if (!targetView && activeViewId && aiViews.has(activeViewId)) {
+        const active = aiViews.get(activeViewId)!
+        if (viewModelKeys.get(activeViewId) === modelKey) {
+          targetView = active
+        }
+      }
 
-    const script = `(() => {
+      if (!targetView || targetView.webContents.isDestroyed()) {
+        return { success: false, reason: 'no_open_tab' }
+      }
+
+      const script = `(() => {
       try {
         const root = document.body;
         if (!root) return { success: false, reason: 'no_root' };
@@ -4590,13 +5822,14 @@ ipcMain.handle('extract_provider_live_dom', async (_event, modelKey: string, pro
       }
     })();`
 
-    const result = await targetView.webContents.executeJavaScript(script)
-    return result || { success: false, reason: 'script_failed' }
-  } catch (err) {
-    console.error('extract_provider_live_dom error:', err)
-    return { success: false, error: String(err) }
+      const result = await targetView.webContents.executeJavaScript(script)
+      return result || { success: false, reason: 'script_failed' }
+    } catch (err) {
+      console.error('extract_provider_live_dom error:', err)
+      return { success: false, error: String(err) }
+    }
   }
-})
+)
 
 ipcMain.on('set_provider_config', (_event, map) => {
   if (!map || typeof map !== 'object' || Object.keys(map).length === 0) {
@@ -4626,7 +5859,16 @@ const arenaTitleSync = new ActiveTitleSync()
 function restartActiveArenaTitleSync(): void {
   arenaTitleSync.stop()
   const tabId = activeViewId
-  if (!tabId || !mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible() || mainWindow.isMinimized() || !activeViewVisible || overlaysOpen) return
+  if (
+    !tabId ||
+    !mainWindow ||
+    mainWindow.isDestroyed() ||
+    !mainWindow.isVisible() ||
+    mainWindow.isMinimized() ||
+    !activeViewVisible ||
+    overlaysOpen
+  )
+    return
   const view = aiViews.get(tabId)
   const modelKey = viewModelKeys.get(tabId) || ''
   if (!view || !['arena', 'arena-ai'].includes(modelKey.toLowerCase())) return
@@ -4634,14 +5876,28 @@ function restartActiveArenaTitleSync(): void {
   const feats = getMergedProviderFeatures(modelKey, providerConfig[modelKey], globalOv)
   const selector = feats.chatTitleSelector
   const requested = feats.chatTitlePollingIntervalMs
-  const interval = requested === 0 ? 0 : typeof requested === 'number' && Number.isFinite(requested)
-    ? Math.max(500, Math.min(60000, requested)) : 1500
+  const interval =
+    requested === 0
+      ? 0
+      : typeof requested === 'number' && Number.isFinite(requested)
+        ? Math.max(500, Math.min(60000, requested))
+        : 1500
   if (!selector || !interval) return
   const wc = view.webContents
   if (!wc || wc.isDestroyed()) return
   const script = buildActiveTitleReadScript(selector)
-  const canRun = () => Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() && !mainWindow.isMinimized() &&
-    activeViewId === tabId && activeViewVisible && !overlaysOpen && aiViews.get(tabId) === view && !wc.isDestroyed())
+  const canRun = () =>
+    Boolean(
+      mainWindow &&
+      !mainWindow.isDestroyed() &&
+      mainWindow.isVisible() &&
+      !mainWindow.isMinimized() &&
+      activeViewId === tabId &&
+      activeViewVisible &&
+      !overlaysOpen &&
+      aiViews.get(tabId) === view &&
+      !wc.isDestroyed()
+    )
   arenaTitleSync.start({
     contents: wc,
     intervalMs: interval,
@@ -4652,8 +5908,13 @@ function restartActiveArenaTitleSync(): void {
       const title = await wc.executeJavaScript(script)
       if (wc.isDestroyed() || wc.getURL() !== beforeUrl || typeof title !== 'string') return null
       const rawClean = title.trim()
-      const clean = (typeof cleanConversationTitle === 'function' ? cleanConversationTitle(rawClean, modelKey) : rawClean) || rawClean
-      return clean && !shouldIgnoreProviderTitle(rawClean, feats.defaultChatTitles || [], modelKey) ? clean : null
+      const clean =
+        (typeof cleanConversationTitle === 'function'
+          ? cleanConversationTitle(rawClean, modelKey)
+          : rawClean) || rawClean
+      return clean && !shouldIgnoreProviderTitle(rawClean, feats.defaultChatTitles || [], modelKey)
+        ? clean
+        : null
     },
     publish: (title) => {
       viewTitles.set(tabId, title)
@@ -4810,14 +6071,24 @@ ipcMain.on('activate_tab', async (_event, tabId, url, bounds, modelKey) => {
         token: myWakeToken,
         targetUrl: targetRestoreUrl
       })
-      console.log('[activate_tab] RESTORING evicted tab:', tabId, targetRestoreUrl, 'token=', myWakeToken)
+      console.log(
+        '[activate_tab] RESTORING evicted tab:',
+        tabId,
+        targetRestoreUrl,
+        'token=',
+        myWakeToken
+      )
 
       void (async () => {
         try {
           await view.webContents.loadURL(targetRestoreUrl!)
 
           // Verify this wake is still the current navigation attempt and view wasn't destroyed
-          if (wakeTokens.get(tabId) !== myWakeToken || !view.webContents || view.webContents.isDestroyed()) {
+          if (
+            wakeTokens.get(tabId) !== myWakeToken ||
+            !view.webContents ||
+            view.webContents.isDestroyed()
+          ) {
             return
           }
 
@@ -4829,7 +6100,11 @@ ipcMain.on('activate_tab', async (_event, tabId, url, bounds, modelKey) => {
           }
 
           // Re-verify token after asynchronous executeJavaScript before consuming state
-          if (wakeTokens.get(tabId) !== myWakeToken || !view.webContents || view.webContents.isDestroyed()) {
+          if (
+            wakeTokens.get(tabId) !== myWakeToken ||
+            !view.webContents ||
+            view.webContents.isDestroyed()
+          ) {
             return
           }
 
@@ -4872,14 +6147,17 @@ ipcMain.on('activate_tab', async (_event, tabId, url, bounds, modelKey) => {
         token: myWakeToken,
         targetUrl: url
       })
-      void view.webContents.loadURL(url).catch((err) => {
-        if (err?.code === 'ERR_ABORTED' || err?.errno === -3) return
-        console.warn(`[activate_tab] Failed to load empty view for ${tabId}:`, err)
-      }).finally(() => {
-        if (activeWakeOperations.get(tabId)?.token === myWakeToken) {
-          activeWakeOperations.delete(tabId)
-        }
-      })
+      void view.webContents
+        .loadURL(url)
+        .catch((err) => {
+          if (err?.code === 'ERR_ABORTED' || err?.errno === -3) return
+          console.warn(`[activate_tab] Failed to load empty view for ${tabId}:`, err)
+        })
+        .finally(() => {
+          if (activeWakeOperations.get(tabId)?.token === myWakeToken) {
+            activeWakeOperations.delete(tabId)
+          }
+        })
     }
   }
 
@@ -4948,6 +6226,7 @@ ipcMain.on('destroy_tab_view', async (_event, tabId: string) => {
     arenaTitleSync.stop()
   }
   const closed = await tabDiscardManager.closeTab(tabId)
+  if (closed && lastNotifiedTabId === tabId) lastNotifiedTabId = null
   if (!closed) console.error('[close] WebContents remains tracked:', tabId)
 })
 
@@ -4957,38 +6236,41 @@ ipcMain.on('reload_active_view', () => {
   if (view) view.webContents.reload()
 })
 
-ipcMain.handle('provider_clear_session', async (event, providerKey: string, providerUrl?: string) => {
-  if (!isValidMainWindowSender(event)) return { success: false, message: 'Unauthorized' }
-  const sess = session.fromPartition('persist:ai-shared')
-  try {
-    if (providerUrl) {
-      try {
-        const u = new URL(providerUrl)
-        await sess.clearStorageData({
-          origin: u.origin,
-          storages: ['cookies', 'localstorage', 'cachestorage']
-        })
-      } catch {
+ipcMain.handle(
+  'provider_clear_session',
+  async (event, providerKey: string, providerUrl?: string) => {
+    if (!isValidMainWindowSender(event)) return { success: false, message: 'Unauthorized' }
+    const sess = session.fromPartition('persist:ai-shared')
+    try {
+      if (providerUrl) {
+        try {
+          const u = new URL(providerUrl)
+          await sess.clearStorageData({
+            origin: u.origin,
+            storages: ['cookies', 'localstorage', 'cachestorage']
+          })
+        } catch {
+          await sess.clearStorageData({
+            storages: ['cookies', 'localstorage', 'cachestorage']
+          })
+        }
+      } else {
         await sess.clearStorageData({
           storages: ['cookies', 'localstorage', 'cachestorage']
         })
       }
-    } else {
-      await sess.clearStorageData({
-        storages: ['cookies', 'localstorage', 'cachestorage']
-      })
-    }
-    // Reload open view for this provider to reflect signed-out state
-    for (const [tabId, view] of aiViews.entries()) {
-      if (viewModelKeys.get(tabId) === providerKey && !view.webContents.isDestroyed()) {
-        view.webContents.reload()
+      // Reload open view for this provider to reflect signed-out state
+      for (const [tabId, view] of aiViews.entries()) {
+        if (viewModelKeys.get(tabId) === providerKey && !view.webContents.isDestroyed()) {
+          view.webContents.reload()
+        }
       }
+      return { success: true }
+    } catch (err) {
+      return { success: false, message: String(err) }
     }
-    return { success: true }
-  } catch (err) {
-    return { success: false, message: String(err) }
   }
-})
+)
 
 // On a successful Google session import, reload Gemini views only so the
 // embedded page picks up the newly-imported session; forward events to renderer.
@@ -5000,7 +6282,9 @@ function forwardGoogleSignInEvent(ev: import('./googleAuth').GoogleSignInEvent):
 }
 const GEMINI_LOGIN_URL =
   'https://accounts.google.com/ServiceLogin?hl=en&passive=true&continue=' +
-  encodeURIComponent('https://gemini.google.com/signin?continue=https%3A%2F%2Fgemini.google.com%2Fapp') +
+  encodeURIComponent(
+    'https://gemini.google.com/signin?continue=https%3A%2F%2Fgemini.google.com%2Fapp'
+  ) +
   '&flowName=GlifWebSignIn&flowEntry=ServiceLogin'
 ipcMain.handle('google_signin_start', () => {
   void startGoogleSignIn(GEMINI_LOGIN_URL, { onEvent: forwardGoogleSignInEvent })
@@ -5038,7 +6322,8 @@ ipcMain.handle('sessions_get_profiles', (event) => {
 
 ipcMain.handle('sessions_pick_custom_folder', async (event) => {
   if (!isValidMainWindowSender(event)) return { success: false, message: 'Unauthorized' }
-  if (!mainWindow || mainWindow.isDestroyed()) return { success: false, message: 'Window unavailable' }
+  if (!mainWindow || mainWindow.isDestroyed())
+    return { success: false, message: 'Window unavailable' }
   const res = await dialog.showOpenDialog(mainWindow, {
     title: 'Select Browser Profile Folder',
     properties: ['openDirectory']
@@ -5063,9 +6348,10 @@ ipcMain.handle('sessions_pick_custom_folder', async (event) => {
       profileName: profile.name,
       detectedProviders: profile.detectedAiSessions,
       affectedProviders: report.affectedProviders,
-      message: report.errorCount > 0
-        ? `Imported ${report.count} cookie(s) from "${profile.name}" but ${report.errorCount} failed.`
-        : `Successfully imported ${report.count} cookie(s) from "${profile.name}".`
+      message:
+        report.errorCount > 0
+          ? `Imported ${report.count} cookie(s) from "${profile.name}" but ${report.errorCount} failed.`
+          : `Successfully imported ${report.count} cookie(s) from "${profile.name}".`
     }
   } catch (err: any) {
     return { success: false, message: err?.message || String(err) }
@@ -5082,7 +6368,6 @@ ipcMain.handle('cookies_import_json', async (event, jsonStr: string) => {
 })
 
 ipcMain.on('resize_view', (_event, bounds) => {
-
   // Apply UI zoom factor to convert DOM pixels back to physical DIPs for BrowserView
   if (currentUiZoom !== 1.0) {
     bounds = {
@@ -5124,7 +6409,12 @@ ipcMain.on('resize_view', (_event, bounds) => {
   const activeView = activeViewId ? aiViews.get(activeViewId) : null
   if (activeView && !activeView.webContents.isDestroyed()) {
     const prev = activeView.getBounds()
-    if (prev.x !== bounds.x || prev.y !== bounds.y || prev.width !== bounds.width || prev.height !== bounds.height) {
+    if (
+      prev.x !== bounds.x ||
+      prev.y !== bounds.y ||
+      prev.width !== bounds.width ||
+      prev.height !== bounds.height
+    ) {
       activeView.setBounds(bounds)
     }
     const shouldBeVisible = !hidden && !overlaysOpen
@@ -5205,96 +6495,110 @@ ipcMain.handle('clipboard_write', (_, text) => {
   }
 })
 
-ipcMain.handle('extract_context', async (_event, options?: CompressionOptions & { expectedTabId?: string }) => {
-  const targetTabId = options?.expectedTabId || activeViewId
-  if (!targetTabId) return { success: false, error: 'No active tab' }
-  const view = aiViews.get(targetTabId)
-  if (!view) return { success: false, error: 'Tab view not found' }
+ipcMain.handle(
+  'extract_context',
+  async (_event, options?: CompressionOptions & { expectedTabId?: string }) => {
+    const targetTabId = options?.expectedTabId || activeViewId
+    if (!targetTabId) return { success: false, error: 'No active tab' }
+    const view = aiViews.get(targetTabId)
+    if (!view) return { success: false, error: 'Tab view not found' }
 
-  // Bind immutable capture context before await (preventing race condition when switching tabs)
-  const capturedTabId = targetTabId
-  const modelKey = viewModelKeys.get(capturedTabId) || 'ai-session'
-  const modelLabels: Record<string, string> = {
-    gemini: 'Google Gemini',
-    chatgpt: 'OpenAI ChatGPT',
-    claude: 'Anthropic Claude',
-    deepseek: 'DeepSeek AI',
-    kimi: 'Kimi Moonshot',
-    qwen: 'Qwen AI',
-    mistral: 'Mistral Le Chat',
-    grok: 'xAI Grok',
-    copilot: 'Microsoft Copilot',
-    perplexity: 'Perplexity AI',
-    arena: 'Arena Agent Mode'
-  }
-  const providerLabel = (modelKey && modelLabels[modelKey.toLowerCase()]) || modelKey.toUpperCase()
-
-  try {
-    const script = buildContextExtractorScript()
-
-    // Bounded execution with timeout (7500ms)
-    const timeoutPromise = new Promise<RawExtractionPayload>((_, reject) => {
-      setTimeout(() => reject(new Error('Extraction timed out after 7500ms')), 7500)
-    })
-
-    const executionPromise = view.webContents.executeJavaScript(script) as Promise<RawExtractionPayload>
-    const rawPayload = await Promise.race([executionPromise, timeoutPromise])
-
-    // Verify view has not been destroyed while waiting
-    if (!aiViews.has(capturedTabId) || view.webContents.isDestroyed()) {
-      return { success: false, error: 'Tab was closed or navigated during capture' }
+    // Bind immutable capture context before await (preventing race condition when switching tabs)
+    const capturedTabId = targetTabId
+    const modelKey = viewModelKeys.get(capturedTabId) || 'ai-session'
+    const modelLabels: Record<string, string> = {
+      gemini: 'Google Gemini',
+      chatgpt: 'OpenAI ChatGPT',
+      claude: 'Anthropic Claude',
+      deepseek: 'DeepSeek AI',
+      kimi: 'Kimi Moonshot',
+      qwen: 'Qwen AI',
+      mistral: 'Mistral Le Chat',
+      grok: 'xAI Grok',
+      copilot: 'Microsoft Copilot',
+      perplexity: 'Perplexity AI',
+      arena: 'Arena Agent Mode'
     }
+    const providerLabel =
+      (modelKey && modelLabels[modelKey.toLowerCase()]) || modelKey.toUpperCase()
 
-    if (!rawPayload || !rawPayload.success) {
-      const errMsg = rawPayload?.error || 'Extraction failed in guest page'
-      return { success: false, error: errMsg, prompt: errMsg, rawText: errMsg }
-    }
+    try {
+      const script = buildContextExtractorScript()
 
-    const title = viewTitles.get(capturedTabId) || view.webContents.getTitle() || providerLabel
-    const snapshot = buildSnapshotFromRawPayload({
-      payload: rawPayload,
-      tabId: capturedTabId,
-      providerKey: providerLabel,
-      origin: view.webContents.getURL() || '',
-      title,
-      contextRevision: `rev-${Date.now().toString(16)}`
-    })
+      // Bounded execution with timeout (7500ms)
+      const timeoutPromise = new Promise<RawExtractionPayload>((_, reject) => {
+        setTimeout(() => reject(new Error('Extraction timed out after 7500ms')), 7500)
+      })
 
-    // Project snapshot to initial continuation brief / markdown
-    const projection = projectSnapshotToMarkdown({
-      snapshot,
-      options: {
-        mode: options?.mode === 'clean' ? 'transcript' : options?.mode === 'compact' ? 'compact' : 'brief',
-        stripPleasantries: options?.stripPleasantries,
-        deduplicateExactCode: options?.deduplicateCode,
-        includeThinkingSummary: !options?.excludeThinking,
-        userObjectiveOverride: options?.userObjectiveOverride,
-        userNextActionOverride: options?.userNextActionOverride
+      const executionPromise = view.webContents.executeJavaScript(
+        script
+      ) as Promise<RawExtractionPayload>
+      const rawPayload = await Promise.race([executionPromise, timeoutPromise])
+
+      // Verify view has not been destroyed while waiting
+      if (!aiViews.has(capturedTabId) || view.webContents.isDestroyed()) {
+        return { success: false, error: 'Tab was closed or navigated during capture' }
       }
-    })
 
-    return {
-      success: true,
-      snapshot,
-      modelKey,
-      providerName: providerLabel,
-      title,
-      capturedAt: snapshot.capturedAt,
-      prompt: projection.prompt,
-      rawText: projection.rawText,
-      stats: projection.stats,
-      currentObjective: projection.currentObjective,
-      nextActionCandidate: projection.nextActionCandidate,
-      ledger: projection.ledger,
-      artifacts: projection.artifacts,
-      omissions: projection.omissions,
-      coverageWarnings: projection.coverageWarnings
+      if (!rawPayload || !rawPayload.success) {
+        const errMsg = rawPayload?.error || 'Extraction failed in guest page'
+        return { success: false, error: errMsg, prompt: errMsg, rawText: errMsg }
+      }
+
+      const title = viewTitles.get(capturedTabId) || view.webContents.getTitle() || providerLabel
+      const snapshot = buildSnapshotFromRawPayload({
+        payload: rawPayload,
+        tabId: capturedTabId,
+        providerKey: providerLabel,
+        origin: view.webContents.getURL() || '',
+        title,
+        contextRevision: `rev-${Date.now().toString(16)}`
+      })
+
+      // Project snapshot to initial continuation brief / markdown
+      const projection = projectSnapshotToMarkdown({
+        snapshot,
+        options: {
+          mode:
+            options?.mode === 'clean'
+              ? 'transcript'
+              : options?.mode === 'compact'
+                ? 'compact'
+                : 'brief',
+          stripPleasantries: options?.stripPleasantries,
+          deduplicateExactCode: options?.deduplicateCode,
+          includeThinkingSummary: !options?.excludeThinking,
+          userObjectiveOverride: options?.userObjectiveOverride,
+          userNextActionOverride: options?.userNextActionOverride
+        }
+      })
+
+      return {
+        success: true,
+        snapshot,
+        modelKey,
+        providerName: providerLabel,
+        title,
+        capturedAt: snapshot.capturedAt,
+        prompt: projection.prompt,
+        rawText: projection.rawText,
+        stats: projection.stats,
+        currentObjective: projection.currentObjective,
+        nextActionCandidate: projection.nextActionCandidate,
+        ledger: projection.ledger,
+        artifacts: projection.artifacts,
+        omissions: projection.omissions,
+        coverageWarnings: projection.coverageWarnings
+      }
+    } catch (err: any) {
+      console.error('Failed to extract context:', err)
+      return {
+        success: false,
+        error: err?.message || 'Failed to extract context from active session'
+      }
     }
-  } catch (err: any) {
-    console.error('Failed to extract context:', err)
-    return { success: false, error: err?.message || 'Failed to extract context from active session' }
   }
-})
+)
 ipcMain.handle('capture_tab_snapshot', async (_event, tabId?: string) => {
   const id = tabId ?? activeViewId
   if (!id) return null
@@ -5326,7 +6630,11 @@ ipcMain.handle('capture_tab_snapshot', async (_event, tabId?: string) => {
 // the Settings → Webview tab is open, so theme knobs reflect instantly.
 function findPreviewView(providerKey: string | null): [string, Electron.WebContentsView] | null {
   if (providerKey) {
-    if (activeViewId && viewModelKeys.get(activeViewId) === providerKey && aiViews.has(activeViewId)) {
+    if (
+      activeViewId &&
+      viewModelKeys.get(activeViewId) === providerKey &&
+      aiViews.has(activeViewId)
+    ) {
       return [activeViewId, aiViews.get(activeViewId)!]
     }
     for (const [tabId, view] of aiViews) {
