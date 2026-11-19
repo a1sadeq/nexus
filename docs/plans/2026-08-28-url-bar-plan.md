@@ -1,9 +1,11 @@
 # URL Bar Restore Plan
 
 ## Objective
+
 Restore the `Ctrl+L` URL bar functionality from the backup version of `App.tsx` to the current `App.tsx` without modifying any other features.
 
 ## Implementation Details
+
 1. **Imports:**
    - Add `import UrlBarModal from './components/UrlBarModal'` to the top of `App.tsx`.
 2. **State:**

@@ -1,9 +1,11 @@
 # Pinned Tabs Resize Plan
 
 ## Objective
+
 Increase the size of the pinned tabs in the `PinnedSidebar.tsx` component for both collapsed and expanded states to improve visibility and clickability.
 
 ## Implementation Details
+
 1. **Collapsed State Adjustments:**
    - Increase the clickable button dimensions (e.g., from `w-9 h-9` to `w-12 h-12`).
    - Increase the inner circular icon container (e.g., from `w-7 h-7` to `w-9 h-9`).

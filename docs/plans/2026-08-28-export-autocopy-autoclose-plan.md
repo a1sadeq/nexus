@@ -1,9 +1,11 @@
 # Export Session Context: Auto-Copy & Auto-Close Plan
 
 ## Objective
+
 Enhance the `ExportOverlay` component to automatically copy the extracted markdown to the user's clipboard upon successful extraction, and automatically close the overlay after 10 seconds.
 
 ## Implementation Details
+
 1. **Auto-Copy to Clipboard:**
    - Inside `ExportOverlay.tsx`, right after the `window.electron.ipcRenderer.invoke('extract_context')` promise resolves and sets the `markdown` state.
    - Use `navigator.clipboard.writeText(result)` to immediately copy the text.
