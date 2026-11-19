@@ -1,6 +1,6 @@
 {
   "name": "nexus",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "description": "Nexus — multi-provider AI desktop command center",
   "main": "./out/main/index.js",
   "author": "A1sadeq",
@@ -30,7 +30,6 @@
   "dependencies": {
     "@electron-toolkit/preload": "^3.0.2",
     "@electron-toolkit/utils": "^4.0.0",
-    "electron-updater": "6.8.9",
     "electron-updater": "6.8.9"
   },
   "devDependencies": {
