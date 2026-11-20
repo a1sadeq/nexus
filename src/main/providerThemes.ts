@@ -17,8 +17,11 @@ export interface ThemeVars {
   borderWidth: number
   ambientAura?: boolean
   ambientAuraMode?: 'viewport-frame' | 'chat-center'
+  /** 10–300. Above 100 the glow reaches further rather than only getting denser. */
   ambientAuraIntensity?: number
   ambientAuraColor?: string
+  /** Breathing motion on the aura (default on). */
+  ambientAuraLive?: boolean
   bubbleStyle?: string
   bubbleGradientDepth?: number
   codeBlockStyle?: string
@@ -313,11 +316,81 @@ export function composerRules(v: ThemeVars): string {
   `
 }
 
-const base = (v: ThemeVars): string => {
-  const auraColor = v.ambientAuraColor || v.accent
-  const auraIntensity = v.ambientAuraIntensity ?? 45
-  const auraAlpha = Math.max(0.1, Math.min(0.85, auraIntensity / 100))
+/**
+ * The ambient aura, as CSS.
+ *
+ * Two behaviours worth knowing:
+ *  - Intensity runs to 300. Up to 100 the alpha ramps as before; past 100 alpha is already at its
+ *    ceiling, so the extra reach goes into a second, much wider halo that fades in from ~80. That
+ *    is what makes 200% look like a bigger glow instead of the same glow turned up to white.
+ *  - `ambientAuraLive` (default on) breathes the layer slowly: 9s at low intensity, tightening to
+ *    ~5s at 300 so a strong aura feels energetic rather than sluggish. Skipped entirely for users
+ *    whose system asks for reduced motion.
+ *
+ * Kept in one place because both the per-provider themes and the generic fallback render it, and
+ * two copies of this maths would drift apart.
+ */
+export function ambientAuraCss(v: ThemeVars, options: { zIndex?: number } = {}): string {
+  if (!v.ambientAura) return ''
+  const color = v.ambientAuraColor || v.accent
+  const raw = typeof v.ambientAuraIntensity === 'number' ? v.ambientAuraIntensity : 45
+  const intensity = Math.max(0, Math.min(300, raw))
+  const alpha = Math.max(0.08, Math.min(1, intensity / 100))
+  const blur = Math.round(intensity * 1.2)
+  const haloBlur = Math.round(intensity * 2.6)
+  const haloAlpha = Math.max(0, Math.min(0.5, (intensity - 80) / 440))
+  const live = v.ambientAuraLive !== false
+  const beat = Math.max(4.5, 9 - intensity / 90)
+  const zIndex = options.zIndex ?? 999999
 
+  if (v.ambientAuraMode === 'chat-center') {
+    return `
+    body::after {
+      content: '';
+      position: fixed;
+      top: 35%;
+      left: 50%;
+      transform: translate(-50%, -35%);
+      width: 70vw;
+      height: 70vh;
+      background: radial-gradient(circle, ${rgba(color, alpha * 0.3)} 0%, ${rgba(color, alpha * 0.12)} 45%, transparent 72%);
+      pointer-events: none;
+      z-index: 0;
+      ${live ? `animation: nexus-aura-drift ${beat}s ease-in-out infinite;` : ''}
+    }
+    @supports (backdrop-filter: blur(1px)) {
+      body::after { filter: blur(${Math.round(intensity / 8)}px); }
+    }
+    ${live ? `@keyframes nexus-aura-drift {
+      0%, 100% { opacity: 0.82; transform: translate(-50%, -35%) scale(1); }
+      50% { opacity: 1; transform: translate(-49%, -34%) scale(1.05); }
+    }` : ''}
+    ${live ? '@media (prefers-reduced-motion: reduce) { body::after { animation: none !important; } }' : ''}
+  `
+  }
+
+  return `
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: ${zIndex};
+      box-shadow:
+        inset 0 0 ${blur}px ${rgba(color, alpha * 0.45)},
+        inset 0 0 ${haloBlur}px ${rgba(color, haloAlpha)},
+        inset 0 0 15px ${rgba(color, 0.2)};
+      ${live ? `animation: nexus-aura-breathe ${beat}s ease-in-out infinite;` : ''}
+    }
+    ${live ? `@keyframes nexus-aura-breathe {
+      0%, 100% { opacity: 0.78; }
+      50% { opacity: 1; }
+    }` : ''}
+    ${live ? '@media (prefers-reduced-motion: reduce) { body::before { animation: none !important; } }' : ''}
+  `
+}
+
+const base = (v: ThemeVars): string => {
   return `
   ${getStructuralVars(v)}
   html { background-color: ${v.bg} !important; }
@@ -332,35 +405,7 @@ const base = (v: ThemeVars): string => {
   ::-webkit-scrollbar-track { background: transparent !important; }
 
   /* Ambient Chat Aura */
-  ${
-    v.ambientAura && v.ambientAuraMode === 'chat-center'
-      ? `
-    body::after {
-      content: '';
-      position: fixed;
-      top: 35%;
-      left: 50%;
-      transform: translate(-50%, -35%);
-      width: 70vw;
-      height: 70vh;
-      background: radial-gradient(circle, ${rgba(auraColor, auraAlpha * 0.3)} 0%, transparent 70%);
-      pointer-events: none;
-      z-index: 0;
-    }
-  `
-      : v.ambientAura
-        ? `
-    body::before {
-      content: '';
-      position: fixed;
-      inset: 0;
-      pointer-events: none;
-      box-shadow: inset 0 0 ${Math.round(auraIntensity * 1.2)}px ${rgba(auraColor, auraAlpha * 0.45)}, inset 0 0 15px ${rgba(auraColor, 0.2)};
-      z-index: 999999;
-    }
-  `
-        : ''
-  }
+  ${ambientAuraCss(v)}
 
   /* Universal Code Block Styling & Margins */
   ${
@@ -1753,6 +1798,7 @@ export function mergeOverrides(v: ThemeVars, o?: ProviderOverrides): ThemeVars {
   if (o.ambientAuraMode != null) out.ambientAuraMode = o.ambientAuraMode
   if (o.ambientAuraIntensity != null) out.ambientAuraIntensity = o.ambientAuraIntensity
   if (o.ambientAuraColor != null) out.ambientAuraColor = o.ambientAuraColor
+  if (o.ambientAuraLive != null) out.ambientAuraLive = o.ambientAuraLive
   if (o.themeSelectors != null) out.themeSelectors = o.themeSelectors
   if (o.cssFeatures != null) out.cssFeatures = o.cssFeatures
   if (o.bubbleStyle != null) out.bubbleStyle = o.bubbleStyle

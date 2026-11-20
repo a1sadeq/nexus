@@ -15,6 +15,11 @@ export interface WindowTitleBarProps {
   onSelectModel?: (key: string) => void
   autoHideMode?: boolean
   onOpenDiagnostics?: () => void
+  /** Opens the per-tab accent & aura picker. Omitted in windows with no tab. */
+  onOpenTabColors?: () => void
+  /** The active tab's own accent, if it has one — paints the dot and the button. */
+  tabAccent?: string
+  hasCustomTabColors?: boolean
 }
 
 export const WindowTitleBar: FC<WindowTitleBarProps> = ({
@@ -27,7 +32,10 @@ export const WindowTitleBar: FC<WindowTitleBarProps> = ({
   activeModelKey = 'gemini',
   onSelectModel,
   autoHideMode = false,
-  onOpenDiagnostics
+  onOpenDiagnostics,
+  onOpenTabColors,
+  tabAccent,
+  hasCustomTabColors = false
 }) => {
   const [isMaximized, setIsMaximized] = useState(false)
   const [isRevealed, setIsRevealed] = useState(false)
@@ -182,7 +190,7 @@ export const WindowTitleBar: FC<WindowTitleBarProps> = ({
         >
           <span
             className="w-1.5 h-1.5 rounded-full shrink-0"
-            style={{ backgroundColor: modelColor }}
+            style={{ backgroundColor: tabAccent || modelColor, boxShadow: tabAccent ? `0 0 6px ${tabAccent}` : undefined }}
             aria-hidden="true"
           />
           <span className="truncate font-medium text-slate-200">
@@ -194,6 +202,44 @@ export const WindowTitleBar: FC<WindowTitleBarProps> = ({
             </span>
           )}
         </div>
+
+        {/* Per-tab accent & aura. Sits next to the conversation title because that is the thing
+            it changes — the colour belongs to this tab, not to the app theme. */}
+        {onOpenTabColors && !maskTitle && (
+          <button
+            type="button"
+            className={`no-drag nexus-titlebar-color-btn${hasCustomTabColors ? ' is-set' : ''}`}
+            onClick={onOpenTabColors}
+            title={
+              hasCustomTabColors
+                ? 'This tab has its own accent & aura — change them'
+                : 'Give this tab its own accent & aura colour'
+            }
+            aria-label="Tab accent and aura colours"
+            style={
+              hasCustomTabColors && tabAccent
+                ? { borderColor: `${tabAccent}88`, color: tabAccent, boxShadow: `0 0 10px ${tabAccent}44` }
+                : undefined
+            }
+          >
+            <svg
+              width="12"
+              height="12"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <circle cx="12" cy="12" r="9" />
+              <circle cx="12" cy="9" r="1.6" fill="currentColor" stroke="none" />
+              <circle cx="15.5" cy="13" r="1.6" fill="currentColor" stroke="none" />
+              <circle cx="9" cy="14.5" r="1.6" fill="currentColor" stroke="none" />
+            </svg>
+          </button>
+        )}
       </div>
 
       {/* Center: Always-Expanded AI Models Pillar */}

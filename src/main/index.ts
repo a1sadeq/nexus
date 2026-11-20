@@ -58,7 +58,7 @@ import {
   saveCustomThemeEntry,
   removeCustomThemeEntry
 } from './customThemesStore'
-import { PROVIDER_THEMES, mergeOverrides, getStructuralVars } from './providerThemes'
+import { PROVIDER_THEMES, mergeOverrides, getStructuralVars, ambientAuraCss } from './providerThemes'
 import {
   type ProviderOverrides,
   getMergedProviderFeatures,
@@ -997,6 +997,7 @@ export const tabDiscardManager = new TabDiscardManager({
 
     aiViews.delete(tabId)
     viewModelKeys.delete(tabId)
+    viewTabColors.delete(tabId)
     lastRealBounds.delete(tabId)
     viewTitles.delete(tabId)
     const timer = aiLifecycleTimers.get(tabId)
@@ -2724,7 +2725,13 @@ function reconcileViewPresentation(): void {
         previousBounds.y !== realBounds.y ||
         previousBounds.width !== realBounds.width ||
         previousBounds.height !== realBounds.height
-      if (shouldShow && !geometryChanged) {
+      // A view that was parked at zero size (overlay open, tab switched away, window hidden) comes
+      // back with geometry that *looks* changed but no frame behind it. Changing bounds on a
+      // WebContentsView does not by itself make Chromium produce a new frame, so the surface can
+      // stay blank until something flips visibility — which is exactly why hiding and re-showing
+      // the window "fixes" it by hand. Repaint in that case too.
+      const comingBackFromHidden = !previousBounds || previousBounds.width <= 0 || previousBounds.height <= 0
+      if (shouldShow && (!geometryChanged || comingBackFromHidden)) {
         forceViewRepaint(view, {
           bounds: realBounds && realBounds.width > 0 && realBounds.height > 0 ? realBounds : null,
           reason: 'reconcile-presentation',
@@ -4825,6 +4832,7 @@ function buildWebviewThemeCss(themeData, url, viewWidthPx, overrides, modelKey?:
     ambientAuraMode: themeData.ambientAuraMode,
     ambientAuraIntensity: themeData.ambientAuraIntensity,
     ambientAuraColor: themeData.ambientAuraColor,
+    ambientAuraLive: themeData.ambientAuraLive,
     bubbleStyle: themeData.bubbleStyle,
     bubbleGradientDepth: themeData.bubbleGradientDepth,
     codeBlockStyle: themeData.codeBlockStyle,
@@ -4974,13 +4982,7 @@ function genericFallbackCss(v, dark) {
       box-sizing: border-box !important;
     }
 
-    ${
-      v.ambientAura && v.ambientAuraMode === 'chat-center'
-        ? `body::after { content: ''; position: fixed; top: 35%; left: 50%; transform: translate(-50%, -35%); width: 70vw; height: 70vh; background: radial-gradient(circle, ${v.ambientAuraColor || v.accent}33 0%, transparent 70%); pointer-events: none; z-index: 0; }`
-        : v.ambientAura
-          ? `body::before { content: ''; position: fixed; inset: 0; pointer-events: none; box-shadow: inset 0 0 ${Math.round((v.ambientAuraIntensity ?? 45) * 1.2)}px ${v.ambientAuraColor || v.accent}66, inset 0 0 15px ${v.ambientAuraColor || v.accent}33; z-index: 999999; }`
-          : ''
-    }
+    ${ambientAuraCss(v)}
 
     ${
       v.themeSelectors?.appContainer
@@ -5217,6 +5219,45 @@ function genericFallbackCss(v, dark) {
 const viewCssState = new WeakMap<Electron.WebContents, { css: string; key: string }>()
 const viewCssChains = new WeakMap<Electron.WebContents, Promise<void>>()
 const focusCssKeys = new WeakMap<Electron.WebContents, string>()
+// Per-tab accent & aura, keyed by tab id. Memory only on purpose: the renderer owns the durable
+// copy (it serialises tabs to disk), main only needs to know how to paint the view that is open.
+const viewTabColors = new Map<string, { accentColor?: string; auraColor?: string }>()
+
+/** Hex only — these strings are concatenated into CSS that is injected into a live page. */
+function sanitiseTabColor(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const raw = value.trim()
+  return /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(raw) ? raw : undefined
+}
+
+function tabIdForWebContents(wc: Electron.WebContents): string | undefined {
+  for (const [id, view] of aiViews.entries()) {
+    if (view.webContents === wc) return id
+  }
+  return undefined
+}
+
+/**
+ * Provider overrides with this tab's own colours laid on top. A tab accent without a separate
+ * aura colour drags the aura along with it — one colour is the common case, and a tab whose dot
+ * is orange but whose glow is still indigo looks like a bug.
+ */
+function getOverridesForTab(
+  modelKey: string | undefined,
+  url: string | undefined,
+  tabId: string | undefined
+): ProviderOverrides | undefined {
+  const baseOverrides = getOverridesForModel(modelKey, url)
+  const tabColors = tabId ? viewTabColors.get(tabId) : undefined
+  if (!tabColors || (!tabColors.accentColor && !tabColors.auraColor)) return baseOverrides
+  const merged: ProviderOverrides = { ...(baseOverrides ?? {}) }
+  if (tabColors.accentColor) {
+    merged.accentColor = tabColors.accentColor
+    if (!tabColors.auraColor) merged.ambientAuraColor = tabColors.accentColor
+  }
+  if (tabColors.auraColor) merged.ambientAuraColor = tabColors.auraColor
+  return merged
+}
 
 function getOverridesForModel(modelKey?: string, url?: string): ProviderOverrides | undefined {
   if (!providerConfig || typeof providerConfig !== 'object') return undefined
@@ -5349,7 +5390,7 @@ function computeThemeCss(view, modelKey?: string): string {
   const theme = webviewTheme
   const url = view.webContents.getURL()
   const resolvedKey = modelKey || resolveModelKey('', url)
-  const overrides = getOverridesForModel(resolvedKey, url)
+  const overrides = getOverridesForTab(resolvedKey, url, tabIdForWebContents(view.webContents))
   const on = overrides?.on === 'on' ? true : overrides?.on === 'off' ? false : (theme?.on ?? false)
   if (on && theme?.colors) {
     return buildWebviewThemeCss(theme, url, view.getBounds().width, overrides, resolvedKey)
@@ -5360,7 +5401,7 @@ function applyWebviewTheme(view, modelKey?: string) {
   const wc = view.webContents
   const url = wc.getURL()
   const resolvedKey = modelKey || resolveModelKey('', url)
-  const overrides = getOverridesForModel(resolvedKey, url)
+  const overrides = getOverridesForTab(resolvedKey, url, tabIdForWebContents(wc))
   const css = computeThemeCss(view, resolvedKey)
   const bg = overrides?.surfaceBgColor || (webviewTheme?.on && webviewTheme.colors?.bg) || '#1a1a2e'
   view.setBackgroundColor(bg)
@@ -5451,6 +5492,21 @@ ipcMain.on('set_webview_theme', (_event, payload) => {
     applyWebviewTheme(view, resolveModelKey(tabId, view.webContents.getURL()))
   }
   if (previewViewId) capturePreviewFrame()
+})
+
+// Per-tab accent & aura. The renderer sends this whenever the active tab's colours change, and
+// once more on every tab activation, because views are created and destroyed all day.
+ipcMain.on('set_tab_colors', (_event, tabId: unknown, colors: unknown) => {
+  if (typeof tabId !== 'string' || !tabId) return
+  const record = (colors && typeof colors === 'object' ? colors : {}) as Record<string, unknown>
+  const accentColor = sanitiseTabColor(record.accentColor)
+  const auraColor = sanitiseTabColor(record.auraColor)
+  if (!accentColor && !auraColor) viewTabColors.delete(tabId)
+  else viewTabColors.set(tabId, { accentColor, auraColor })
+  const view = aiViews.get(tabId)
+  if (view && !view.webContents.isDestroyed()) {
+    applyWebviewTheme(view, resolveModelKey(tabId, view.webContents.getURL()))
+  }
 })
 
 ipcMain.handle('get_provider_config', () => providerConfig)
@@ -5573,6 +5629,7 @@ ipcMain.handle('get_provider_base_css', (_event, modelKey: string, providerUrl?:
     ambientAuraMode: (theme as any).ambientAuraMode,
     ambientAuraIntensity: (theme as any).ambientAuraIntensity,
     ambientAuraColor: (theme as any).ambientAuraColor,
+    ambientAuraLive: (theme as any).ambientAuraLive,
     bubbleStyle: (theme as any).bubbleStyle,
     bubbleGradientDepth: (theme as any).bubbleGradientDepth,
     codeBlockStyle: (theme as any).codeBlockStyle,
@@ -5975,6 +6032,7 @@ ipcMain.on('activate_tab', async (_event, tabId, url, bounds, modelKey) => {
   } catch (err) {
     console.warn(`[activate_tab] updateWebviewTitlePoller error for ${tabId}:`, err)
   }
+
 
   // 3. Set visibility and bounds: hide background views safely, then ALWAYS set bounds/visibility for selected view
   const isHidden = Boolean(bounds && bounds.width === 0 && bounds.height === 0)

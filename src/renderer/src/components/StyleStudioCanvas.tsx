@@ -103,6 +103,7 @@ export const StyleStudioCanvas: React.FC<Props> = ({
   const effAuraMode = (isGlobal ? interfaceSettings.ambientAuraMode : prov.ambientAuraMode) || interfaceSettings.ambientAuraMode || 'viewport-frame'
   const effAuraIntensity = (isGlobal ? interfaceSettings.ambientAuraIntensity : prov.ambientAuraIntensity) ?? interfaceSettings.ambientAuraIntensity ?? 45
   const effAuraColor = (isGlobal ? interfaceSettings.ambientAuraColor : prov.ambientAuraColor) || interfaceSettings.ambientAuraColor || effAccent
+  const effAuraLive = (isGlobal ? interfaceSettings.ambientAuraLive : prov.ambientAuraLive) ?? interfaceSettings.ambientAuraLive !== false
 
   const effAiWidth = (isGlobal ? interfaceSettings.aiResponseWidthPx : prov.aiResponseWidthPx) ?? interfaceSettings.aiResponseWidthPx ?? 860
   const effUserWidth = (isGlobal ? interfaceSettings.userPromptWidthPx : prov.userPromptWidthPx) ?? interfaceSettings.userPromptWidthPx ?? 720
@@ -156,6 +157,7 @@ export const StyleStudioCanvas: React.FC<Props> = ({
     if (field === 'ambientAuraMode') return prov.ambientAuraMode !== undefined
     if (field === 'ambientAuraIntensity') return prov.ambientAuraIntensity !== undefined
     if (field === 'ambientAuraColor') return prov.ambientAuraColor !== undefined
+    if (field === 'ambientAuraLive') return prov.ambientAuraLive !== undefined
     if (field === 'webviewBubbleStyle') return prov.bubbleStyle !== undefined
     if (field === 'bubbleGradientDepth') return prov.bubbleGradientDepth !== undefined
     if (field === 'webviewCodeBlockStyle') return prov.codeBlockStyle !== undefined
@@ -181,6 +183,7 @@ export const StyleStudioCanvas: React.FC<Props> = ({
       else if (field === 'ambientAuraMode') updateProviderOverrideField('ambientAuraMode', val)
       else if (field === 'ambientAuraIntensity') updateProviderOverrideField('ambientAuraIntensity', val)
       else if (field === 'ambientAuraColor') updateProviderOverrideField('ambientAuraColor', val)
+      else if (field === 'ambientAuraLive') updateProviderOverrideField('ambientAuraLive', val)
       else if (field === 'webviewBubbleStyle') updateProviderOverrideField('bubbleStyle', val)
       else if (field === 'bubbleGradientDepth') updateProviderOverrideField('bubbleGradientDepth', val)
       else if (field === 'webviewCodeBlockStyle') updateProviderOverrideField('codeBlockStyle', val)
@@ -1267,7 +1270,7 @@ export const StyleStudioCanvas: React.FC<Props> = ({
               </div>
             </div>
             <div className="flex items-center gap-2">
-              {!isGlobal && renderSectionReset(['webviewAmbientAura', 'ambientAuraMode', 'ambientAuraIntensity', 'ambientAuraColor', 'aiResponseWidthPx', 'userPromptWidthPx', 'webviewBubbleStyle', 'bubbleGradientDepth', 'webviewCodeBlockStyle', 'codeBlockMargin', 'webviewComposerGlow', 'composerHaloIntensity', 'messageGap'])}
+              {!isGlobal && renderSectionReset(['webviewAmbientAura', 'ambientAuraMode', 'ambientAuraIntensity', 'ambientAuraColor', 'ambientAuraLive', 'aiResponseWidthPx', 'userPromptWidthPx', 'webviewBubbleStyle', 'bubbleGradientDepth', 'webviewCodeBlockStyle', 'codeBlockMargin', 'webviewComposerGlow', 'composerHaloIntensity', 'messageGap'])}
               <span className="text-[10px] font-mono font-bold px-2.5 py-0.5 rounded-full bg-rose-500/20 text-rose-300 border border-rose-500/30 uppercase tracking-wider">
                 Webview Engine
               </span>
@@ -1345,7 +1348,9 @@ export const StyleStudioCanvas: React.FC<Props> = ({
                   </div>
                 </div>
 
-                {/* Aura Intensity Slider */}
+                {/* Aura Intensity Slider — past 100% the glow reaches further, it does not just
+                    get more opaque, so the top of the range is a bigger wash rather than a
+                    white-out. */}
                 <div className="flex flex-col gap-1.5">
                   <div className="flex items-center justify-between">
                     <span className="text-xs font-semibold text-white">Aura Intensity</span>
@@ -1354,11 +1359,41 @@ export const StyleStudioCanvas: React.FC<Props> = ({
                   <input
                     type="range"
                     min={10}
-                    max={100}
+                    max={300}
+                    step={5}
                     value={effAuraIntensity}
                     onChange={(e) => setVal('ambientAuraIntensity', Number(e.target.value))}
                     className="vc-range"
+                    aria-label="Aura intensity"
+                    aria-valuetext={`${effAuraIntensity} percent${effAuraIntensity > 100 ? ', extended reach' : ''}`}
                   />
+                  <div className="flex items-center justify-between text-[10px] font-mono text-(--text2)">
+                    <span>10%</span>
+                    <span className={effAuraIntensity > 100 ? 'text-rose-300' : ''}>
+                      {effAuraIntensity > 100 ? 'extended reach' : '100% = full strength'}
+                    </span>
+                    <span>300%</span>
+                  </div>
+
+                  {/* Living aura: the glow breathes instead of sitting still. */}
+                  <button
+                    type="button"
+                    onClick={() => setVal('ambientAuraLive', !effAuraLive)}
+                    aria-pressed={effAuraLive}
+                    className="mt-1 py-1.5 px-2 rounded-lg border text-[11px] font-semibold transition-all cursor-pointer flex items-center justify-between gap-2"
+                    style={{
+                      background: effAuraLive ? 'rgba(244, 63, 94, 0.18)' : 'rgba(0,0,0,0.3)',
+                      borderColor: effAuraLive ? '#f43f5e' : 'rgba(255,255,255,0.08)',
+                      color: effAuraLive ? '#fda4af' : 'var(--text)'
+                    }}
+                    title="Slowly breathe the aura in and out so the page feels alive rather than painted"
+                  >
+                    <span>Living aura</span>
+                    <span className="font-mono text-[10px] opacity-80">{effAuraLive ? 'breathing' : 'static'}</span>
+                  </button>
+                  <span className="text-[10px] text-(--text2) leading-snug">
+                    Honours your system&apos;s reduced-motion setting.
+                  </span>
                 </div>
 
                 {/* Aura Custom Color Picker */}

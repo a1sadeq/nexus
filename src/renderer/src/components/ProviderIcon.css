@@ -1,0 +1,19 @@
+/* A configured icon is arbitrary markup: whatever width/height it declares, it must fill the box
+   the tab allots it, or a 12 px icon inside a 16 px slot sits off-centre next to the title. */
+.provider-tab-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  line-height: 0;
+}
+
+.provider-tab-icon > svg,
+.provider-tab-icon svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+  /* The markup often hardcodes stroke="currentColor"; keeping colour on the wrapper makes the
+     icon follow the provider colour without editing the user's SVG. */
+  color: inherit;
+}

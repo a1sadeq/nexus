@@ -89,8 +89,11 @@ export interface ProviderOverrides {
   tabAccentMode?: 'provider' | 'custom'
   ambientAura?: boolean
   ambientAuraMode?: 'viewport-frame' | 'chat-center'
+  /** 10–300; above 100 the glow reaches further instead of only getting denser. */
   ambientAuraIntensity?: number
   ambientAuraColor?: string
+  /** Breathing motion on the aura (default on). */
+  ambientAuraLive?: boolean
   bubbleStyle?: 'gradient-pill' | 'glass-slate' | 'minimal-outline'
   bubbleGradientDepth?: number
   codeBlockStyle?: 'oled-contrast' | 'matrix-terminal' | 'soft-slate'

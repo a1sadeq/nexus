@@ -113,7 +113,7 @@ const SETTINGS_SEARCH_INDEX: SearchItem[] = [
   { id: 'tab-discard', title: 'Tab Discard System (RAM Saver)', subtitle: 'Auto-discard idle tabs after inactivity', tab: 'general', keywords: ['memory', 'ram', 'discard', 'inactive', 'sleep', 'performance', 'tabs'] },
   { id: 'max-active-tabs', title: 'Max Active Tabs Limit', subtitle: 'Strict threshold for in-memory tabs', tab: 'general', keywords: ['tabs', 'limit', 'active', 'ram', 'memory', 'max'] },
   { id: 'tab-switcher-limit', title: 'Ctrl+Tab Switcher Count', subtitle: 'Number of recent tabs shown in switcher HUD', tab: 'general', keywords: ['ctrl+tab', 'switcher', 'overlay', 'recent', 'hud'] },
-  { id: 'pinned-chats-pos', title: 'Pinned Chats Position', subtitle: 'Left vertical sidebar vs bottom horizontal dock', tab: 'general', keywords: ['pinned', 'sidebar', 'dock', 'bottom', 'chats', 'position', 'layout'] },
+  { id: 'pinned-chats-pos', title: 'Pinned Chats Position', subtitle: 'Section above Active Sessions, left sidebar, or bottom dock', tab: 'general', keywords: ['pinned', 'sidebar', 'dock', 'bottom', 'section', 'chats', 'position', 'layout'] },
   { id: 'window-titlebar', title: 'Window Titlebar', subtitle: 'Show or hide top titlebar with controls', tab: 'general', keywords: ['titlebar', 'title', 'window', 'frame', 'caption', 'controls', 'drag', 'header'] },
   { id: 'mask-title', title: 'Mask Titlebar Title (Privacy)', subtitle: 'Hide conversation title for screen sharing', tab: 'general', keywords: ['mask', 'privacy', 'title', 'stream', 'share', 'secret', 'hide'] },
 
@@ -139,7 +139,7 @@ const SETTINGS_SEARCH_INDEX: SearchItem[] = [
   { id: 'accent-contrast', title: 'Colors, Accent & Luminance', subtitle: 'Primary accent, glow halo, OLED surface darkness', tab: 'style', category: 'theme', keywords: ['color', 'accent', 'glow', 'darkness', 'contrast', 'luminance', 'vibrancy'] },
   { id: 'geometry-curvature', title: 'Corner Curvature & Typography', subtitle: 'App border radius & typography vibe (Sans/Mono/Tech)', tab: 'style', category: 'layout', keywords: ['geometry', 'radius', 'corner', 'curve', 'font', 'typography', 'sans', 'mono', 'tech'] },
   { id: 'glass-motion', title: 'Glassmorphism & Spring Motion', subtitle: 'Frosted glass backdrop filters & animation speed', tab: 'style', category: 'layout', keywords: ['glass', 'glassmorphism', 'motion', 'spring', 'speed', 'reduced', 'snappy'] },
-  { id: 'ambient-aura', title: 'Ambient Aura Illumination', subtitle: 'Dynamic webview glow, viewport frame & spotlight', tab: 'style', category: 'chat', keywords: ['aura', 'ambient', 'glow', 'spotlight', 'intensity', 'illumination', 'frame'] },
+  { id: 'ambient-aura', title: 'Ambient Aura Illumination', subtitle: 'Living webview glow — 10–300% intensity, viewport frame & spotlight', tab: 'style', category: 'chat', keywords: ['aura', 'ambient', 'glow', 'spotlight', 'intensity', 'illumination', 'frame', 'breathe', 'living', 'pulse', '300', 'extended'] },
   { id: 'chat-bubbles', title: 'AI Chat Bubbles & Width', subtitle: 'AI and user response max widths & gradient pills', tab: 'style', category: 'chat', keywords: ['bubble', 'chat', 'width', 'response', 'gradient', 'spacing', 'gap'] },
   { id: 'code-blocks-composer', title: 'Code Blocks & Composer Halo', subtitle: 'OLED code block styling & neon composer glow', tab: 'style', category: 'chat', keywords: ['code', 'block', 'composer', 'halo', 'neon', 'electric'] },
   { id: 'icon-packs', title: 'Icon Packs & Stroke Weight', subtitle: 'Lucide, Feather, Heroicons, Tabler, Phosphor', tab: 'style', category: 'icons', keywords: ['icon', 'pack', 'glyph', 'lucide', 'feather', 'heroicons', 'tabler', 'phosphor', 'stroke', 'weight'] },
@@ -1955,9 +1955,24 @@ export default function SettingsOverlay({
                   <div className="flex flex-col gap-1.5">
                     <span className="font-bold text-xs text-white">Pinned Chats Position</span>
                     <p className="text-[11px] opacity-75 leading-relaxed" style={{ color: 'var(--text2)' }}>
-                      Position pinned chats as a vertical side rail or a horizontal dock at the bottom.
+                      Position pinned chats as their own section above Active Sessions, as a vertical
+                      side rail, or as a horizontal dock at the bottom.
                     </p>
-                    <div className="grid grid-cols-2 gap-2 pt-2">
+                    <div className="grid grid-cols-3 gap-2 pt-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          sfx.pop()
+                          updateInterfaceSetting('pinnedPosition', 'section')
+                        }}
+                        className={`p-2.5 rounded-xl border text-xs font-semibold flex items-center justify-center gap-2 transition-all cursor-pointer ${
+                          (interfaceSettings?.pinnedPosition || 'section') === 'section'
+                            ? 'bg-indigo-500/20 border-indigo-500/50 text-white shadow-sm'
+                            : 'bg-white/5 border-white/10 text-(--text2) hover:bg-white/10'
+                        }`}
+                      >
+                        <span>≡ In Sidebar</span>
+                      </button>
                       <button
                         type="button"
                         onClick={() => {
@@ -1965,7 +1980,7 @@ export default function SettingsOverlay({
                           updateInterfaceSetting('pinnedPosition', 'sidebar')
                         }}
                         className={`p-2.5 rounded-xl border text-xs font-semibold flex items-center justify-center gap-2 transition-all cursor-pointer ${
-                          (interfaceSettings?.pinnedPosition || 'sidebar') === 'sidebar'
+                          interfaceSettings?.pinnedPosition === 'sidebar'
                             ? 'bg-indigo-500/20 border-indigo-500/50 text-white shadow-sm'
                             : 'bg-white/5 border-white/10 text-(--text2) hover:bg-white/10'
                         }`}
@@ -3363,7 +3378,9 @@ export default function SettingsOverlay({
                             borderRadius: `${pRadius}px`,
                             boxShadow:
                               pAura && pAuraMode !== 'chat-center'
-                                ? `inset 0 0 ${Math.round(pAuraIntensity * 0.8)}px color-mix(in srgb, ${pAuraColor} ${pAuraIntensity}%, transparent), 0 16px 45px rgba(0,0,0,0.7)`
+                                ? // color-mix percentages cap at 100%: past that the preview grows in
+                                  // radius instead, matching what the injected CSS does.
+                                  `inset 0 0 ${Math.round(pAuraIntensity * 0.8)}px color-mix(in srgb, ${pAuraColor} ${Math.min(100, pAuraIntensity)}%, transparent), 0 16px 45px rgba(0,0,0,0.7)`
                                 : '0 16px 45px rgba(0,0,0,0.6)',
                             ...motionStyle
                           }}
@@ -3373,7 +3390,7 @@ export default function SettingsOverlay({
                             <div
                               className="absolute inset-0 pointer-events-none"
                               style={{
-                                background: `radial-gradient(circle at 50% 40%, color-mix(in srgb, ${pAuraColor} ${pAuraIntensity * 0.55}%, transparent) 0%, transparent 70%)`
+                                background: `radial-gradient(circle at 50% 40%, color-mix(in srgb, ${pAuraColor} ${Math.min(100, pAuraIntensity * 0.55)}%, transparent) 0%, transparent 70%)`
                               }}
                             />
                           )}

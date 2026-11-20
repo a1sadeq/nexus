@@ -3,6 +3,7 @@ import { fzfMatch } from '../lib/fzf'
 import type { HistoryItem, ModelKey } from '../lib/tabs'
 import { BrandIcon, IconSearch, IconHistory, IconTrash, IconPencil } from './BrandIcons'
 import { BRAND_IDS, modelColor, type ModelDef } from '../lib/modelVisuals'
+import { normaliseHexColor } from '../lib/tabColors'
 import './HistoryOverlay.css'
 import { useFocusLock } from '../lib/useFocusLock'
 
@@ -344,7 +345,20 @@ export default function HistoryOverlay({ history, models, onOpen, onClose, onDel
                           className="bg-black/30 border border-(--accent) px-2 py-0.5 rounded text-(--text) text-sm w-full outline-none"
                         />
                       ) : (
-                        <span className="truncate">{item.title || 'Untitled Chat'}</span>
+                        <span className="flex items-center gap-1.5 min-w-0">
+                          {normaliseHexColor(item.accentColor) && (
+                            <span
+                              className="w-1.5 h-1.5 rounded-full shrink-0"
+                              style={{
+                                background: normaliseHexColor(item.accentColor),
+                                boxShadow: `0 0 6px ${normaliseHexColor(item.accentColor)}`
+                              }}
+                              title="This project has its own tab colour"
+                              aria-hidden="true"
+                            />
+                          )}
+                          <span className="truncate">{item.title || 'Untitled Chat'}</span>
+                        </span>
                       )}
                     </div>
 

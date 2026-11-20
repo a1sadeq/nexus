@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
+import { normaliseHexColor } from '../lib/tabColors'
 import { createPortal } from 'react-dom'
 import type { Tab } from '../lib/tabs'
-import { BRAND_IDS, DOT_COLOR } from '../lib/modelVisuals'
-import { BrandIcon, IconX } from './BrandIcons'
+import { DOT_COLOR } from '../lib/modelVisuals'
+import { IconX } from './BrandIcons'
+import ProviderIcon from './ProviderIcon'
 import './ChatTabs.css'
 
 interface Props {
@@ -13,6 +15,8 @@ interface Props {
   onClose: (id: string) => void
   onTogglePin: (id: string) => void
   modelColors?: Record<string, string>
+  /** Configured per-provider SVG markup, keyed by provider key. */
+  modelIcons?: Record<string, string>
   alwaysShowTitles?: boolean
 }
 
@@ -24,6 +28,7 @@ export default function ChatTabs({
   onClose,
   onTogglePin,
   modelColors,
+  modelIcons,
   alwaysShowTitles = false
 }: Props) {
   const [hoveredTabId, setHoveredTabId] = useState<string | null>(null)
@@ -35,6 +40,9 @@ export default function ChatTabs({
   const scrollRef = useRef<HTMLDivElement>(null)
 
   const dotColor = (key: string) => modelColors?.[key] || DOT_COLOR[key] || '#888'
+  // Per-tab accent, when the user gave this tab one.
+  const tabColor = (tab: { accentColor?: string; model: string }): string =>
+    normaliseHexColor(tab.accentColor) || dotColor(tab.model)
 
   const updateFades = () => {
     const el = scrollRef.current
@@ -139,18 +147,13 @@ export default function ChatTabs({
               }}
               title={`${t.title || 'New Chat'} — right-click to ${isPinned ? 'unpin' : 'pin'}`}
             >
-              <div
-                className="w-3.5 h-3.5 rounded-full flex items-center justify-center shrink-0"
-                style={
-                  BRAND_IDS[t.model]
-                    ? { boxShadow: `0 0 8px ${dotColor(t.model)}` }
-                    : { background: dotColor(t.model), boxShadow: `0 0 8px ${dotColor(t.model)}` }
-                }
-              >
-                {BRAND_IDS[t.model] && (
-                  <BrandIcon id={t.model} size={10} className="text-(--text) drop-shadow" />
-                )}
-              </div>
+              <ProviderIcon
+                modelKey={t.model}
+                customSvg={modelIcons?.[t.model]}
+                color={tabColor(t)}
+                size={14}
+                active={isActive}
+              />
               
               <div 
                 className={`overflow-hidden transition-all duration-300 ease-in-out flex items-center ${isExpanded ? 'max-w-[360px] opacity-100 ml-1' : 'max-w-0 opacity-0 ml-0'}`}
@@ -227,18 +230,13 @@ export default function ChatTabs({
             >
               <div className="glowing-tab-content px-3 py-1.5 gap-2 cursor-pointer w-full h-full flex items-center justify-between">
                 <div className="flex items-center gap-2 min-w-0">
-                  <div
-                    className="w-3.5 h-3.5 rounded-full flex items-center justify-center shrink-0"
-                    style={
-                      BRAND_IDS[t.model]
-                        ? { boxShadow: `0 0 8px ${dotColor(t.model)}` }
-                        : { background: dotColor(t.model), boxShadow: `0 0 8px ${dotColor(t.model)}` }
-                    }
-                  >
-                    {BRAND_IDS[t.model] && (
-                      <BrandIcon id={t.model} size={10} className="text-(--text) drop-shadow" />
-                    )}
-                  </div>
+                  <ProviderIcon
+                    modelKey={t.model}
+                    customSvg={modelIcons?.[t.model]}
+                    color={tabColor(t)}
+                    size={14}
+                    active={activeId === t.id}
+                  />
                   <span className="text-sm font-medium text-(--text) whitespace-nowrap overflow-hidden text-ellipsis max-w-full">
                     {t.title || 'New Chat'}
                   </span>
@@ -263,4 +261,3 @@ export default function ChatTabs({
     </>
   )
 }
-

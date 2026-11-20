@@ -39,8 +39,14 @@ export interface InterfaceSettings {
   surfaceBgColor?: string
   webviewAmbientAura: boolean
   ambientAuraMode: AmbientAuraMode
+  /**
+   * Aura strength. 10–100 is the original range; above 100 the glow keeps reaching further
+   * instead of only getting more opaque, so 220 is a genuinely wider wash, not a white-out.
+   */
   ambientAuraIntensity: number
   ambientAuraColor?: string
+  /** Slow breathing motion on the aura. Off = a static glow. */
+  ambientAuraLive?: boolean
   webviewBubbleStyle: WebviewBubbleStyle
   bubbleGradientDepth: number
   webviewCodeBlockStyle: WebviewCodeBlockStyle
@@ -55,7 +61,13 @@ export interface InterfaceSettings {
   globalCustomCss?: string
   globalCustomJs?: string
   tabSwitcherLimit?: number
-  pinnedPosition?: 'sidebar' | 'bottom'
+  /**
+   * Where pinned tabs are drawn.
+   * - `section`: their own section above Active Sessions (default)
+   * - `sidebar`: the vertical rail on the left
+   * - `bottom`: the horizontal dock under the window
+   */
+  pinnedPosition?: 'section' | 'sidebar' | 'bottom'
   showTitlebar?: boolean
   maskTitlebarTitle?: boolean
   tabOrientation?: 'vertical' | 'horizontal'
@@ -87,6 +99,7 @@ export const DEFAULT_INTERFACE_SETTINGS: InterfaceSettings = {
   ambientAuraMode: 'viewport-frame',
   ambientAuraIntensity: 45,
   ambientAuraColor: '',
+  ambientAuraLive: true,
   webviewBubbleStyle: 'glass-slate',
   bubbleGradientDepth: 30,
   webviewCodeBlockStyle: 'oled-contrast',
@@ -98,7 +111,7 @@ export const DEFAULT_INTERFACE_SETTINGS: InterfaceSettings = {
   userPromptWidthPx: 720,
   globalCustomCss: '',
   globalCustomJs: '',
-  pinnedPosition: 'bottom',
+  pinnedPosition: 'section',
   showTitlebar: true,
   maskTitlebarTitle: false,
   tabOrientation: 'vertical'
@@ -561,7 +574,7 @@ export function applyInterfaceCssVariables(settings: InterfaceSettings, activeTh
   document.body.dataset.glassmorphism = settings.glassmorphism
   document.body.dataset.motionSpeed = settings.motionSpeed
   document.body.dataset.fontVibe = settings.fontVibe || 'sans'
-  document.body.dataset.pinnedPosition = settings.pinnedPosition || 'sidebar'
+  document.body.dataset.pinnedPosition = settings.pinnedPosition || 'section'
 
   // 7. Global Custom CSS Injector
   let globalStyleEl = document.getElementById('nexus-global-custom-css') as HTMLStyleElement | null
@@ -576,4 +589,3 @@ export function applyInterfaceCssVariables(settings: InterfaceSettings, activeTh
     globalStyleEl.remove()
   }
 }
-

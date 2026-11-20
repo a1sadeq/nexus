@@ -1,8 +1,10 @@
-import { useState, useRef, useEffect, useMemo } from 'react'
+import { useState, useRef, useEffect, useMemo, type ReactElement } from 'react'
 import type { Tab } from '../lib/tabs'
-import { BRAND_IDS, DOT_COLOR, getEffectiveProviderColor, getProviderGradient } from '../lib/modelVisuals'
-import { orderDiscardedTabs } from '../lib/tabs'
-import { BrandIcon, IconX, IconPin } from './BrandIcons'
+import { DOT_COLOR, getEffectiveProviderColor, getProviderGradient } from '../lib/modelVisuals'
+import { IconX, IconPin } from './BrandIcons'
+import ProviderIcon from './ProviderIcon'
+import { normaliseHexColor } from '../lib/tabColors'
+import { partitionTabSections, type TabSections } from '../lib/tabSections'
 import { AiStatusBadge } from './AiStatusBadge'
 import { formatCollapsedTitle, type TabAiStatus } from '../lib/tabStatus'
 import './VerticalTabs.css'
@@ -20,6 +22,14 @@ interface Props {
   onTogglePin: (id: string) => void
   onReorder?: (sourceId: string, targetId: string) => void
   modelColors?: Record<string, string>
+  /** Configured per-provider SVG markup, keyed by provider key. */
+  modelIcons?: Record<string, string>
+  /**
+   * Render pinned tabs as their own section above Active Sessions instead of sorting them to
+   * the top of that list. The caller decides, because the same list is also drawn at the bottom
+   * of the window and in the pinned sidebar.
+   */
+  pinnedSection?: boolean
 }
 
 export default function VerticalTabs({
@@ -34,8 +44,10 @@ export default function VerticalTabs({
   onClose,
   onTogglePin,
   onReorder,
-  modelColors
-}: Props) {
+  modelColors,
+  modelIcons,
+  pinnedSection = false
+}: Props): ReactElement {
   const [hoveredTabId, setHoveredTabId] = useState<string | null>(null)
   const [draggingTabId, setDraggingTabId] = useState<string | null>(null)
   const [dragOverTabId, setDragOverTabId] = useState<string | null>(null)
@@ -43,44 +55,25 @@ export default function VerticalTabs({
   const hoverTimerRef = useRef<NodeJS.Timeout | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
 
-  const dotColor = (key: string) =>
+  const dotColor = (key: string): string =>
     modelColors?.[key] || getEffectiveProviderColor(key, DOT_COLOR[key] || '#888')
 
-  // Partition into Active (Resident / In-Memory / Working) vs Sleeping / Discarded (Hibernated)
-  const { activeTabs, discardedTabs } = useMemo(() => {
-    const activeList: Tab[] = []
-    const discardedList: Tab[] = []
-
-    for (const tab of tabs) {
-      const isCurrentlyActive = tab.id === activeId
-      const isWorkingOrWaiting =
-        tabStatuses[tab.id] === 'working' || tabStatuses[tab.id] === 'waiting-input'
-      const isResident = residentTabIds
-        ? residentTabIds.includes(tab.id)
-        : isCurrentlyActive || pinnedIds.includes(tab.id)
-
-      if (isCurrentlyActive || isWorkingOrWaiting || isResident) {
-        activeList.push(tab)
-      } else {
-        discardedList.push(tab)
-      }
-    }
-
-    const sortGroup = (list: Tab[]) => {
-      const pinned = list.filter((t) => pinnedIds.includes(t.id))
-      const unpinned = list.filter((t) => !pinnedIds.includes(t.id))
-      return [...pinned, ...unpinned]
-    }
-
-    return {
-      activeTabs: sortGroup(activeList),
-      discardedTabs: discardedTabIds && discardedTabIds.length > 0
-        ? orderDiscardedTabs(discardedList, discardedTabIds)
-        : sortGroup(discardedList)
-    }
-  }, [tabs, activeId, pinnedIds, tabStatuses, residentTabIds, discardedTabIds])
-
-  const orderedTabs = useMemo(() => [...activeTabs, ...discardedTabs], [activeTabs, discardedTabs])
+  // The rule lives in lib/tabSections so the keyboard order and the rendered order cannot drift
+  // apart, and so it can be tested without a DOM.
+  const { pinned: pinnedTabs, active: activeTabs, discarded: discardedTabs, order: orderedTabs } =
+    useMemo(
+      (): TabSections =>
+        partitionTabSections({
+          tabs,
+          activeId,
+          pinnedIds,
+          tabStatuses,
+          residentTabIds,
+          discardedTabIds,
+          pinnedSection
+        }),
+      [tabs, activeId, pinnedIds, tabStatuses, residentTabIds, discardedTabIds, pinnedSection]
+    )
 
   // Auto-scroll active tab into view
   useEffect(() => {
@@ -100,12 +93,14 @@ export default function VerticalTabs({
     )
   }
 
-  const renderTab = (t: Tab, isSleeping: boolean) => {
+  const renderTab = (t: Tab, isSleeping: boolean): ReactElement => {
     const isActive = activeId === t.id
     const isPinned = pinnedIds.includes(t.id)
     const status = tabStatuses[t.id] || 'idle'
-    const color = dotColor(t.model)
-    const gradient = getProviderGradient(t.model, color)
+    // A tab that carries its own accent paints it — that is the whole point of the colour.
+    const tabAccent = normaliseHexColor(t.accentColor)
+    const color = tabAccent || dotColor(t.model)
+    const gradient = tabAccent ? { start: tabAccent, end: tabAccent } : getProviderGradient(t.model, color)
     const isHovered = hoveredTabId === t.id
     const isDragging = draggingTabId === t.id
     const isDragOver = dragOverTabId === t.id
@@ -184,18 +179,13 @@ export default function VerticalTabs({
       >
         {/* Left: Brand Icon & Tab Title */}
         <div className="flex items-center gap-2 min-w-0 flex-1">
-          <div
-            className="w-4 h-4 rounded-full flex items-center justify-center shrink-0"
-            style={
-              BRAND_IDS[t.model]
-                ? { boxShadow: `0 0 6px ${color}` }
-                : { background: color, boxShadow: `0 0 6px ${color}` }
-            }
-          >
-            {BRAND_IDS[t.model] && (
-              <BrandIcon id={t.model} size={11} className="text-(--text) drop-shadow-xs" />
-            )}
-          </div>
+          <ProviderIcon
+            modelKey={t.model}
+            customSvg={modelIcons?.[t.model]}
+            color={color}
+            size={16}
+            active={isActive}
+          />
 
           {/* Title representation: 13px font-semibold for active tabs with provider colors */}
           {sidebarCollapsed ? (
@@ -321,6 +311,26 @@ export default function VerticalTabs({
         }
       }}
     >
+      {/* 0. PINNED SECTION — above Active Sessions, so the tabs you chose to keep sit where
+          the eye lands first instead of below the fold. */}
+      {pinnedSection && pinnedTabs.length > 0 && (
+        <div className="flex flex-col gap-1" data-pinned-section="true">
+          <div className="flex items-center justify-between px-2 pt-1 pb-1 text-[10px] font-mono font-bold tracking-wider uppercase text-amber-300/90 select-none">
+            <div className="flex items-center gap-1.5">
+              <IconPin size={10} className="text-amber-400" />
+              {!sidebarCollapsed && <span>Pinned</span>}
+            </div>
+            {!sidebarCollapsed && (
+              <span className="text-[9px] font-mono bg-amber-500/15 px-1.5 py-0.5 rounded text-amber-200/90">
+                {pinnedTabs.length}
+              </span>
+            )}
+          </div>
+          {pinnedTabs.map((t) => renderTab(t, false))}
+          <div className="border-t border-(--border)/60 my-1" />
+        </div>
+      )}
+
       {/* 1. ACTIVE SESSIONS SECTION */}
       {activeTabs.length > 0 && (
         <div className="flex flex-col gap-1">

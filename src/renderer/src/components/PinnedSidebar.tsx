@@ -1,7 +1,8 @@
 import React from 'react'
 import { Tab } from '../lib/tabs'
-import { BRAND_IDS, modelLabel } from '../lib/modelVisuals'
-import { BrandIcon, IconPin, IconPlus } from './BrandIcons'
+import { modelLabel } from '../lib/modelVisuals'
+import { IconPin, IconPlus } from './BrandIcons'
+import ProviderIcon from './ProviderIcon'
 
 interface Props {
   tabs: Tab[]
@@ -17,6 +18,7 @@ interface Props {
   switchToTab: (id: string, url: string) => void
   togglePin: (id: string) => void
   colorFor: (key: string) => string
+  modelIcons?: Record<string, string>
   handleOpenNewTabModal: () => void
 }
 
@@ -34,7 +36,8 @@ export default function PinnedSidebar({
   switchToTab,
   togglePin,
   colorFor,
-  handleOpenNewTabModal
+  handleOpenNewTabModal,
+  modelIcons
 }: Props) {
   const pinnedTabs = tabs.filter((t) => pinnedIds.includes(t.id))
 
@@ -98,16 +101,13 @@ export default function PinnedSidebar({
                   boxShadow: `0 0 10px ${colorFor(t.model)}`
                 }}
               >
-                {BRAND_IDS[t.model] && (
-                  <BrandIcon
-                    id={t.model}
-                    size={20}
-                    style={{
-                      color: colorFor(t.model),
-                      filter: `drop-shadow(0 0 4px ${colorFor(t.model)})`
-                    }}
-                  />
-                )}
+                <ProviderIcon
+                  modelKey={t.model}
+                  customSvg={modelIcons?.[t.model]}
+                  color={colorFor(t.model)}
+                  size={22}
+                  active={activeId === t.id}
+                />
               </div>
             </button>
           ) : (
@@ -140,16 +140,13 @@ export default function PinnedSidebar({
                     boxShadow: `0 0 10px ${colorFor(t.model)}`
                   }}
                 >
-                  {BRAND_IDS[t.model] && (
-                    <BrandIcon
-                      id={t.model}
-                      size={22}
-                      style={{
-                        color: colorFor(t.model),
-                        filter: `drop-shadow(0 0 4px ${colorFor(t.model)})`
-                      }}
-                    />
-                  )}
+                  <ProviderIcon
+                    modelKey={t.model}
+                    customSvg={modelIcons?.[t.model]}
+                    color={colorFor(t.model)}
+                    size={24}
+                    active={activeId === t.id}
+                  />
                 </div>
                 <span className="text-[10px] leading-none text-(--text2) truncate max-w-[50px]">
                   {modelLabel(t.model)}

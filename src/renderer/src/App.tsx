@@ -1,4 +1,3 @@
-
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import {
   serializeState,
@@ -51,13 +50,19 @@ import type { ProviderConfigMap } from '../../shared/providerConfig'
 import UrlBarModal from './components/UrlBarModal'
 import { JarvisBootOverlay } from './components/JarvisBootOverlay'
 import { ZenGuideModal } from './components/ZenGuideModal'
-import { HudStatusHeader } from './components/HudStatusHeader'
 import { WindowTitleBar } from './components/WindowTitleBar'
+import TabColorModal from './components/TabColorModal'
+import TabColorButton from './components/TabColorButton'
+import { applyTabColors, sanitiseTabColors, tabAccentColor, type TabColors } from './lib/tabColors'
 import { FolderUploadModal } from './components/FolderUploadModal'
 import { DiagnosticsModal } from './components/DiagnosticsModal'
 import type { FolderScanResult } from '../../shared/folderUpload'
 import { shouldCaptureAutomaticSnapshot } from './lib/snapshotThrottle'
 import './App.css'
+
+/** Bumped whenever this file's UI changes, so a stale bundle is obvious at a glance
+ *  (`document.querySelector('[data-nexus-build]')` in devtools). */
+const NEXUS_UI_BUILD = '4'
 
 import {
   DEFAULT_MODELS,
@@ -117,7 +122,10 @@ function App() {
       const disk = window.nexusState?.getTabsSync?.()
       const parsed = typeof disk === 'string' ? JSON.parse(disk) : disk
       if (parsed && typeof parsed === 'object' && Array.isArray((parsed as any).tabs) && (parsed as any).tabs.length > 0) {
-        const loadedTabs = (parsed as any).tabs as Tab[]
+        // Colours come off disk and end up inside injected CSS — re-validate them here too.
+        const loadedTabs = ((parsed as any).tabs as Tab[]).map((t) =>
+          applyTabColors(t, sanitiseTabColors(t))
+        )
         const loadedActiveId = (parsed as any).activeId || loadedTabs[0]?.id || null
         const loadedMru = Array.isArray((parsed as any).mruTabIds) ? ((parsed as any).mruTabIds as string[]) : undefined
         return { tabs: loadedTabs, activeId: loadedActiveId, mruTabIds: loadedMru, residentTabIds: (parsed as any).residentTabIds, discardedTabIds: (parsed as any).discardedTabIds }
@@ -196,7 +204,9 @@ function App() {
       ) {
         // Disk wins: hydrate live tabs
         hydrated = true
-        const loadedTabs = (diskState as any).tabs as Tab[]
+        const loadedTabs = ((diskState as any).tabs as Tab[]).map((t) =>
+          applyTabColors(t, sanitiseTabColors(t))
+        )
         const loadedActiveId = (diskState as any).activeId || loadedTabs[0]?.id || null
         const loadedResidentTabIds = Array.isArray((diskState as any)?.residentTabIds) ? ((diskState as any).residentTabIds as string[]) : undefined
         const loadedDiscardedTabIds = Array.isArray((diskState as any)?.discardedTabIds) ? ((diskState as any).discardedTabIds as string[]) : undefined
@@ -298,6 +308,33 @@ function App() {
 
   const [showHistory, setShowHistory] = useState(false)
   const [showTabOverview, setShowTabOverview] = useState(false)
+  // Per-tab accent & aura picker. One dialog, two entry points (title bar + quick actions).
+  const [showTabColors, setShowTabColors] = useState(false)
+  const activeTabColors = useMemo(
+    () => sanitiseTabColors({ accentColor: activeTab?.accentColor, auraColor: activeTab?.auraColor }),
+    [activeTab?.accentColor, activeTab?.auraColor]
+  )
+  // The tab record is the durable copy — it is what serializeState writes to disk — so the picker
+  // only has to update state. Main gets a copy purely to rebuild that view's aura.
+  const applyColorsToActiveTab = useCallback((colors: TabColors) => {
+    const id = activeIdRef.current
+    if (!id) return
+    setTabs((prev) => prev.map((t) => (t.id === id ? applyTabColors(t, colors) : t)))
+  }, [])
+  // Pushed only when this tab's colours actually change. Re-sending on every activation would
+  // rebuild that view's stylesheet on every tab switch, which is needless churn on a surface that
+  // already has to be repainted when it is brought forward.
+  const sentTabColorsRef = useRef<Record<string, string>>({})
+  useEffect(() => {
+    if (!activeId) return
+    const key = `${activeTabColors.accentColor ?? ''}|${activeTabColors.auraColor ?? ''}`
+    if (sentTabColorsRef.current[activeId] === key) return
+    sentTabColorsRef.current[activeId] = key
+    window.electron?.ipcRenderer.send('set_tab_colors', activeId, {
+      accentColor: activeTabColors.accentColor,
+      auraColor: activeTabColors.auraColor
+    })
+  }, [activeId, activeTabColors.accentColor, activeTabColors.auraColor])
 
   const [showNewTab, setShowNewTab] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
@@ -461,6 +498,7 @@ function App() {
       ambientAuraMode: interfaceSettings.ambientAuraMode,
       ambientAuraIntensity: interfaceSettings.ambientAuraIntensity,
       ambientAuraColor: interfaceSettings.ambientAuraColor || interfaceSettings.accentColor,
+      ambientAuraLive: interfaceSettings.ambientAuraLive !== false,
       bubbleStyle: interfaceSettings.webviewBubbleStyle,
       bubbleGradientDepth: interfaceSettings.bubbleGradientDepth,
       codeBlockStyle: interfaceSettings.webviewCodeBlockStyle,
@@ -509,6 +547,14 @@ function App() {
   const modelColors = useMemo(() => {
     const map: Record<string, string> = {}
     for (const m of models) map[m.key] = m.color || modelColor(m.key)
+    return map
+  }, [models])
+
+  // The per-provider "Custom SVG Icon Markup" from Settings → AI Providers, handed to the tab
+  // surfaces so a configured icon actually appears on them and not just in settings.
+  const modelIcons = useMemo(() => {
+    const map: Record<string, string> = {}
+    for (const m of models) if (m.icon) map[m.key] = m.icon
     return map
   }, [models])
   const colorFor = (key: string) => modelColors[key] || modelColor(key)
@@ -843,6 +889,9 @@ Acknowledge these skills with a concise confirmation in this exact format:
               url: updatedTab.url,
               model: updatedTab.model,
               thumbnail: existingItem?.thumbnail,
+              // The colour is how this project is recognised in a list of forty conversations.
+              ...(updatedTab.accentColor ? { accentColor: updatedTab.accentColor } : {}),
+              ...(updatedTab.auraColor ? { auraColor: updatedTab.auraColor } : {}),
               timestamp: Date.now(),
               updatedAt: new Date().toISOString()
             }
@@ -899,6 +948,8 @@ Acknowledge these skills with a concise confirmation in this exact format:
               url: updatedTab.url,
               model: updatedTab.model,
               thumbnail: existingItem?.thumbnail,
+              ...(updatedTab.accentColor ? { accentColor: updatedTab.accentColor } : {}),
+              ...(updatedTab.auraColor ? { auraColor: updatedTab.auraColor } : {}),
               timestamp: Date.now(),
               updatedAt: new Date().toISOString()
             }
@@ -1207,6 +1258,7 @@ Acknowledge these skills with a concise confirmation in this exact format:
     showCategoryManagerModal ||
     showBootSequence ||
     showDiagnosticsModal ||
+    showTabColors ||
     Boolean(folderUploadData)
   )
   const anyOverlayOpenRef = useRef(anyOverlayOpen)
@@ -1223,6 +1275,32 @@ Acknowledge these skills with a concise confirmation in this exact format:
       window.electron.ipcRenderer.send('resize_view', bounds)
     }
   }, [])
+
+  // The colour picker is an overlay like any other, and the native webview is a separate surface
+  // painted *above* the DOM. Opening the dialog without hiding that surface puts the dialog behind
+  // the page — which looks exactly like "the button did nothing".
+  const openTabColors = useCallback(() => {
+    if (!activeIdRef.current) return
+    setShowHistory(false)
+    setShowTabOverview(false)
+    setShowSettings(false)
+    setShowNewTab(false)
+    setShowExport(false)
+    setShowUrlBar(false)
+    setShowGuide(false)
+    setShowSkillsPalette(false)
+    setShowBaseSkillsModal(false)
+    setShowTabColors(true)
+    // @ts-ignore -- the preload bridge is untyped here, as everywhere else in this file
+    window.electron?.ipcRenderer.send('resize_view', { x: 0, y: 0, width: 0, height: 0 })
+  }, [])
+
+  const closeTabColors = useCallback(() => {
+    setShowTabColors(false)
+    // anyOverlayOpenRef still reads true during this render, so restoring has to wait for the next
+    // frame, otherwise restoreViewBounds() sees an overlay that is on its way out and does nothing.
+    requestAnimationFrame(() => restoreViewBounds())
+  }, [restoreViewBounds])
 
   // Recalculate webview bounds whenever chrome layout toggles (titlebar, sidebar, focus mode, orientation)
   useEffect(() => {
@@ -1433,6 +1511,7 @@ Acknowledge these skills with a concise confirmation in this exact format:
           if (showSkillEditorModal) { setShowSkillEditorModal(false); closedAny = true }
           if (showCategoryManagerModal) { setShowCategoryManagerModal(false); closedAny = true }
           if (showDiagnosticsModal) { setShowDiagnosticsModal(false); closedAny = true }
+          if (showTabColors) { setShowTabColors(false); closedAny = true }
           if (folderUploadData) { setFolderUploadData(null); closedAny = true }
           if (closedAny) {
             restoreViewBounds()
@@ -1576,7 +1655,7 @@ Acknowledge these skills with a concise confirmation in this exact format:
           break
         }
         case 'navigate_tab': {
-          const overlaysOpen = showHistory || showTabOverview || showSettings || showNewTab || showExport || showUrlBar || showGuide || showSkillsPalette || showBaseSkillsModal || showSkillParamsModal || showSkillEditorModal || showDiagnosticsModal
+          const overlaysOpen = showHistory || showTabOverview || showSettings || showNewTab || showExport || showUrlBar || showGuide || showSkillsPalette || showBaseSkillsModal || showSkillParamsModal || showSkillEditorModal || showDiagnosticsModal || showTabColors
           if (!overlaysOpen) {
             const visualActive = getVisibleActiveTabs(tabs, residentTabIds, pinnedIds, tabStatuses, activeId)
             if (visualActive.length > 1) {
@@ -1752,10 +1831,11 @@ Acknowledge these skills with a concise confirmation in this exact format:
       if (rafId !== null) cancelAnimationFrame(rafId)
       observer.disconnect()
     }
-  }, [showBootSequence, showHistory, showTabOverview, showSettings, showNewTab, showExport, showUrlBar, showGuide, showSkillsPalette, showBaseSkillsModal, showSkillParamsModal, showSkillEditorModal, showDiagnosticsModal])
+  }, [showBootSequence, showHistory, showTabOverview, showSettings, showNewTab, showExport, showUrlBar, showGuide, showSkillsPalette, showBaseSkillsModal, showSkillParamsModal, showSkillEditorModal, showDiagnosticsModal, showTabColors])
 
   return (
     <div
+      data-nexus-build={NEXUS_UI_BUILD}
       className={`flex flex-col w-screen h-screen overflow-hidden bg-(--bg) ${focusMode ? 'focus-mode' : ''}`}
     >
       {!focusMode && (
@@ -1769,11 +1849,18 @@ Acknowledge these skills with a concise confirmation in this exact format:
           onSelectModel={handleDeployModel}
           autoHideMode={interfaceSettings.showTitlebar === false}
           onOpenDiagnostics={() => setShowDiagnosticsModal(true)}
+          onOpenTabColors={activeTab ? openTabColors : undefined}
+          tabAccent={activeTab ? tabAccentColor(activeTab, modelColor(resolvedActiveModelKey)) : undefined}
+          hasCustomTabColors={Boolean(activeTabColors.accentColor || activeTabColors.auraColor)}
         />
       )}
       <div className="flex flex-1 min-h-0 w-full overflow-hidden">
         {/* 1. LEFT SIDEBAR: Modern Workspace Navigation Sidebar */}
-      {!focusMode && (interfaceSettings.tabOrientation !== 'horizontal' || interfaceSettings.pinnedPosition !== 'bottom') && (
+      {!focusMode &&
+        // Horizontal layout keeps its tab strip in the top bar, so the left sidebar only
+        // belongs there when the pinned rail was explicitly asked for.
+        (interfaceSettings.tabOrientation !== 'horizontal' ||
+          interfaceSettings.pinnedPosition === 'sidebar') && (
         <div
           className={`${sidebarCollapsed ? 'w-44' : 'w-64'} bg-(--surface) border-r border-(--border) flex flex-col shadow-lg z-20 shrink-0 transition-[width] duration-200 ease-in-out overflow-hidden select-none`}
         >
@@ -1838,6 +1925,8 @@ Acknowledge these skills with a concise confirmation in this exact format:
                 setTabs((prev) => reorderTabs(prev, sourceId, targetId))
               }}
               modelColors={modelColors}
+              modelIcons={modelIcons}
+              pinnedSection={interfaceSettings.pinnedPosition === 'section'}
             />
           ) : (
             <div
@@ -1975,11 +2064,6 @@ Acknowledge these skills with a concise confirmation in this exact format:
           {/* Sidebar Footer: HUD Status, Agent Handoff, Tools */}
           {interfaceSettings.tabOrientation !== 'horizontal' && (
             <div className="p-2 border-t border-(--border)/80 flex flex-col gap-2 shrink-0 bg-(--surface)">
-              {/* HUD Status Header */}
-              <div className={`flex items-center ${sidebarCollapsed ? 'justify-center' : 'justify-between px-1'}`}>
-                <HudStatusHeader onTriggerBoot={() => setShowBootSequence(true)} />
-              </div>
-
               {/* Agent Handoff Export Button */}
               <button
                 className={`history-btn w-full px-2.5 py-1.5 rounded-lg transition-all flex items-center gap-2 border shadow-xs cursor-pointer ${
@@ -2016,6 +2100,94 @@ Acknowledge these skills with a concise confirmation in this exact format:
                   </>
                 )}
               </button>
+
+              {/* Quick Actions: the four things people reach for but only discover by
+                  remembering a shortcut. Same handlers as Ctrl+O, Ctrl+Shift+O, Ctrl+S and
+                  Ctrl+Shift+S — the keys remain, the buttons just make them findable. */}
+              <div className="grid grid-cols-2 gap-1.5" data-quick-actions="true">
+                <button
+                  type="button"
+                  onClick={() => {
+                    // @ts-ignore -- the preload bridge is untyped here, as everywhere else in this file
+                    window.electron?.ipcRenderer.send('trigger_active_upload')
+                  }}
+                  title={`Attach files (${getShortcutKeys('upload-file').join('+')})`}
+                  className={`px-2 py-1.5 rounded-lg transition-colors flex items-center justify-center gap-1.5 cursor-pointer bg-(--surface2) hover:bg-(--border) text-(--text) border border-white/10 hover:border-(--accent)/40 ${sidebarCollapsed ? 'col-span-2' : ''}`}
+                >
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
+                    <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+                  </svg>
+                  <span className="text-[11px] font-semibold truncate">Files</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    // @ts-ignore -- the preload bridge is untyped here, as everywhere else in this file
+                    window.electron?.ipcRenderer.send('trigger_active_upload_folder')
+                  }}
+                  title={`Attach an entire folder as a codebase (${getShortcutKeys('upload-folder').join('+')})`}
+                  className={`px-2 py-1.5 rounded-lg transition-colors flex items-center justify-center gap-1.5 cursor-pointer bg-(--surface2) hover:bg-(--border) text-(--text) border border-white/10 hover:border-(--accent)/40 ${sidebarCollapsed ? 'col-span-2' : ''}`}
+                >
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
+                    <path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z" />
+                  </svg>
+                  <span className="text-[11px] font-semibold truncate">Folder</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    refreshSkills()
+                    setShowSkillsPalette(true)
+                    setShowHistory(false)
+                    setShowSettings(false)
+                    setShowNewTab(false)
+                    setShowExport(false)
+                    // @ts-ignore -- the preload bridge is untyped here, as everywhere else in this file
+                    window.electron?.ipcRenderer.send('resize_view', { x: 0, y: 0, width: 0, height: 0 })
+                  }}
+                  title={`Skills & Tools palette (${getShortcutKeys('skills-palette').join('+')})`}
+                  className={`px-2 py-1.5 rounded-lg transition-colors flex items-center justify-center gap-1.5 cursor-pointer bg-(--surface2) hover:bg-(--border) text-(--text) border border-white/10 hover:border-amber-500/40 ${sidebarCollapsed ? 'col-span-2' : ''}`}
+                >
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
+                    <path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3L12 3Z" />
+                  </svg>
+                  <span className="text-[11px] font-semibold truncate">Skills</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    refreshSkills()
+                    setShowBaseSkillsModal(true)
+                    setShowHistory(false)
+                    setShowSettings(false)
+                    setShowNewTab(false)
+                    setShowExport(false)
+                    // @ts-ignore -- the preload bridge is untyped here, as everywhere else in this file
+                    window.electron?.ipcRenderer.send('resize_view', { x: 0, y: 0, width: 0, height: 0 })
+                  }}
+                  title={`Base skills framework rules (${getShortcutKeys('skills-base-modal').join('+')})`}
+                  className={`px-2 py-1.5 rounded-lg transition-colors flex items-center justify-center gap-1.5 cursor-pointer bg-(--surface2) hover:bg-(--border) text-(--text) border border-white/10 hover:border-amber-500/40 ${sidebarCollapsed ? 'col-span-2' : ''}`}
+                >
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
+                    <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+                    <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2Z" />
+                    <path d="M9 7h7" />
+                  </svg>
+                  <span className="text-[11px] font-semibold truncate">Base</span>
+                </button>
+
+                {/* Same picker as the title bar button: the colour belongs to the tab, and this
+                    is where the other per-tab tools (upload, skills) live. */}
+                <TabColorButton
+                  accent={activeTabColors.accentColor ?? modelColor(resolvedActiveModelKey)}
+                  hasCustomColors={Boolean(activeTabColors.accentColor || activeTabColors.auraColor)}
+                  disabled={!activeTab}
+                  onClick={openTabColors}
+                />
+              </div>
 
               {/* Navigation Tools Row */}
               <div className={`flex items-center gap-1.5 ${sidebarCollapsed ? 'justify-center' : 'justify-between'}`}>
@@ -2178,6 +2350,7 @@ Acknowledge these skills with a concise confirmation in this exact format:
                 tabs={tabs.filter((t) => !pinnedIds.includes(t.id))}
                 activeId={activeId}
                 modelColors={modelColors}
+                modelIcons={modelIcons}
                 onSelect={(id: string) => {
                   const t = tabs.find((x) => x.id === id)
                   if (t && t.url) switchToTab(t.id, t.url)
@@ -2189,9 +2362,6 @@ Acknowledge these skills with a concise confirmation in this exact format:
 
             {/* Right: Actions */}
             <div className="flex gap-2 shrink-0 justify-end items-center">
-              {/* J.A.R.V.I.S. HUD Status & Audio Control */}
-              <HudStatusHeader onTriggerBoot={() => setShowBootSequence(true)} />
-
               {/* Agent Handoff Export Button */}
               <button
                 className={`history-btn px-3 py-1.5 rounded-lg transition-all flex items-center gap-1.5 border shadow-sm cursor-pointer ${
@@ -2224,6 +2394,15 @@ Acknowledge these skills with a concise confirmation in this exact format:
                   Export
                 </span>
               </button>
+
+              {/* Accent & aura for the active tab — beside Agent Handoff, matching the sidebar. */}
+              <TabColorButton
+                variant="compact"
+                accent={activeTabColors.accentColor ?? modelColor(resolvedActiveModelKey)}
+                hasCustomColors={Boolean(activeTabColors.accentColor || activeTabColors.auraColor)}
+                disabled={!activeTab}
+                onClick={openTabColors}
+              />
 
               <button
                 className="bg-(--surface2) hover:bg-(--border) text-(--text) px-3 py-1.5 rounded transition-colors flex items-center gap-1.5"
@@ -2383,6 +2562,7 @@ Acknowledge these skills with a concise confirmation in this exact format:
                 activeId={activeId}
                 pinnedIds={pinnedIds}
                 modelColors={modelColors}
+                modelIcons={modelIcons}
                 onSelect={(id: string) => {
                   const t = tabs.find((x) => x.id === id)
                   if (t && t.url) switchToTab(t.id, t.url)
@@ -2610,6 +2790,14 @@ Acknowledge these skills with a concise confirmation in this exact format:
           restoreViewBounds()
         }}
       />
+      <TabColorModal
+        open={showTabColors && Boolean(activeTab)}
+        tabTitle={activeTab?.title}
+        colors={activeTabColors}
+        fallbackAccent={modelColor(resolvedActiveModelKey)}
+        onChange={applyColorsToActiveTab}
+        onClose={closeTabColors}
+      />
       <DiagnosticsModal
         isOpen={showDiagnosticsModal}
         onClose={() => {
@@ -2698,4 +2886,3 @@ Acknowledge these skills with a concise confirmation in this exact format:
 }
 
 export default App
-

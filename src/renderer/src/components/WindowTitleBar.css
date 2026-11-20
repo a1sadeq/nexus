@@ -60,3 +60,33 @@
     max-width: 160px;
   }
 }
+
+
+/* Per-tab accent & aura button, sitting beside the conversation pill. */
+.nexus-titlebar-color-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border-radius: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text2, #94a3b8);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: color 140ms ease, border-color 140ms ease, background 140ms ease, box-shadow 140ms ease;
+  -webkit-app-region: no-drag !important;
+}
+
+.nexus-titlebar-color-btn:hover {
+  color: var(--text, #e9edf4);
+  border-color: rgba(255, 255, 255, 0.28);
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.nexus-titlebar-color-btn.is-set {
+  border-width: 1px;
+  border-style: solid;
+}

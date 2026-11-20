@@ -1,3 +1,5 @@
+import { applyTabColors, sanitiseTabColors } from './tabColors'
+
 export type ModelKey = string
 
 export interface Tab {
@@ -9,6 +11,10 @@ export interface Tab {
   projectDir?: string
   activeSkills?: string[]
   thumbnail?: string
+  /** This tab's own accent colour, so parallel projects are readable at a glance. */
+  accentColor?: string
+  /** This tab's own aura colour; falls back to the accent, then to the app accent. */
+  auraColor?: string
   createdAt: number
   updatedAt: number
 }
@@ -19,6 +25,9 @@ export interface HistoryItem {
   url: string
   model: string
   thumbnail?: string
+  /** Carried from the tab so a reopened conversation keeps the colour that identifies it. */
+  accentColor?: string
+  auraColor?: string
   timestamp?: number | string
   updatedAt?: string
 }
@@ -62,7 +71,10 @@ export function openHistoryTab(tabs: Tab[], item: HistoryItem): { tabs: Tab[]; a
     return { tabs, activeId: existing.id }
   }
   const model = MODEL_KEYS[item.model] ? (item.model as ModelKey) : 'gemini'
-  const created = createTab(model, item.title || 'New Chat', item.url)
+  const created = applyTabColors(createTab(model, item.title || 'New Chat', item.url), {
+    accentColor: item.accentColor,
+    auraColor: item.auraColor
+  })
   return { tabs: [...tabs, created], activeId: created.id }
 }
 
@@ -221,6 +233,8 @@ export function deserializeState(
         (allTabIds.add((t as Tab).id), true)
     )
     if (tabs.length === 0) return null
+    // Colours come from disk and end up in injected CSS: re-validate on the way in.
+    for (const tab of tabs) Object.assign(tab, sanitiseTabColors(tab))
     const activeId =
       typeof parsed?.activeId === 'string' && allTabIds.has(parsed.activeId)
         ? parsed.activeId
