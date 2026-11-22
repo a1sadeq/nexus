@@ -14,10 +14,12 @@ vi.mock('node:fs', async (importOriginal) => {
     }) as typeof actual.copyFileSync
   }
 })
+import { DatabaseSync } from 'node:sqlite'
 import {
   parseCookieEditorJson,
   normalizeExpirationDate,
   readCookiesFromCustomDirectory,
+  getLastCookieReadStats,
   AI_HOST_PATTERN,
   isGoogleCookieDomain,
   validateDomainForCookieImport,
@@ -822,5 +824,80 @@ describe('cookie database copy with a stray -shm beside it', () => {
     await expect(readCookiesFromCustomDirectory(join(dir, 'Cookies'))).rejects.toThrow(
       'Directory does not exist'
     )
+  })
+})
+
+describe('a profile whose cookie values cannot be decrypted', () => {
+  let dir: string
+  let dbPath: string
+
+  beforeEach(() => {
+    const built = buildFakeChromeCookieDb([
+      {
+        host_key: CHATGPT_DOMAIN,
+        name: '__Secure-next-auth.session-token',
+        value: 'session-value',
+        path: '/',
+        is_secure: 1,
+        expires_utc: RECENT_TIMESTAMP * 1e6,
+        last_access_utc: RECENT_TIMESTAMP * 1e6
+      }
+    ])
+    dir = built.dir
+    dbPath = built.dbPath
+
+    // Replace the readable value with what Chrome 127+ actually stores on Windows: a "v20"
+    // app-bound blob. This is the state that used to be reported as "no active AI sessions" — the
+    // database plainly holds a session, and nothing said why it could not be read.
+    const blob = Buffer.concat([
+      Buffer.from('v20', 'utf8'),
+      Buffer.alloc(12, 1), // nonce
+      Buffer.from('ciphertext-that-cannot-be-openened', 'utf8'),
+      Buffer.alloc(16, 2) // auth tag
+    ])
+    const db = new DatabaseSync(dbPath)
+    db.prepare('UPDATE cookies SET value = ?, encrypted_value = ?').run('', blob)
+    db.close()
+  })
+
+  afterEach(() => {
+    if (existsSync(dir)) rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('reads nothing, but says how many it could not decrypt and why', async () => {
+    const { cookies } = await readCookiesFromCustomDirectory(dir)
+
+    expect(cookies).toEqual([])
+    const stats = getLastCookieReadStats()
+    expect(stats?.matched).toBe(1)
+    expect(stats?.usable).toBe(0)
+    expect(stats?.undecryptable).toBe(1)
+    expect(stats?.prefixes.v20).toBe(1)
+  })
+
+  it('still accepts a value stored without any encryption prefix', async () => {
+    // Old builds wrote plaintext straight into encrypted_value. That must keep working — the fix
+    // above only refuses bytes that could be ciphertext.
+    const db = new DatabaseSync(dbPath)
+    db.prepare('UPDATE cookies SET value = ?, encrypted_value = ?').run(
+      '',
+      Buffer.from('plain-text-session', 'utf8')
+    )
+    db.close()
+
+    const { cookies } = await readCookiesFromCustomDirectory(dir)
+
+    expect(cookies.map((c) => c.value)).toContain('plain-text-session')
+  })
+
+  it('is not described as a missing session', async () => {
+    await readCookiesFromCustomDirectory(dir)
+
+    const { describeEmptyRead } = await import('./cookieDbCopy')
+    const text = describeEmptyRead('Chrome — Profile 1', getLastCookieReadStats(), 'win32')
+
+    expect(text).not.toContain('No active AI session cookies found')
+    expect(text).toContain('app-bound encryption')
+    expect(text).toContain('Import from JSON')
   })
 })

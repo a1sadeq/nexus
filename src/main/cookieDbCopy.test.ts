@@ -40,7 +40,10 @@ import {
   isLockError,
   copyWithRetry,
   describeCookieReadFailure,
+  describeEmptyRead,
+  describeGoogleOnlySync,
   prepareTempCookieDb,
+  type CookieReadStats,
 } from "./cookieDbCopy";
 
 const DB_CONTENT =
@@ -308,6 +311,88 @@ describe("describeCookieReadFailure", () => {
     );
     expect(describeCookieReadFailure("P", err)).toBe(
       'Failed to read cookies from "P": ENOENT: no such file or directory, open',
+    );
+  });
+});
+
+describe("describeEmptyRead", () => {
+  const stats = (over: Partial<CookieReadStats> = {}): CookieReadStats => ({
+    scope: "all",
+    rows: 812,
+    matched: 6,
+    usable: 0,
+    undecryptable: 6,
+    prefixes: { v10: 6 },
+    keyAvailable: true,
+    ...over,
+  });
+
+  it("names app-bound encryption when v20 values are present", () => {
+    const text = describeEmptyRead(
+      "Chrome — Profile 1",
+      stats({ prefixes: { v20: 6 } }),
+      "win32",
+    );
+
+    expect(text).toContain("app-bound encryption");
+    expect(text).toContain("Import from JSON");
+    expect(text).toContain("Firefox/Zen");
+  });
+
+  it("blames the DPAPI key only when the key was unavailable", () => {
+    const noKey = describeEmptyRead(
+      "Chrome — Profile 1",
+      stats({ keyAvailable: false }),
+      "win32",
+    );
+    const withKey = describeEmptyRead("Chrome — Profile 1", stats(), "win32");
+
+    expect(noKey).toContain("DPAPI");
+    expect(noKey).toContain("Nothing was imported");
+    expect(withKey).not.toContain("DPAPI");
+    expect(withKey).toContain("none of their values could be decrypted");
+  });
+
+  it("does not mention decryption when the profile simply holds no AI cookies", () => {
+    const text = describeEmptyRead(
+      "Firefox — default",
+      stats({ matched: 0, usable: 0, undecryptable: 0, prefixes: {} }),
+    );
+
+    expect(text).toBe(
+      'Read 812 cookie(s) from "Firefox — default", but none belonged to a supported AI provider.',
+    );
+  });
+
+  it("falls back to the old sentence when there are no stats at all", () => {
+    expect(describeEmptyRead("P", null)).toBe(
+      'No active AI session cookies found in "P".',
+    );
+    expect(describeEmptyRead("P", undefined)).toBe(
+      'No active AI session cookies found in "P".',
+    );
+  });
+
+  it("says nothing about decryption when something was readable", () => {
+    expect(describeEmptyRead("P", stats({ usable: 2 }))).toBe(
+      'No active AI session cookies found in "P".',
+    );
+  });
+});
+
+describe("describeGoogleOnlySync", () => {
+  it("points at the per-profile import and names the profile", () => {
+    const text = describeGoogleOnlySync("Chrome — Profile 1", 4, false);
+
+    expect(text).toContain("4 Google session cookie(s)");
+    expect(text).toContain('"Chrome — Profile 1"');
+    expect(text).toContain("Import from browser profile");
+    expect(text).not.toContain("Other profiles");
+  });
+
+  it("mentions the others when several profiles hold Google sessions", () => {
+    expect(describeGoogleOnlySync("Edge — Profile 2", 2, true)).toContain(
+      "Other profiles also hold Google sessions",
     );
   });
 });

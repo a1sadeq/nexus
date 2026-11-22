@@ -9,16 +9,30 @@ import { homedir, platform } from 'node:os'
 import { join } from 'node:path'
 import {
   BrowserDbLockedError,
+  describeEmptyRead,
   isLockError,
-  prepareTempCookieDb
+  prepareTempCookieDb,
+  type CookieReadStats
 } from './cookieDbCopy'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 
-export { BrowserDbLockedError, isLockError }
+export { BrowserDbLockedError, describeEmptyRead, isLockError, type CookieReadStats }
 
 const execFileP = promisify(execFile)
 const execFileAsync = execFileP
+
+// What the most recent database read actually found. The caller needs it to explain an empty result:
+// "no sessions" and "a session whose value could not be decrypted" look identical from the outside.
+let lastReadStats: CookieReadStats | null = null
+
+export function getLastCookieReadStats(): CookieReadStats | null {
+  return lastReadStats
+}
+
+function recordReadStats(stats: CookieReadStats): void {
+  lastReadStats = stats
+}
 
 function withTempSqliteDb<T>(dbPath: string, fn: (db: DatabaseSync) => T): T {
   const temp = prepareTempCookieDb(dbPath)
@@ -673,9 +687,22 @@ async function getWindowsMasterKey(localState: string): Promise<Buffer | null> {
       $dec = [System.Security.Cryptography.ProtectedData]::Unprotect($dpapiBytes, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
       [Convert]::ToBase64String($dec)
     `
-    const { stdout } = await execFileAsync('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], {
-      timeout: 3000
-    })
+    // `powershell` is the Windows PowerShell 5 shim and is always present on Windows 11; `pwsh` is
+    // PowerShell 7 and is not. Add-Type compiles on first use, so the first call is given longer
+    // than the steady-state one — a 3s timeout was enough to fail on a cold start and send every
+    // cookie down the "cannot decrypt" path.
+    let stdout = ''
+    for (const shell of ['powershell', 'pwsh']) {
+      try {
+        const res = await execFileAsync(shell, ['-NoProfile', '-NonInteractive', '-Command', script], {
+          timeout: 10000
+        })
+        stdout = res.stdout
+        if (stdout.trim()) break
+      } catch (err) {
+        if (shell === 'pwsh') throw err
+      }
+    }
     const outB64 = stdout.trim()
     if (!outB64) return null
     const masterKey = Buffer.from(outB64, 'base64')
@@ -691,7 +718,10 @@ async function getWindowsMasterKey(localState: string): Promise<Buffer | null> {
 function decryptWindowsChromeValue(encrypted: Uint8Array, masterKey: Buffer): string | null {
   if (encrypted.length === 0) return ''
   const prefix = Buffer.from(encrypted.subarray(0, 3)).toString()
-  if (prefix === 'v10' || prefix === 'v11' || prefix === 'v20') {
+  // "v20" is app-bound encryption (Chrome/Edge 127+): the key is sealed to the browser's own
+  // elevation service, so the DPAPI-unwrapped key cannot open it. Reported, never faked.
+  if (prefix === 'v20') return null
+  if (prefix === 'v10' || prefix === 'v11') {
     const nonce = encrypted.subarray(3, 15)
     const ciphertext = encrypted.subarray(15, encrypted.length - 16)
     const tag = encrypted.subarray(encrypted.length - 16)
@@ -708,11 +738,30 @@ function decryptWindowsChromeValue(encrypted: Uint8Array, masterKey: Buffer): st
 }
 
 // Chromium os_crypt on Linux: v10 uses a hardcoded password, v11 a keyring-derived one.
+/**
+ * A value that carries no encryption prefix at all — some very old builds stored plaintext straight
+ * into `encrypted_value`. Returns null for anything that could be ciphertext.
+ *
+ * The old fallback returned `Buffer.toString()` unconditionally, so a blob it could not open came
+ * back as a "cookie value" made of the ciphertext itself. That is how a Windows profile could look
+ * like it imported fine and still not be signed in, and how an app-bound ("v20") blob became a
+ * meaningless session instead of an error.
+ */
+function plaintextValue(encrypted: Uint8Array): string | null {
+  if (encrypted.length === 0) return ''
+  const buf = Buffer.from(encrypted)
+  for (const byte of buf) {
+    // Control characters other than tab/newline/carriage return never appear in a cookie value.
+    if (byte < 0x09 || (byte > 0x0d && byte < 0x20)) return null
+  }
+  return buf.toString('utf8')
+}
+
 function decryptLinuxChromeValue(encrypted: Uint8Array, password: string): string | null {
   if (encrypted.length === 0) return ''
   const prefix = Buffer.from(encrypted.subarray(0, 3)).toString()
   if (prefix !== 'v10' && prefix !== 'v11') {
-    return Buffer.from(encrypted).toString()
+    return plaintextValue(encrypted)
   }
   const key = pbkdf2Sync(password, 'saltysalt', 1, 16, 'sha1')
   const ciphertext = Buffer.from(encrypted.subarray(3))
@@ -832,16 +881,34 @@ async function readChromeCookies(
     }>
 
     const pattern = scope === 'google' ? GOOGLE_HOST_PATTERN : AI_HOST_PATTERN
+    const stats: CookieReadStats = {
+      scope,
+      rows: rows.length,
+      matched: 0,
+      usable: 0,
+      undecryptable: 0,
+      prefixes: {},
+      // On Windows, no key means no value: the "peanuts" fallback only ever applies to Linux.
+      keyAvailable: currentPlatform === 'win32' ? !!winMasterKey : null
+    }
     for (const row of rows) {
       if (!pattern.test(row.host_key)) continue
+      stats.matched += 1
       let value = row.value
       if (!value && row.encrypted_value?.length) {
-        if (currentPlatform === 'win32' && winMasterKey) {
-          value = decryptWindowsChromeValue(row.encrypted_value, winMasterKey) ?? ''
+        const prefix = Buffer.from(row.encrypted_value.subarray(0, 3)).toString()
+        stats.prefixes[prefix] = (stats.prefixes[prefix] ?? 0) + 1
+        if (currentPlatform === 'win32') {
+          // Trying the Linux keys here cannot work and only hides the real reason: without the
+          // DPAPI-unwrapped key there is nothing to decrypt Windows values with.
+          value = winMasterKey ? (decryptWindowsChromeValue(row.encrypted_value, winMasterKey) ?? '') : ''
         } else {
           value = decryptLinuxChromeValue(row.encrypted_value, linuxPassword ?? 'peanuts') ?? ''
         }
-        if (!value && row.encrypted_value.length > 3) continue
+        if (!value && row.encrypted_value.length > 3) {
+          stats.undecryptable += 1
+          continue
+        }
       }
 
       let sameSite: 'unspecified' | 'no_restriction' | 'lax' | 'strict' | undefined = undefined
@@ -849,6 +916,7 @@ async function readChromeCookies(
         sameSite = mapNumericSameSite(row.samesite)
       }
 
+      stats.usable += 1
       out.push({
         name: row.name,
         value,
@@ -861,6 +929,7 @@ async function readChromeCookies(
         sameSite
       })
     }
+    recordReadStats(stats)
     return out
   })
 }
@@ -892,8 +961,19 @@ async function readFirefoxCookies(
       sameSite?: number
     }>
     const pattern = scope === 'google' ? GOOGLE_HOST_PATTERN : AI_HOST_PATTERN
+    const stats: CookieReadStats = {
+      scope,
+      rows: rows.length,
+      matched: 0,
+      usable: 0,
+      undecryptable: 0,
+      prefixes: {},
+      keyAvailable: null
+    }
     for (const row of rows) {
       if (!pattern.test(row.host)) continue
+      stats.matched += 1
+      stats.usable += 1
       let sameSite: 'unspecified' | 'no_restriction' | 'lax' | 'strict' | undefined = undefined
       if (typeof row.sameSite === 'number') {
         sameSite = mapNumericSameSite(row.sameSite)
@@ -910,6 +990,7 @@ async function readFirefoxCookies(
         sameSite
       })
     }
+    recordReadStats(stats)
     return out
   })
 }

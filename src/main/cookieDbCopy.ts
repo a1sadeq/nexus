@@ -164,3 +164,91 @@ export function describeCookieReadFailure(
   const suffix = code && !detail.includes(code) ? ` (${code})` : "";
   return `Failed to read cookies from "${profileName}": ${detail}${suffix}`;
 }
+
+/**
+ * What a cookie read actually found, kept so an empty result can be explained instead of being
+ * reported as "no sessions". A profile that holds a Google session can still produce zero cookies
+ * here — because the value could not be decrypted, or because the only sessions in it are Google's,
+ * which are imported from a single profile on purpose.
+ */
+export interface CookieReadStats {
+  scope: "google" | "all";
+  /** Rows the database's own host filter returned, before the provider pattern ran. */
+  rows: number;
+  /** Rows whose host matched the provider pattern for this scope. */
+  matched: number;
+  /** Cookies that came back with a usable value. */
+  usable: number;
+  /** Cookies dropped because their value could not be recovered. */
+  undecryptable: number;
+  /** Encryption prefixes seen on the values, e.g. `{ v10: 3, v20: 12 }`. */
+  prefixes: Record<string, number>;
+  /** Windows only: whether the browser's DPAPI-wrapped key could be unlocked. `null` elsewhere. */
+  keyAvailable: boolean | null;
+}
+
+/**
+ * The sentence shown when a read succeeded but produced nothing usable.
+ *
+ * The order matters: a decryption failure is not "no sessions", and a Chrome profile whose only
+ * sessions are Google's is not empty either. Each case names the one thing the user can do about it.
+ */
+export function describeEmptyRead(
+  profileName: string,
+  stats: CookieReadStats | null | undefined,
+  platform: string = process.platform,
+): string {
+  const fallback = `No active AI session cookies found in "${profileName}".`;
+  if (!stats) return fallback;
+
+  const found = stats.matched;
+
+  if (found > 0 && stats.usable === 0 && stats.undecryptable > 0) {
+    const appBound = (stats.prefixes.v20 ?? 0) > 0;
+    if (appBound) {
+      return (
+        `"${profileName}" has ${found} matching cookie(s), but ${stats.undecryptable} could not be read: ` +
+        `they use Chrome's app-bound encryption ("v20"), which only the browser's own service can unlock. ` +
+        `Import them as JSON instead — export with a cookie-editor extension, then use Import from JSON — ` +
+        `or import from a Firefox/Zen profile.`
+      );
+    }
+    if (stats.keyAvailable === false) {
+      const how =
+        platform === "win32"
+          ? "Nexus could not unlock the cookie key behind Windows DPAPI (powershell returned nothing), so every encrypted value was unreadable."
+          : "Nexus could not obtain the key needed to decrypt this browser's cookie values.";
+      return `"${profileName}" has ${found} matching cookie(s), but ${how} Nothing was imported.`;
+    }
+    return `"${profileName}" has ${found} matching cookie(s), but none of their values could be decrypted. Nothing was imported.`;
+  }
+
+  if (found === 0) {
+    return `Read ${stats.rows} cookie(s) from "${profileName}", but none belonged to a supported AI provider.`;
+  }
+
+  return fallback;
+}
+
+/**
+ * The sentence shown by "sync all sessions" when the only sessions it could legitimately take were
+ * Google's.
+ *
+ * Google cookies are excluded from a bulk sync on purpose: they belong to one account, and copying
+ * them from several profiles is how a sync lands on the wrong one. But a profile that plainly holds
+ * a Google session must not be reported as holding nothing.
+ */
+export function describeGoogleOnlySync(
+  profileName: string,
+  googleCount: number,
+  otherProfilesWithGoogle: boolean,
+): string {
+  return (
+    `Found ${googleCount} Google session cookie(s) in "${profileName}". ` +
+    `Google sessions are imported one profile at a time on purpose: use "Import from browser profile" ` +
+    `and choose "${profileName}".` +
+    (otherProfilesWithGoogle
+      ? " (Other profiles also hold Google sessions.)"
+      : "")
+  );
+}

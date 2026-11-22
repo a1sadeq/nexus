@@ -17,9 +17,14 @@ import {
   validateDomainForCookieImport,
   isGoogleCookieDomain,
   matchAiProvidersFromHost,
+  getLastCookieReadStats,
   type BrowserCookie
 } from './cookieImport'
-import { describeCookieReadFailure } from './cookieDbCopy'
+import {
+  describeCookieReadFailure,
+  describeEmptyRead,
+  describeGoogleOnlySync
+} from './cookieDbCopy'
 
 const POLL_INTERVAL_MS = 2000
 const POLL_TIMEOUT_MS = 180_000
@@ -377,11 +382,19 @@ export async function syncAllSessionsFromBrowsers(): Promise<{
   // A profile we could not read at all, with the error that stopped us. Used below to explain the
   // failure instead of reporting a flat "no cookies found" when the real problem was a lock.
   const readFailures: Array<{ profile: (typeof profiles)[number]; err: unknown }> = []
+  // Profiles we read successfully but which only held Google sessions. Excluding those is
+  // deliberate — mixing accounts is how a sync lands on the wrong Google account — but reporting
+  // "no sessions" for a profile that clearly has one is not.
+  const googleOnly: Array<{ profile: (typeof profiles)[number]; googleCount: number }> = []
 
   for (const profile of profiles) {
     try {
       const cookies = await readBrowserCookies(profile, 'all')
       const nonGoogleCookies = cookies.filter((c) => !isGoogleCookieDomain(c.domain))
+      const googleCookies = cookies.filter((c) => isGoogleCookieDomain(c.domain))
+      if (googleCookies.length > 0 && nonGoogleCookies.length === 0) {
+        googleOnly.push({ profile, googleCount: googleCookies.length })
+      }
       if (nonGoogleCookies.length > 0) {
         const report = await injectCookies(nonGoogleCookies)
         if (report.count > 0) {
@@ -422,6 +435,30 @@ export async function syncAllSessionsFromBrowsers(): Promise<{
       message: describeCookieReadFailure(locked.profile.name, locked.err)
     }
   }
+  const googleProfile = googleOnly[0]
+  if (googleProfile) {
+    return {
+      success: false,
+      count: 0,
+      profilesCount: profiles.length,
+      message: describeGoogleOnlySync(
+        googleProfile.profile.name,
+        googleProfile.googleCount,
+        googleOnly.length > 1
+      )
+    }
+  }
+
+  const stats = getLastCookieReadStats()
+  if (stats && stats.matched > 0 && stats.usable === 0) {
+    return {
+      success: false,
+      count: 0,
+      profilesCount: profiles.length,
+      message: describeEmptyRead(profiles[0].name, stats)
+    }
+  }
+
   const other = readFailures[0]
   if (other && readFailures.length === profiles.length) {
     return {
@@ -466,7 +503,7 @@ export async function syncSessionFromProfile(profileId: string): Promise<{
         success: false,
         count: 0,
         profileName: profile.name,
-        message: `No active AI session cookies found in "${profile.name}".`
+        message: describeEmptyRead(profile.name, getLastCookieReadStats())
       }
     }
 
