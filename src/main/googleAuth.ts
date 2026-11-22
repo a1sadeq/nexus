@@ -6,6 +6,7 @@
 // That session is imported into the AI webview partition via session.cookies.set().
 import { shell, session } from 'electron'
 import {
+  BrowserDbLockedError,
   detectDefaultBrowser,
   detectProfiles,
   pickBestProfile,
@@ -18,6 +19,7 @@ import {
   matchAiProvidersFromHost,
   type BrowserCookie
 } from './cookieImport'
+import { describeCookieReadFailure } from './cookieDbCopy'
 
 const POLL_INTERVAL_MS = 2000
 const POLL_TIMEOUT_MS = 180_000
@@ -372,6 +374,10 @@ export async function syncAllSessionsFromBrowsers(): Promise<{
   let successfulProfiles = 0
   const allDetected = new Set<string>()
 
+  // A profile we could not read at all, with the error that stopped us. Used below to explain the
+  // failure instead of reporting a flat "no cookies found" when the real problem was a lock.
+  const readFailures: Array<{ profile: (typeof profiles)[number]; err: unknown }> = []
+
   for (const profile of profiles) {
     try {
       const cookies = await readBrowserCookies(profile, 'all')
@@ -388,6 +394,7 @@ export async function syncAllSessionsFromBrowsers(): Promise<{
         }
       }
     } catch (err) {
+      readFailures.push({ profile, err })
       console.warn('[syncAllSessions] Failed to read cookies from profile %s:', profile.name, err)
     }
   }
@@ -401,6 +408,27 @@ export async function syncAllSessionsFromBrowsers(): Promise<{
       profilesCount: successfulProfiles,
       detectedProviders: Array.from(allDetected),
       message: `Successfully synced ${totalCount} AI session cookie(s) from ${successfulProfiles} profile(s).${googleNote}`
+    }
+  }
+
+  // Nothing came back and at least one profile could not be read: say why, rather than implying the
+  // browser simply has no sessions.
+  const locked = readFailures.find((f) => f.err instanceof BrowserDbLockedError)
+  if (locked) {
+    return {
+      success: false,
+      count: 0,
+      profilesCount: profiles.length,
+      message: describeCookieReadFailure(locked.profile.name, locked.err)
+    }
+  }
+  const other = readFailures[0]
+  if (other && readFailures.length === profiles.length) {
+    return {
+      success: false,
+      count: 0,
+      profilesCount: profiles.length,
+      message: describeCookieReadFailure(other.profile.name, other.err)
     }
   }
 
@@ -464,19 +492,7 @@ export async function syncSessionFromProfile(profileId: string): Promise<{
         : `No valid cookies found in "${profile.name}".`
     }
   } catch (err: unknown) {
-    const isLocked =
-      (err as Record<string, unknown>)?.code === 'EBUSY' ||
-      (err as Record<string, unknown>)?.code === 'EPERM' ||
-      String(err).toLowerCase().includes('busy') ||
-      String(err).toLowerCase().includes('locked')
-    return {
-      success: false,
-      count: 0,
-      profileName: profile.name,
-      message: isLocked
-        ? `Cannot read "${profile.name}" because the browser is currently running. Please close the browser and try again.`
-        : `Failed to read cookies from "${profile.name}": ${(err as Error).message}`
-    }
+    return { success: false, count: 0, profileName: profile.name, message: describeCookieReadFailure(profile.name, err) }
   }
 }
 

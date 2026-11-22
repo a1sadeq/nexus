@@ -1,4 +1,19 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+
+// Records where the cookie database gets copied. The read path is deliberately observed rather
+// than inspected afterwards: the copy is cleaned up in a finally block, so a stray "-shm" copied to
+// %TEMP% leaves no trace by the time the read returns — which is why the old bug went unnoticed.
+const copyHarness = vi.hoisted(() => ({ destinations: [] as string[] }))
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>()
+  return {
+    ...actual,
+    copyFileSync: ((from: string, to: string) => {
+      copyHarness.destinations.push(to)
+      return actual.copyFileSync(from, to)
+    }) as typeof actual.copyFileSync
+  }
+})
 import {
   parseCookieEditorJson,
   normalizeExpirationDate,
@@ -727,5 +742,85 @@ describe('provider recency ignores unrelated domains (T4 extension)', () => {
     const info = _test_firefoxProfileInfo(dbPath)
     expect(info.lastAccessed).toBeGreaterThanOrEqual(RECENT_TIMESTAMP - 1)
     expect(info.lastAccessed).toBeLessThanOrEqual(RECENT_TIMESTAMP + 1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Windows "the browser is currently running" regression
+// ---------------------------------------------------------------------------
+
+import { existsSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
+describe('cookie database copy with a stray -shm beside it', () => {
+  let dir: string
+  let dbPath: string
+
+  const copiedSoFar = (): string[] => readdirSync(tmpdir()).filter((f) => f.startsWith('nexus-cookies-'))
+
+  beforeEach(() => {
+    const built = buildFakeChromeCookieDb([
+      {
+        host_key: CHATGPT_DOMAIN,
+        name: '__Secure-next-auth.session-token',
+        value: 'session-value',
+        path: '/',
+        is_secure: 1,
+        expires_utc: RECENT_TIMESTAMP * 1e6, // Chrome stores microseconds
+        last_access_utc: RECENT_TIMESTAMP * 1e6
+      }
+    ])
+    dir = built.dir
+    dbPath = built.dbPath
+    // A browser that was killed, or that keeps a helper process resident, leaves these behind.
+    // Copying the -shm used to make SQLite answer "database is locked" for a database nobody had
+    // open — which is what the user saw, with every browser closed.
+    writeFileSync(`${dbPath}-shm`, 'shared-memory index')
+    writeFileSync(`${dbPath}-wal`, '')
+  })
+
+  afterEach(() => {
+    if (existsSync(dir)) rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('reads the profile anyway', async () => {
+    const { cookies } = await readCookiesFromCustomDirectory(dir)
+
+    expect(cookies.map((c) => c.name)).toContain('__Secure-next-auth.session-token')
+    // The originals are read, never moved or deleted.
+    expect(existsSync(dbPath)).toBe(true)
+    expect(existsSync(`${dbPath}-shm`)).toBe(true)
+  })
+
+  it('never copies the -shm to the temp directory', async () => {
+    copyHarness.destinations.length = 0
+
+    await readCookiesFromCustomDirectory(dir)
+
+    expect(copyHarness.destinations.some((d) => d.endsWith('.sqlite'))).toBe(true) // it did copy
+    expect(copyHarness.destinations.filter((d) => d.endsWith('-shm'))).toEqual([])
+  })
+
+  it('cleans up every copy it made', async () => {
+    const before = copiedSoFar()
+
+    await readCookiesFromCustomDirectory(dir)
+
+    expect(copiedSoFar().filter((f) => !before.includes(f))).toEqual([])
+  })
+
+  it('reads a database left locked by a stale shm the same way twice', async () => {
+    const first = await readCookiesFromCustomDirectory(dir)
+    const second = await readCookiesFromCustomDirectory(dir)
+
+    expect(second.cookies.length).toBe(first.cookies.length)
+  })
+
+  it('reports the failing file rather than a running browser when the copy is impossible', async () => {
+    rmSync(dir, { recursive: true, force: true }) // the profile vanishes mid-flight
+    await expect(readCookiesFromCustomDirectory(join(dir, 'Cookies'))).rejects.toThrow(
+      'Directory does not exist'
+    )
   })
 })

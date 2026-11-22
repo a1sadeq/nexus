@@ -4,67 +4,58 @@
 // copied into the AI webview partition (webviews cannot consume OAuth tokens).
 import { DatabaseSync } from 'node:sqlite'
 import { pbkdf2Sync, createDecipheriv, randomUUID } from 'node:crypto'
-import { copyFileSync, unlinkSync, existsSync, readFileSync, readdirSync } from 'node:fs'
-import { homedir, platform, tmpdir } from 'node:os'
+import { unlinkSync, existsSync, readFileSync, readdirSync } from 'node:fs'
+import { homedir, platform } from 'node:os'
 import { join } from 'node:path'
+import {
+  BrowserDbLockedError,
+  isLockError,
+  prepareTempCookieDb
+} from './cookieDbCopy'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+
+export { BrowserDbLockedError, isLockError }
 
 const execFileP = promisify(execFile)
 const execFileAsync = execFileP
 
 function withTempSqliteDb<T>(dbPath: string, fn: (db: DatabaseSync) => T): T {
-  if (!existsSync(dbPath)) {
-    throw new Error(`Database file not found: ${dbPath}`)
-  }
+  const temp = prepareTempCookieDb(dbPath)
 
-  const tmpId = randomUUID()
-  const tmpDbPath = join(tmpdir(), `nexus-cookies-${tmpId}.sqlite`)
-  const tmpWalPath = `${tmpDbPath}-wal`
-  const tmpShmPath = `${tmpDbPath}-shm`
-
-  const origWalPath = `${dbPath}-wal`
-  const origShmPath = `${dbPath}-shm`
-
-  try {
-    copyFileSync(dbPath, tmpDbPath)
-    if (existsSync(origWalPath)) {
-      try {
-        copyFileSync(origWalPath, tmpWalPath)
-      } catch {
-        // ignore optional wal copy error
-      }
-    }
-    if (existsSync(origShmPath)) {
-      try {
-        copyFileSync(origShmPath, tmpShmPath)
-      } catch {
-        // ignore optional shm copy error
-      }
-    }
-
-    const db = new DatabaseSync(tmpDbPath, { readOnly: true })
+  const openAndRun = (): T => {
+    const db = new DatabaseSync(temp.dbPath, { readOnly: true })
     try {
       return fn(db)
     } finally {
       db.close()
     }
+  }
+
+  try {
+    return openAndRun()
+  } catch (err) {
+    // Retry once without the WAL: a half-copied or stale write-ahead log is the usual cause of a
+    // spurious SQLITE_BUSY here, and the main file on its own is readable.
+    if (temp.walPath && isLockError(err)) {
+      try {
+        unlinkSync(temp.walPath)
+      } catch {
+        // already gone
+      }
+      try {
+        return openAndRun()
+      } catch (retryErr) {
+        temp.cleanup()
+        if (isLockError(retryErr)) throw new BrowserDbLockedError(dbPath, retryErr)
+        throw retryErr
+      }
+    }
+    temp.cleanup()
+    if (isLockError(err)) throw new BrowserDbLockedError(dbPath, err)
+    throw err
   } finally {
-    try {
-      if (existsSync(tmpDbPath)) unlinkSync(tmpDbPath)
-    } catch {
-      // ignore
-    }
-    try {
-      if (existsSync(tmpWalPath)) unlinkSync(tmpWalPath)
-    } catch {
-      // ignore
-    }
-    try {
-      if (existsSync(tmpShmPath)) unlinkSync(tmpShmPath)
-    } catch {
-      // ignore
-    }
+    temp.cleanup()
   }
 }
 
@@ -210,12 +201,7 @@ function firefoxProfileInfo(dbPath: string): {
       }
     })
   } catch (err: any) {
-    const isLocked =
-      err?.code === 'EBUSY' ||
-      err?.code === 'EPERM' ||
-      String(err).toLowerCase().includes('busy') ||
-      String(err).toLowerCase().includes('locked')
-    return { hasGoogleAuth: false, detectedAiSessions: [], isLocked }
+    return { hasGoogleAuth: false, detectedAiSessions: [], isLocked: isLockError(err) }
   }
 }
 
@@ -266,12 +252,7 @@ function chromeProfileInfo(dbPath: string): {
       }
     })
   } catch (err: any) {
-    const isLocked =
-      err?.code === 'EBUSY' ||
-      err?.code === 'EPERM' ||
-      String(err).toLowerCase().includes('busy') ||
-      String(err).toLowerCase().includes('locked')
-    return { hasGoogleAuth: false, detectedAiSessions: [], isLocked }
+    return { hasGoogleAuth: false, detectedAiSessions: [], isLocked: isLockError(err) }
   }
 }
 
