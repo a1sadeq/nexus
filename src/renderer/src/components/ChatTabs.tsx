@@ -18,6 +18,13 @@ interface Props {
   /** Configured per-provider SVG markup, keyed by provider key. */
   modelIcons?: Record<string, string>
   alwaysShowTitles?: boolean
+  /** Per-tab container mark, so horizontal tabs identify their container too. */
+  containerMarks?: Record<string, { color?: string; name: string; isDefault: boolean }>
+  /**
+   * The number printed on each tab: the digit `Ctrl+N` uses to reach it. Pinned tabs are numbered
+   * from 1 and the rest continue, so the strip reads 1, 2, 3… from left to right.
+   */
+  tabNumbers?: Record<string, number>
 }
 
 export default function ChatTabs({
@@ -29,6 +36,8 @@ export default function ChatTabs({
   onTogglePin,
   modelColors,
   modelIcons,
+  containerMarks,
+  tabNumbers,
   alwaysShowTitles = false
 }: Props) {
   const [hoveredTabId, setHoveredTabId] = useState<string | null>(null)
@@ -145,8 +154,28 @@ export default function ChatTabs({
                 e.preventDefault()
                 onTogglePin(t.id)
               }}
-              title={`${t.title || 'New Chat'} — right-click to ${isPinned ? 'unpin' : 'pin'}`}
+              title={`${t.title || 'New Chat'}${containerMarks?.[t.id] ? ` · ${containerMarks[t.id].name}` : ''} — right-click to ${isPinned ? 'unpin' : 'pin'}`}
             >
+              {tabNumbers?.[t.id] !== undefined && (
+                <span
+                  className={`chat-tab-number${isActive ? ' is-active' : ''}`}
+                  title={`${tabNumbers[t.id]} — press Ctrl+${tabNumbers[t.id]} to jump here`}
+                  aria-label={`Tab ${tabNumbers[t.id]}`}
+                >
+                  {tabNumbers[t.id]}
+                </span>
+              )}
+              {containerMarks?.[t.id] && !(containerMarks[t.id].isDefault && !containerMarks[t.id].color) && (
+                <span
+                  className="chat-tab-container-dot shrink-0 mr-1"
+                  style={{
+                    background: containerMarks[t.id].color ?? 'var(--text2)',
+                    boxShadow: containerMarks[t.id].color ? `0 0 6px ${containerMarks[t.id].color}` : undefined
+                  }}
+                  title={`Container: ${containerMarks[t.id].name}`}
+                  aria-label={`Container ${containerMarks[t.id].name}`}
+                />
+              )}
               <ProviderIcon
                 modelKey={t.model}
                 customSvg={modelIcons?.[t.model]}

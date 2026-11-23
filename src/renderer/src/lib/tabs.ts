@@ -15,6 +15,12 @@ export interface Tab {
   accentColor?: string
   /** This tab's own aura colour; falls back to the accent, then to the app accent. */
   auraColor?: string
+  /**
+   * Which container this tab belongs to. Absent means the default container, which is where every
+   * tab created before containers existed lives. The partition is chosen from this at view creation
+   * and never changes afterwards.
+   */
+  containerId?: string
   createdAt: number
   updatedAt: number
 }
@@ -38,11 +44,12 @@ export function createTab(
   model: ModelKey,
   title: string,
   url: string,
-  projectDir?: string
+  projectDir?: string,
+  containerId?: string
 ): Tab {
   counter += 1
   const now = Date.now()
-  return {
+  const tab: Tab = {
     id: `tab-${now}-${counter}-${Math.random().toString(36).slice(2, 8)}`,
     title,
     model,
@@ -51,6 +58,8 @@ export function createTab(
     createdAt: now,
     updatedAt: now
   }
+  if (containerId && containerId !== 'default') tab.containerId = containerId
+  return tab
 }
 
 export function switchToModel(
@@ -234,7 +243,16 @@ export function deserializeState(
     )
     if (tabs.length === 0) return null
     // Colours come from disk and end up in injected CSS: re-validate on the way in.
-    for (const tab of tabs) Object.assign(tab, sanitiseTabColors(tab))
+    for (const tab of tabs) {
+      Object.assign(tab, sanitiseTabColors(tab))
+      // A container id from disk becomes a partition name; anything unusable means "default".
+      const containerId = (tab as { containerId?: unknown }).containerId
+      if (typeof containerId === 'string' && /^[a-z0-9_-]{1,40}$/.test(containerId) && containerId !== 'default') {
+        tab.containerId = containerId
+      } else {
+        delete tab.containerId
+      }
+    }
     const activeId =
       typeof parsed?.activeId === 'string' && allTabIds.has(parsed.activeId)
         ? parsed.activeId

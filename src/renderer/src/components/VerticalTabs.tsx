@@ -30,6 +30,16 @@ interface Props {
    * of the window and in the pinned sidebar.
    */
   pinnedSection?: boolean
+  /**
+   * Per-tab container mark: the colour dot and the name that make a tab's container obvious without
+   * opening it. Missing entries simply draw nothing (default container with no colour).
+   */
+  containerMarks?: Record<string, { color?: string; name: string; isDefault: boolean }>
+  /**
+   * The digit that reaches each tab with `Ctrl+N`. Pinned tabs take 1…n and the rest continue, so
+   * the number in the list matches the key, the way the badge on the tab does.
+   */
+  tabNumbers?: Record<string, number>
 }
 
 export default function VerticalTabs({
@@ -46,7 +56,9 @@ export default function VerticalTabs({
   onReorder,
   modelColors,
   modelIcons,
-  pinnedSection = false
+  pinnedSection = false,
+  containerMarks,
+  tabNumbers
 }: Props): ReactElement {
   const [hoveredTabId, setHoveredTabId] = useState<string | null>(null)
   const [draggingTabId, setDraggingTabId] = useState<string | null>(null)
@@ -139,7 +151,7 @@ export default function VerticalTabs({
           setDraggingTabId(null)
           setDragOverTabId(null)
         }}
-        title={`${t.title || 'New Chat'} (${t.model}) ${isSleeping ? '— Sleeping / Hibernated (click to wake)' : ''} — Right-click to ${isPinned ? 'unpin' : 'pin'}`}
+        title={`${t.title || 'New Chat'} (${t.model})${containerMarks?.[t.id] ? ` · ${containerMarks[t.id].name}` : ''} ${isSleeping ? '— Sleeping / Hibernated (click to wake)' : ''} — Right-click to ${isPinned ? 'unpin' : 'pin'}`}
         style={
           isActive
             ? ({
@@ -177,8 +189,33 @@ export default function VerticalTabs({
           setPreviewPos(null)
         }}
       >
-        {/* Left: Brand Icon & Tab Title */}
+        {/* Left: number, container mark, Brand Icon & Tab Title */}
         <div className="flex items-center gap-2 min-w-0 flex-1">
+          {tabNumbers?.[t.id] !== undefined && (
+            <span
+              className={`vertical-tab-number shrink-0${isActive ? ' is-active' : ''}`}
+              title={`Press Ctrl+${tabNumbers[t.id]} to jump here`}
+              aria-label={`Tab ${tabNumbers[t.id]}`}
+            >
+              {tabNumbers[t.id]}
+            </span>
+          )}
+          {(() => {
+            const mark = containerMarks?.[t.id]
+            if (!mark || (mark.isDefault && !mark.color)) return null
+            return (
+              <span
+                className="vertical-tab-container-dot shrink-0"
+                style={
+                  mark.color
+                    ? { background: mark.color, boxShadow: `0 0 6px ${mark.color}` }
+                    : { background: 'var(--text2)' }
+                }
+                title={`Container: ${mark.name}`}
+                aria-label={`Container ${mark.name}`}
+              />
+            )
+          })()}
           <ProviderIcon
             modelKey={t.model}
             customSvg={modelIcons?.[t.model]}

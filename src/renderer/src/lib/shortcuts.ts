@@ -117,6 +117,14 @@ export const DEFAULT_SHORTCUTS: ShortcutDef[] = [
     defaultKeys: ['Ctrl', 'Tab']
   },
   {
+    id: 'containers-picker',
+    action: 'Container / Profile Switcher',
+    desc: 'Open the container switcher in the middle of the window, and close it again',
+    category: 'tabs',
+    defaultKeys: ['Ctrl', '.'],
+    badge: 'Profiles'
+  },
+  {
     id: 'sidebar-toggle',
     action: 'Toggle Sidebar',
     desc: 'Expand or collapse the pinned chats sidebar',
@@ -173,7 +181,9 @@ export const DEFAULT_SHORTCUTS: ShortcutDef[] = [
     action: 'Stop AI Generation',
     desc: "Click the active AI provider's stop generation button",
     category: 'models',
-    defaultKeys: ['Ctrl', '.']
+    // Was Ctrl+dot until the container switcher claimed it. Esc, the stop button in the view and
+    // this binding all still stop a generation; only the key moved.
+    defaultKeys: ['Ctrl', 'Shift', '.']
   },
   {
     id: 'site-new-chat',

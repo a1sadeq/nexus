@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import {
+  DEFAULT_SHORTCUTS,
   getShortcutKeys,
   setShortcutKeys,
   resetShortcutKeys,
@@ -166,5 +167,36 @@ describe('shortcuts module', () => {
     expect(matchesShortcut(event, ['Ctrl', 'Alt', 'Shift', 'I'])).toBe(true)
     expect(matchesShortcut(event, ['Ctrl', 'Shift', 'I'])).toBe(false)
     expect(matchesShortcut(event, ['Ctrl', 'Shift', 'D'])).toBe(false)
+  })
+
+  it('gives Ctrl+. to the container switcher and moves stop-generation off it', () => {
+    const picker = DEFAULT_SHORTCUTS.find((s) => s.id === 'containers-picker')
+    const stop = DEFAULT_SHORTCUTS.find((s) => s.id === 'stop-generation')
+    expect(picker?.defaultKeys).toEqual(['Ctrl', '.'])
+    expect(stop?.defaultKeys).toEqual(['Ctrl', 'Shift', '.'])
+
+    const plainDot = {
+      ctrlKey: true,
+      metaKey: false,
+      altKey: false,
+      shiftKey: false,
+      key: '.',
+      code: 'Period'
+    } as unknown as KeyboardEvent
+    const shiftDot = {
+      ctrlKey: true,
+      metaKey: false,
+      altKey: false,
+      shiftKey: true,
+      key: '.',
+      code: 'Period'
+    } as unknown as KeyboardEvent
+
+    expect(matchesShortcut(plainDot, picker!.defaultKeys)).toBe(true)
+    expect(matchesShortcut(plainDot, stop!.defaultKeys)).toBe(false)
+    // The old key must not still stop a generation, or one press would do two things.
+    expect(matchesShortcut(plainDot, ['Ctrl', '.'])).toBe(true)
+    expect(matchesShortcut(shiftDot, stop!.defaultKeys)).toBe(true)
+    expect(matchesShortcut(shiftDot, picker!.defaultKeys)).toBe(false)
   })
 })

@@ -90,3 +90,37 @@
 .vertical-tab-sleeping:hover {
   opacity: 1;
 }
+
+
+/* Container identity: a small dot in the container's colour, left of the provider icon. */
+.vertical-tab-container-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  flex-shrink: 0;
+  opacity: 0.9;
+}
+
+/* Tab number: the digit Ctrl+N uses to reach this tab. */
+.vertical-tab-number {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 3px;
+  border-radius: 5px;
+  font-family: ui-monospace, monospace;
+  font-size: 9.5px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  color: var(--text2);
+  background: color-mix(in srgb, var(--surface) 80%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border) 90%, transparent);
+}
+
+.vertical-tab-number.is-active {
+  color: #ffffff;
+  background: rgba(0, 0, 0, 0.28);
+  border-color: rgba(255, 255, 255, 0.35);
+}

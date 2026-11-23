@@ -162,3 +162,50 @@
   border: 1px solid var(--accent) !important;
   color: var(--text) !important;
 }
+
+
+
+/* Container identity on the horizontal strip. */
+.chat-tab-container-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  flex-shrink: 0;
+  opacity: 0.9;
+}
+
+/* ---------------------------------------------------------------------------------------------
+   Tab number badge — the digit that reaches this tab with Ctrl+N.
+   Small and monospaced so a row of tabs reads like a numbered list, not like decoration.
+   --------------------------------------------------------------------------------------------- */
+
+.chat-tab-number {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 3px;
+  border-radius: 5px;
+  font-family: ui-monospace, monospace;
+  font-size: 9.5px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  color: var(--text2);
+  background: color-mix(in srgb, var(--surface2) 75%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border) 85%, transparent);
+  transition: color 140ms ease, border-color 140ms ease, background 140ms ease;
+}
+
+.chat-tab-pill:hover .chat-tab-number {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+}
+
+.chat-tab-number.is-active {
+  color: color-mix(in srgb, var(--accent) 75%, var(--text));
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  box-shadow: 0 0 8px -2px color-mix(in srgb, var(--accent) 70%, transparent);
+}
