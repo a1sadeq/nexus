@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import vm from 'node:vm'
+import * as overlayWatchdog from './overlayWatchdog'
 import ts from 'typescript'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { formatNotificationContent } from '../shared/notificationContent'
@@ -123,6 +124,10 @@ describe('completion notifications and latest-notification shortcut', () => {
       dismissInAppToast: dismissed,
       ipcMain: { on: vi.fn() },
       restartActiveArenaTitleSync: vi.fn(),
+      // The router's Escape deadline lives in its own module; the harness supplies it as-is.
+      ...overlayWatchdog,
+      reconcileViewPresentation: vi.fn(),
+      focusPromptInView: vi.fn(),
       viewModelKeys: new Map()
     })
     vm.runInContext(code, context)

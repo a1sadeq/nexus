@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo, type CSSProperties } from 'react'
 import {
   serializeState,
   deserializeState,
@@ -17,8 +17,20 @@ import {
 } from './lib/tabs'
 import { sfx } from './lib/soundFx'
 import { getShortcutKeys, getShortcutMap, onShortcutsChanged } from './lib/shortcuts'
+import { describeOverlays, dismissibleOverlayKeys, isAnyOverlayOpen, type OverlayKey } from './lib/overlays'
+import {
+  MAX_TAB_SHORTCUT_NUMBER,
+  shortcutLabelForTab,
+  shortcutTabCount,
+  tabForShortcutNumber,
+  tabNumberMap,
+  pinnedTabForShortcutNumber
+} from './lib/tabNumbering'
 import type { Tab, HistoryItem, ModelKey } from './lib/tabs'
 import ChatTabs from './components/ChatTabs'
+import ContainerMenu from './components/ContainerMenu'
+import ContainerModal from './components/ContainerModal'
+import ContainerManager from './components/ContainerManager'
 import VerticalTabs from './components/VerticalTabs'
 import type { TabAiStatus } from './lib/tabStatus'
 import { BRAND_IDS, modelLabel, modelColor } from './lib/modelVisuals'
@@ -54,6 +66,16 @@ import { WindowTitleBar } from './components/WindowTitleBar'
 import TabColorModal from './components/TabColorModal'
 import TabColorButton from './components/TabColorButton'
 import { applyTabColors, sanitiseTabColors, tabAccentColor, type TabColors } from './lib/tabColors'
+import {
+  containerColorOf,
+  containerForShortcutIndex,
+  containerIdOf,
+  defaultContainerInfo,
+  findContainer,
+  insetRectForAura,
+  tabCountsByContainer,
+  type ContainerInfo
+} from './lib/containers'
 import { FolderUploadModal } from './components/FolderUploadModal'
 import { DiagnosticsModal } from './components/DiagnosticsModal'
 import type { FolderScanResult } from '../../shared/folderUpload'
@@ -62,7 +84,7 @@ import './App.css'
 
 /** Bumped whenever this file's UI changes, so a stale bundle is obvious at a glance
  *  (`document.querySelector('[data-nexus-build]')` in devtools). */
-const NEXUS_UI_BUILD = '4'
+const NEXUS_UI_BUILD = '6'
 
 import {
   DEFAULT_MODELS,
@@ -335,6 +357,69 @@ function App() {
       auraColor: activeTabColors.auraColor
     })
   }, [activeId, activeTabColors.accentColor, activeTabColors.auraColor])
+
+  // ---- Containers -------------------------------------------------------------------------
+  const [containers, setContainers] = useState<ContainerInfo[]>([defaultContainerInfo()])
+  const [showContainerMenu, setShowContainerMenu] = useState(false)
+  // The containers section: adding, editing and deleting them in one place.
+  const [showContainerManager, setShowContainerManager] = useState(false)
+  // A one-line explanation for a keypress that had nothing to open.
+  const [containerHint, setContainerHint] = useState<string | null>(null)
+  const [editingContainer, setEditingContainer] = useState<ContainerInfo | null>(null)
+  const [showContainerModal, setShowContainerModal] = useState(false)
+  const [containerAccounts, setContainerAccounts] = useState<Array<{ id: string; label: string }>>([
+    { id: 'default', label: 'Default' }
+  ])
+  // Synchronous mirror of tab -> container, so a tab can be activated in the same tick it is created
+  // (React state would still be one render behind, and main picks the partition at view creation).
+  const tabContainersRef = useRef<Record<string, string>>({})
+  const containersRef = useRef<ContainerInfo[]>([defaultContainerInfo()])
+
+  const loadContainers = useCallback(async () => {
+    try {
+      const list = (await window.electron?.containers?.list?.()) as ContainerInfo[] | undefined
+      if (Array.isArray(list) && list.length > 0) {
+        setContainers(list)
+        containersRef.current = list
+      }
+      const accounts = (await window.electron?.googleSignIn?.getAccounts?.()) as
+        | Array<{ id: string; label: string }>
+        | undefined
+      if (Array.isArray(accounts) && accounts.length > 0) setContainerAccounts(accounts)
+    } catch (err) {
+      console.warn('[containers] Failed to load containers:', err)
+    }
+  }, [])
+
+  useEffect(() => {
+    void loadContainers()
+  }, [loadContainers])
+
+  useEffect(() => {
+    if (!containerHint) return
+    const timer = window.setTimeout(() => setContainerHint(null), 4200)
+    return () => window.clearTimeout(timer)
+  }, [containerHint])
+
+  const activeContainerId = containerIdOf(tabs.find((t) => t.id === activeId))
+  const activeContainer = useMemo(
+    () => findContainer(containers, activeContainerId),
+    [containers, activeContainerId]
+  )
+  const activeContainerColor = containerColorOf(activeContainer)
+  const containerTabCounts = useMemo(() => tabCountsByContainer(tabs), [tabs])
+  const containerMarks = useMemo(() => {
+    const marks: Record<string, { color?: string; name: string; isDefault: boolean }> = {}
+    for (const tab of tabs) {
+      const container = findContainer(containers, containerIdOf(tab))
+      marks[tab.id] = {
+        color: containerColorOf(container),
+        name: container.name,
+        isDefault: containerIdOf(tab) === 'default'
+      }
+    }
+    return marks
+  }, [tabs, containers])
 
   const [showNewTab, setShowNewTab] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
@@ -751,6 +836,10 @@ Acknowledge these skills with a concise confirmation in this exact format:
   })
   useEffect(() => { pinnedIdsRef.current = pinnedIds }, [pinnedIds])
 
+  // The number printed on each tab is the digit that opens it: pinned first, then the rest. One
+  // map feeds the badges and the Ctrl+1…9 handler, so a badge cannot point at the wrong tab.
+  const tabNumbers = useMemo(() => tabNumberMap(tabs, pinnedIds), [tabs, pinnedIds])
+
   // Reconcile pinned tabs on mount. A one-time non-destructive migration merges legacy
   // localStorage with backend pinned.json; subsequent boots treat the backend as authoritative.
   useEffect(() => {
@@ -1111,17 +1200,24 @@ Acknowledge these skills with a concise confirmation in this exact format:
   }
 
   const containerRef = useRef<HTMLDivElement>(null)
+  // Read by containerBounds(), which is also called from observers: a ref keeps the geometry
+  // functions free of the render cycle.
+  const auraRingColorRef = useRef<string | undefined>(undefined)
 
   const containerBounds = () => {
     if (showBootSequence) return { x: 0, y: 0, width: 0, height: 0 }
     const rect = containerRef.current?.getBoundingClientRect()
     if (!rect || rect.width <= 0 || rect.height <= 0) return null
-    return {
+    const base = {
       x: Math.max(0, Math.round(rect.x)),
       y: Math.max(0, Math.round(rect.y)),
       width: Math.max(0, Math.round(rect.width)),
       height: Math.max(0, Math.round(rect.height))
     }
+    // A coloured container draws its aura in the space the native view leaves free.
+    if (!auraRingColorRef.current) return base
+    const inset = insetRectForAura(base, true)
+    return { x: inset.x, y: inset.y, width: inset.width, height: inset.height }
   }
 
   const switchToTab = useCallback(
@@ -1145,8 +1241,11 @@ Acknowledge these skills with a concise confirmation in this exact format:
       const bounds = containerBounds() || { x: 0, y: 0, width: 0, height: 0 }
       if (url) {
         const modelKey = tabs.find((t) => t.id === id)?.model
+        // The container decides the partition, and main fixes that when it creates the view. The
+        // ref, not state, because a container tab is opened and activated in the same tick.
+        const containerId = tabContainersRef.current[id] || containerIdOf(tabs.find((t) => t.id === id))
         // @ts-ignore
-        window.electron?.ipcRenderer.send('activate_tab', id, url, bounds, modelKey)
+        window.electron?.ipcRenderer.send('activate_tab', id, url, bounds, modelKey, containerId)
       }
       scheduleSnapshotCapture(id)
     },
@@ -1217,6 +1316,77 @@ Acknowledge these skills with a concise confirmation in this exact format:
     loadTabUrl(result.activeId, url)
   }
 
+  /**
+   * Opens a tab in a container. The container is recorded before activation so main creates the view
+   * on that container's partition — the one determined by view creation, not by a later switch.
+   */
+  const openContainerTab = useCallback(
+    (containerId: string) => {
+      const container = findContainer(containersRef.current, containerId)
+      const model = (resolvedActiveModelKey || 'gemini') as ModelKey
+      const url = getModelUrl(model)
+      const label = container.name && container.id !== 'default' ? container.name : modelLabel(model)
+      const created = createTab(model, label, url, undefined, container.id)
+      tabContainersRef.current[created.id] = container.id
+      setTabs((prev) => [...prev, created])
+      loadTabUrl(created.id, url)
+      setShowContainerMenu(false)
+    },
+    [resolvedActiveModelKey, loadTabUrl]
+  )
+
+  const saveContainer = useCallback(
+    async (input: { id?: string; name: string; color?: string | null; accountId: string }) => {
+      const result = (await window.electron?.containers?.save?.(input)) as
+        | { container?: ContainerInfo; error?: string }
+        | undefined
+      if (result?.error) return { error: result.error }
+      await loadContainers()
+      return {}
+    },
+    [loadContainers]
+  )
+
+  const deleteContainer = useCallback(
+    async (containerId: string) => {
+      const result = (await window.electron?.containers?.remove?.(containerId)) as
+        | { removed?: boolean; error?: string }
+        | undefined
+      if (result?.error) return { error: result.error }
+      // Tabs that lived there return to the default container. The store they were created with
+      // cannot move with them — Electron fixes a partition at view creation — so the tab is relabelled
+      // and keeps working, and its next navigation is what would move it.
+      setTabs((prev) =>
+        prev.map((tab) =>
+          tab.containerId === containerId ? { ...tab, containerId: undefined } : tab
+        )
+      )
+      for (const [tabId, id] of Object.entries(tabContainersRef.current)) {
+        if (id === containerId) delete tabContainersRef.current[tabId]
+      }
+      await loadContainers()
+      return {}
+    },
+    [loadContainers]
+  )
+
+  useEffect(() => {
+    openContainerTabRef.current = openContainerTab
+  }, [openContainerTab])
+
+  useEffect(() => {
+    // Main broadcasts after a save/delete so every window and every live view agrees.
+    // @ts-ignore
+    const unsub = window.electron?.ipcRenderer.on('containers-changed', (_event: any, list: ContainerInfo[]) => {
+      if (!Array.isArray(list) || list.length === 0) return
+      setContainers(list)
+      containersRef.current = list
+    })
+    return () => {
+      if (typeof unsub === 'function') unsub()
+    }
+  }, [])
+
   const handleDeployModel = (model: ModelKey) => {
     const url = getModelUrl(model)
     const existingProviderTab = tabs.find(
@@ -1243,28 +1413,68 @@ Acknowledge these skills with a concise confirmation in this exact format:
     }
   }
 
-  const anyOverlayOpen = Boolean(
-    showHistory ||
-    showTabOverview ||
-    showSettings ||
-    showNewTab ||
-    showExport ||
-    showUrlBar ||
-    showGuide ||
-    showSkillsPalette ||
-    showBaseSkillsModal ||
-    showSkillParamsModal ||
-    showSkillEditorModal ||
-    showCategoryManagerModal ||
-    showBootSequence ||
-    showDiagnosticsModal ||
-    showTabColors ||
-    Boolean(folderUploadData)
+  // One list decides both "is the workspace covered?" and "what does Escape close" — see
+  // lib/overlays.ts. The container switcher and its manager are overlays like any other: they overlap
+  // the native AI view, and a native view is always painted above the DOM, so being an overlay is
+  // what puts them in front instead of under a blank rectangle.
+  const overlayFlags = useMemo(
+    () => ({
+      showHistory,
+      showTabOverview,
+      showSettings,
+      showNewTab,
+      showExport,
+      showUrlBar,
+      showGuide,
+      showSkillsPalette,
+      showBaseSkillsModal,
+      showSkillParamsModal,
+      showSkillEditorModal,
+      showCategoryManagerModal,
+      showBootSequence,
+      showDiagnosticsModal,
+      showTabColors,
+      showContainerMenu,
+      showContainerModal,
+      showContainerManager,
+      folderUploadData: Boolean(folderUploadData)
+    }),
+    [
+      showHistory,
+      showTabOverview,
+      showSettings,
+      showNewTab,
+      showExport,
+      showUrlBar,
+      showGuide,
+      showSkillsPalette,
+      showBaseSkillsModal,
+      showSkillParamsModal,
+      showSkillEditorModal,
+      showCategoryManagerModal,
+      showBootSequence,
+      showDiagnosticsModal,
+      showTabColors,
+      showContainerMenu,
+      showContainerModal,
+      showContainerManager,
+      folderUploadData
+    ]
   )
+  const anyOverlayOpen = useMemo(() => isAnyOverlayOpen(overlayFlags), [overlayFlags])
   const anyOverlayOpenRef = useRef(anyOverlayOpen)
   anyOverlayOpenRef.current = anyOverlayOpen
+  const overlayFlagsRef = useRef(overlayFlags)
+  overlayFlagsRef.current = overlayFlags
 
   // Restore the native webview bounds + focus (used when an overlay closes via Escape)
+  useEffect(() => {
+    const changed = auraRingColorRef.current !== activeContainerColor
+    auraRingColorRef.current = activeContainerColor
+    // The view has to be inset by the ring's width, and only a new bounds message makes main move it.
+    if (changed) restoreViewBoundsRef.current?.()
+  }, [activeContainerColor])
+
   const restoreViewBounds = useCallback(() => {
     if (anyOverlayOpenRef.current) {
       return
@@ -1275,6 +1485,55 @@ Acknowledge these skills with a concise confirmation in this exact format:
       window.electron.ipcRenderer.send('resize_view', bounds)
     }
   }, [])
+
+  const restoreViewBoundsRef = useRef<(() => void) | null>(null)
+  useEffect(() => {
+    restoreViewBoundsRef.current = restoreViewBounds
+  }, [restoreViewBounds])
+
+  // Every overlay's setter, keyed by the same names as lib/overlays.ts. One map, so "close everything"
+  // is a loop over the panel list instead of a second list that can fall out of date.
+  const overlaySetters = useMemo<Record<OverlayKey, (open: boolean) => void>>(
+    () => ({
+      showHistory: setShowHistory,
+      showTabOverview: setShowTabOverview,
+      showSettings: setShowSettings,
+      showNewTab: setShowNewTab,
+      showExport: setShowExport,
+      showUrlBar: setShowUrlBar,
+      showGuide: setShowGuide,
+      showSkillsPalette: setShowSkillsPalette,
+      showBaseSkillsModal: setShowBaseSkillsModal,
+      showSkillParamsModal: setShowSkillParamsModal,
+      showSkillEditorModal: setShowSkillEditorModal,
+      showCategoryManagerModal: setShowCategoryManagerModal,
+      showBootSequence: setShowBootSequence,
+      showDiagnosticsModal: setShowDiagnosticsModal,
+      showTabColors: setShowTabColors,
+      showContainerMenu: setShowContainerMenu,
+      showContainerModal: setShowContainerModal,
+      showContainerManager: setShowContainerManager,
+      folderUploadData: (open: boolean) => {
+        if (!open) setFolderUploadData(null)
+      }
+    }),
+    []
+  )
+
+  /**
+   * Closes whatever is open and reports what it closed.
+   *
+   * Escape, the scrim, the close buttons and main's watchdog all end up here. It cannot forget a
+   * panel, because the panel list lives in lib/overlays.ts and is the same list that decides whether
+   * the native view is hidden — the two used to disagree, which is how a panel could be open with the
+   * AI view hidden behind it and nobody able to close it.
+   */
+  const closeAllOverlays = useCallback((): OverlayKey[] => {
+    const open = dismissibleOverlayKeys(overlayFlagsRef.current)
+    if (open.length > 0) console.log('[overlay] closing', open.join(', '))
+    for (const key of open) overlaySetters[key]?.(false)
+    return open
+  }, [overlaySetters])
 
   // The colour picker is an overlay like any other, and the native webview is a separate surface
   // painted *above* the DOM. Opening the dialog without hiding that surface puts the dialog behind
@@ -1425,6 +1684,13 @@ Acknowledge these skills with a concise confirmation in this exact format:
     [activeId, captureActiveSnapshot, refreshSkills, restoreViewBounds]
   )
 
+  // Tell main when the switcher itself is the open overlay: it is the one panel that Ctrl+. has to be
+  // able to close, while every other overlay keeps the key for its own shortcut recorder.
+  useEffect(() => {
+    // @ts-ignore -- the preload bridge is untyped here, as everywhere else in this file
+    window.electron?.ipcRenderer.send('set_container_menu_open', Boolean(showContainerMenu))
+  }, [showContainerMenu])
+
   // Overlay state → main. While any fullscreen overlay is open the main
   // process stops intercepting shortcuts so the overlay keeps its own keys
   // (arrows, Ctrl+J/K navigation, Ctrl+H/L cycling, Escape) working.
@@ -1454,6 +1720,7 @@ Acknowledge these skills with a concise confirmation in this exact format:
   }, [])
 
   const handleExecuteGlobalActionRef = useRef<((event: any, data: any) => void) | null>(null)
+  const openContainerTabRef = useRef<((containerId: string) => void) | null>(null)
 
   // Unified Global Shortcut Dispatcher: Receives direct IPC actions from main process
   // Bypasses DOM focus state, Chromium Views FocusManager bugs, and works 100% reliably everywhere.
@@ -1471,19 +1738,8 @@ Acknowledge these skills with a concise confirmation in this exact format:
         restoreViewBounds()
         return
       }
-      setShowHistory(false)
-      setShowTabOverview(false)
-      setShowSettings(false)
-      setShowNewTab(false)
-      setShowExport(false)
-      setShowUrlBar(false)
-      setShowGuide(false)
-      setShowSkillsPalette(false)
-      setShowBaseSkillsModal(false)
-      setShowSkillParamsModal(false)
-      setShowSkillEditorModal(false)
-      setShowCategoryManagerModal(false)
-      setFolderUploadData(null)
+      // Same list as Escape uses, so opening one panel can never leave another hidden behind it.
+      closeAllOverlays()
       open()
       hideNativeView()
     }
@@ -1493,29 +1749,45 @@ Acknowledge these skills with a concise confirmation in this exact format:
       const action = data.action
 
       switch (action) {
+        case 'open_container': {
+          // Main resolves the digit against the container store and sends the id, so the shortcut
+          // cannot depend on this window's copy of the list. The index is kept as a fallback for an
+          // older main process.
+          const fromMain = typeof data.containerId === 'string' ? data.containerId : null
+          const container = fromMain
+            ? findContainer(containersRef.current, fromMain)
+            : containerForShortcutIndex(containersRef.current, Number(data.index))
+          if (fromMain || data.containerId === undefined) {
+            if (container && (fromMain || container.id)) openContainerTabRef.current?.(container.id)
+            break
+          }
+          // containerId === null: there is no such container yet. Say it once, briefly, instead of
+          // leaving the keypress looking broken.
+          setContainerHint(
+            `No container ${data.index} yet — open the coloured button next to Search to make one.`
+          )
+          break
+        }
         case 'toggle_settings':
           openExclusive(() => setShowSettings(true), () => setShowSettings(false), showSettings)
           break
         case 'close_overlay': {
-          let closedAny = false
-          if (showSettings) { setShowSettings(false); closedAny = true }
-          if (showHistory) { setShowHistory(false); closedAny = true }
-          if (showTabOverview) { setShowTabOverview(false); closedAny = true }
-          if (showNewTab) { setShowNewTab(false); closedAny = true }
-          if (showExport) { setShowExport(false); closedAny = true }
-          if (showUrlBar) { setShowUrlBar(false); closedAny = true }
-          if (showGuide) { setShowGuide(false); closedAny = true }
-          if (showSkillsPalette) { setShowSkillsPalette(false); closedAny = true }
-          if (showBaseSkillsModal) { setShowBaseSkillsModal(false); closedAny = true }
-          if (showSkillParamsModal) { setShowSkillParamsModal(false); closedAny = true }
-          if (showSkillEditorModal) { setShowSkillEditorModal(false); closedAny = true }
-          if (showCategoryManagerModal) { setShowCategoryManagerModal(false); closedAny = true }
-          if (showDiagnosticsModal) { setShowDiagnosticsModal(false); closedAny = true }
-          if (showTabColors) { setShowTabColors(false); closedAny = true }
-          if (folderUploadData) { setFolderUploadData(null); closedAny = true }
-          if (closedAny) {
-            restoreViewBounds()
+          const closed = closeAllOverlays()
+          if (closed.length > 0) {
+            // anyOverlayOpenRef still reads true in this tick, so restore on the next frame.
+            requestAnimationFrame(() => restoreViewBounds())
           }
+          break
+        }
+        case 'force_close_overlays': {
+          // Main's watchdog: Escape did not lead to a `set_overlays_open false`, so the renderer's idea
+          // of what is open is not trusted any more. Close everything and name what it was.
+          console.warn(
+            '[overlay] force-closing after a stuck overlay:',
+            describeOverlays(overlayFlagsRef.current)
+          )
+          closeAllOverlays()
+          requestAnimationFrame(() => restoreViewBounds())
           break
         }
         case 'new_tab':
@@ -1630,28 +1902,46 @@ Acknowledge these skills with a concise confirmation in this exact format:
           break
         }
         case 'switch_tab_index': {
-          const { index, isPinned } = data
-          if (isPinned) {
-            const pinned = tabs.filter((t) => pinnedIds.includes(t.id))
-            const target = index === -1 ? pinned[pinned.length - 1] : pinned[index]
-            if (target?.url) {
-              setShowUrlBar(false)
-              setShowTabOverview(false)
-              setShowNewTab(false)
-              sfx.pop()
-              switchToTab(target.id, target.url)
-            }
-          } else {
-            const visualTabs = getOrderedVisualTabs(tabs, activeId, pinnedIds, tabStatuses, residentTabIds)
-            const target = index === -1 ? visualTabs[visualTabs.length - 1] : visualTabs[index]
-            if (target?.url) {
-              setShowUrlBar(false)
-              setShowTabOverview(false)
-              setShowNewTab(false)
-              sfx.pop()
-              switchToTab(target.id, target.url)
-            }
+          // One numbering for the whole window: pinned tabs take 1…n, the normal tabs continue from
+          // there, and the badge on a tab prints exactly this number. Alt+N keeps its old meaning
+          // (pinned tabs only) for muscle memory built on it.
+          const rawNumber =
+            typeof data.number === 'number' ? data.number : Number(data.index) + 1
+          if (!Number.isFinite(rawNumber) || rawNumber < 1) break
+          const pinnedOnly = Boolean(data.pinnedOnly ?? data.isPinned)
+          const target = pinnedOnly
+            ? pinnedTabForShortcutNumber(tabs, pinnedIds, rawNumber)
+            : tabForShortcutNumber(tabs, pinnedIds, rawNumber)
+          if (target?.url) {
+            setShowUrlBar(false)
+            setShowTabOverview(false)
+            setShowNewTab(false)
+            sfx.pop()
+            switchToTab(target.id, target.url)
+          } else if (!pinnedOnly) {
+            // Say it instead of doing nothing: a digit that lands on no tab used to look broken.
+            const reachable = shortcutTabCount(tabs, pinnedIds)
+            const lastNumber = Math.min(reachable, MAX_TAB_SHORTCUT_NUMBER)
+            setContainerHint(
+              reachable === 0
+                ? 'No tabs to jump to yet.'
+                : `No tab ${rawNumber} — you have ${reachable} numbered tab${reachable === 1 ? '' : 's'} (${shortcutLabelForTab(1)}–${lastNumber}).`
+            )
           }
+          break
+        }
+        case 'toggle_container_menu': {
+          // Ctrl+. — deliberately a toggle: the same key that opens the switcher closes it.
+          if (showContainerMenu) {
+            setShowContainerMenu(false)
+            restoreViewBounds()
+            break
+          }
+          openExclusive(
+            () => setShowContainerMenu(true),
+            () => setShowContainerMenu(false),
+            false
+          )
           break
         }
         case 'navigate_tab': {
@@ -1721,7 +2011,12 @@ Acknowledge these skills with a concise confirmation in this exact format:
 
     handleExecuteGlobalActionRef.current = handleExecuteGlobalAction
   }, [
+    closeAllOverlays,
+    restoreViewBounds,
     showSettings,
+    showContainerMenu,
+    showContainerModal,
+    showContainerManager,
     showHistory,
     showTabOverview,
     showNewTab,
@@ -1791,6 +2086,16 @@ Acknowledge these skills with a concise confirmation in this exact format:
     window.nexusState?.save('tabs', { tabs, activeId, mruTabIds, residentTabIds, discardedTabIds }).catch((err: Error) => {
       console.error('Failed to save tabs to disk:', err)
     })
+    // Main needs to know which container each tab belongs to before it creates that tab's view.
+    const map: Record<string, string> = {}
+    for (const tab of tabs) {
+      const containerId = containerIdOf(tab)
+      map[tab.id] = containerId
+      tabContainersRef.current[tab.id] = containerId
+    }
+    tabContainersRef.current = map
+    // @ts-ignore
+    window.electron?.ipcRenderer.send('set_tab_containers', map)
   }, [tabs, activeId, mruTabIds, residentTabIds, discardedTabIds, tabsHydrated])
 
   useEffect(() => {
@@ -1908,6 +2213,8 @@ Acknowledge these skills with a concise confirmation in this exact format:
           {/* Vertical Tabs Body */}
           {interfaceSettings.tabOrientation !== 'horizontal' ? (
             <VerticalTabs
+              containerMarks={containerMarks}
+              tabNumbers={tabNumbers}
               tabs={tabs}
               activeId={activeId}
               pinnedIds={pinnedIds}
@@ -2179,6 +2486,68 @@ Acknowledge these skills with a concise confirmation in this exact format:
                   <span className="text-[11px] font-semibold truncate">Base</span>
                 </button>
 
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowContainerMenu((open) => {
+                      if (open) {
+                        restoreViewBounds()
+                        return false
+                      }
+                      // One panel at a time, like every other tool button in this footer.
+                      setShowHistory(false)
+                      setShowTabOverview(false)
+                      setShowSettings(false)
+                      setShowNewTab(false)
+                      setShowExport(false)
+                      setShowUrlBar(false)
+                      setShowGuide(false)
+                      setShowSkillsPalette(false)
+                      setShowBaseSkillsModal(false)
+                      return true
+                    })
+                  }}
+                  onContextMenu={(event) => {
+                    // Right-click is the short path to the containers section, where they can be
+                    // added, edited and deleted — left-click stays the switcher.
+                    event.preventDefault()
+                    setShowContainerMenu(false)
+                    setShowContainerManager(true)
+                  }}
+                  title={`Containers — ${activeContainer.name} (Ctrl+. · right-click to manage)`}
+                  aria-label={`Containers, current: ${activeContainer.name}`}
+                  aria-expanded={showContainerMenu}
+                  className={`containers-btn px-2 py-1.5 rounded-lg flex items-center justify-center gap-1.5 cursor-pointer border ${
+                    showContainerMenu ? 'is-open' : ''
+                  } ${
+                    activeContainerColor ? 'is-tinted' : 'bg-(--surface2) hover:bg-(--border) text-(--text) border-white/10 hover:border-(--accent)/40'
+                  } ${sidebarCollapsed ? 'col-span-2' : ''}`}
+                  style={
+                    activeContainerColor
+                      ? ({ '--container-color': activeContainerColor } as CSSProperties)
+                      : undefined
+                  }
+                >
+                  <span
+                    className="containers-btn-swatch"
+                    style={{
+                      background: activeContainerColor ?? 'transparent',
+                      border: `1.5px solid ${activeContainerColor ?? 'currentColor'}`,
+                      boxShadow: activeContainerColor ? `0 0 9px ${activeContainerColor}99` : undefined
+                    }}
+                  />
+                  {!sidebarCollapsed && (
+                    <span className="text-[11px] font-semibold truncate">
+                      {activeContainer.name}
+                    </span>
+                  )}
+                  {!sidebarCollapsed && (
+                    <span className="containers-btn-digit">
+                      {containers.findIndex((c) => c.id === activeContainer.id) + 1 || 1}
+                    </span>
+                  )}
+                </button>
+
                 {/* Same picker as the title bar button: the colour belongs to the tab, and this
                     is where the other per-tab tools (upload, skills) live. */}
                 <TabColorButton
@@ -2349,6 +2718,8 @@ Acknowledge these skills with a concise confirmation in this exact format:
               <ChatTabs
                 tabs={tabs.filter((t) => !pinnedIds.includes(t.id))}
                 activeId={activeId}
+                tabNumbers={tabNumbers}
+                containerMarks={containerMarks}
                 modelColors={modelColors}
                 modelIcons={modelIcons}
                 onSelect={(id: string) => {
@@ -2526,6 +2897,16 @@ Acknowledge these skills with a concise confirmation in this exact format:
 
         {/* The Native Box Content Bounds: flush against bottom pinned dock */}
         <div className="flex-1 w-full h-full relative">
+          {activeContainerColor && (
+            <div
+              className="absolute inset-0 pointer-events-none nexus-container-aura"
+              style={{
+                boxShadow: `inset 0 0 0 1px ${activeContainerColor}59, inset 0 0 26px -8px ${activeContainerColor}73`,
+                transition: 'box-shadow 220ms ease'
+              }}
+              aria-hidden
+            />
+          )}
           <div className="absolute inset-0" ref={containerRef} />
         </div>
       </div>
@@ -2558,6 +2939,8 @@ Acknowledge these skills with a concise confirmation in this exact format:
           <div className="flex-1 min-w-0">
             {tabs.filter((t) => pinnedIds.includes(t.id)).length > 0 ? (
               <ChatTabs
+                containerMarks={containerMarks}
+                tabNumbers={tabNumbers}
                 tabs={tabs.filter((t) => pinnedIds.includes(t.id))}
                 activeId={activeId}
                 pinnedIds={pinnedIds}
@@ -2609,6 +2992,83 @@ Acknowledge these skills with a concise confirmation in this exact format:
         onNavigate={handleUrlBarNavigate}
         onExecuteCommand={handleUrlBarCommand}
       />
+
+      {containerHint && (
+        <div
+          className="fixed z-70 px-3 py-2 rounded-xl text-[11.5px] shadow-lg pointer-events-none"
+          style={{
+            left: 16,
+            bottom: 16,
+            background: 'var(--surface)',
+            border: '1px solid var(--border)',
+            color: 'var(--text)',
+            maxWidth: 320
+          }}
+          role="status"
+        >
+          {containerHint}
+        </div>
+      )}
+
+      {showContainerMenu && (
+        <ContainerMenu
+          containers={containers}
+          tabCounts={containerTabCounts}
+          activeContainerId={activeContainerId}
+          accounts={containerAccounts}
+          onOpenContainer={(containerId) => openContainerTab(containerId)}
+          onEditContainer={(containerId) => {
+            setEditingContainer(findContainer(containers, containerId))
+            setShowContainerModal(true)
+            setShowContainerMenu(false)
+          }}
+          onNewContainer={() => {
+            setEditingContainer(null)
+            setShowContainerModal(true)
+            setShowContainerMenu(false)
+          }}
+          onManageContainers={() => {
+            setShowContainerManager(true)
+            setShowContainerMenu(false)
+          }}
+          onClose={() => setShowContainerMenu(false)}
+        />
+      )}
+
+      {showContainerManager && (
+        <ContainerManager
+          containers={containers}
+          tabCounts={containerTabCounts}
+          activeContainerId={activeContainerId}
+          accounts={containerAccounts}
+          onAdd={() => {
+            setEditingContainer(null)
+            setShowContainerModal(true)
+            setShowContainerManager(false)
+          }}
+          onEdit={(containerId) => {
+            setEditingContainer(findContainer(containers, containerId))
+            setShowContainerModal(true)
+            setShowContainerManager(false)
+          }}
+          onDelete={(containerId) => deleteContainer(containerId)}
+          onClose={() => {
+            setShowContainerManager(false)
+            requestAnimationFrame(() => restoreViewBounds())
+          }}
+        />
+      )}
+
+      {showContainerModal && (
+        <ContainerModal
+          editing={editingContainer}
+          accounts={containerAccounts}
+          tabCount={editingContainer ? containerTabCounts[editingContainer.id] ?? 0 : 0}
+          onSave={saveContainer}
+          onDelete={deleteContainer}
+          onClose={() => setShowContainerModal(false)}
+        />
+      )}
 
       {showSettings && (
         <SettingsOverlay tabDiscardMinutes={tabDiscardMinutes} setTabDiscardMinutes={handleUpdateTabDiscardMinutes} maxActiveTabs={maxActiveTabs} setMaxActiveTabs={handleUpdateMaxActiveTabs}

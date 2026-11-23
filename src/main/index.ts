@@ -5,8 +5,8 @@ import {
   flushGoogleSessionStore
 } from './googleSessionPersistence'
 import {
-  isGoogleLoginRecoveryUrl,
-  recoverGoogleSessionFromLatestBrowser
+  recoverGoogleSessionFromLatestBrowser,
+  reloadGuard
 } from './googleSessionRecovery'
 import { spawn } from 'child_process'
 import { AutoUpdateService, type UpdateEngine } from './autoUpdateService'
@@ -112,12 +112,29 @@ import { skillsEngine, type SkillDef } from './skillsEngine'
 import {
   syncAllSessionsFromBrowsers,
   syncSessionFromProfile,
+  hasGoogleSessionInNexus,
   importCookiesFromJson,
   injectCookies,
   listProfiles,
   startGoogleSignIn,
   cancelGoogleSignIn
 } from './googleAuth'
+import {
+  closeInAppSignInWindow,
+  isInAppSignInWebContents,
+  openInAppSignInWindow
+} from './googleSignInWindow'
+import { NATIVE_ELECTRON_UA } from './electronIdentity'
+import { GoogleAccountStore } from './googleAccounts'
+import { ContainerStore, containerForShortcutDigit, containerPartition } from './containers'
+import { isThirdPartyAuthPage } from './loginWall'
+import {
+  armWatchdog,
+  createWatchdogState,
+  disarmWatchdog,
+  isWatchdogOverdue
+} from './overlayWatchdog'
+import { join as joinPath } from 'path'
 import { reloadProviderViews } from './providerViewReloader'
 import { readCookiesFromCustomDirectory } from './cookieImport'
 import {
@@ -780,8 +797,113 @@ function dismissInAppToast(immediate = false) {
 }
 // Match the actual OS and bundled Chromium version; do not impersonate Linux on Windows.
 // Strip Electron/product tokens by constructing a regular Chrome-compatible UA.
+// The unmodified string is kept too: Google's sign-in refuses a Chromium claiming to be plain Chrome
+// and accepts Electron's own identity, so the sign-in window presents NATIVE_ELECTRON_UA instead.
 const AI_UA = chromeCompatibleUserAgent(process.platform, process.arch, process.versions.chrome)
 app.userAgentFallback = AI_UA
+
+/**
+ * Everything the AI partition needs to behave: telemetry blocked, the Chrome-shaped user agent (with
+ * the sign-in window's own identity left alone), framing headers stripped, Google sessions kept alive.
+ *
+ * It used to be written out for `persist:ai-shared` once. Containers each load on their account's own
+ * partition, so this has to be installable per partition — and installable exactly once, because
+ * `onBeforeSendHeaders` replaces the previous listener rather than adding to it.
+ */
+/**
+ * Which partition a webContents lives in. Electron has no reverse lookup, and a popup has to inherit
+ * its opener's session or the cookies it sets never reach the tab.
+ */
+const webContentsPartitions = new Map<number, string>()
+
+/** Main-frame navigations per tab, used only to report a loop that survives every guard. */
+const navigationCounters = new Map<string, { count: number; since: number }>()
+
+function partitionOfOpener(contents: Electron.WebContents | undefined | null): string {
+  if (!contents) return 'persist:ai-shared'
+  const opener = (contents as unknown as { opener?: Electron.WebContents | null }).opener
+  const openerId = opener?.id
+  if (typeof openerId === 'number') {
+    const known = webContentsPartitions.get(openerId)
+    if (known) return known
+  }
+  const own = webContentsPartitions.get(contents.id)
+  return own ?? 'persist:ai-shared'
+}
+
+const aiPolicyInstalled = new Set<string>()
+function installAiSessionPolicy(partition: string): void {
+  if (aiPolicyInstalled.has(partition)) return
+  aiPolicyInstalled.add(partition)
+  // Each step is guarded on its own: a container partition is created lazily, in the middle of a tab
+  // being opened, and one API refusing must not leave the user with a tab and no view.
+  try {
+    installAiSessionPolicySteps(partition)
+  } catch (err) {
+    console.error('[containers] Session policy failed for partition', partition, err)
+  }
+}
+
+function installAiSessionPolicySteps(partition: string): void {
+  const ses = session.fromPartition(partition)
+
+  // Task B3: Network Telemetry Blocker
+  ses.webRequest.onBeforeRequest(
+    {
+      urls: [
+        '*://sentry.io/*',
+        '*://*.sentry.io/*',
+        '*://google-analytics.com/*',
+        '*://*.google-analytics.com/*',
+        '*://posthog.com/*',
+        '*://*.posthog.com/*'
+      ]
+    },
+    (_details, callback) => {
+      callback({ cancel: true })
+    }
+  )
+
+  ses.webRequest.onBeforeSendHeaders((details, callback) => {
+    const requestHeaders = { ...details.requestHeaders }
+    // The sign-in window shares the default partition but not this identity: it has to keep the
+    // Electron user agent it presents to the page, or the header contradicts navigator.userAgent and
+    // Google refuses the sign-in.
+    const fromSignInWindow = isInAppSignInWebContents(
+      (details as unknown as { webContentsId?: number }).webContentsId
+    )
+    const userAgent = fromSignInWindow ? NATIVE_ELECTRON_UA : AI_UA
+
+    for (const key of Object.keys(requestHeaders)) {
+      if (key.toLowerCase() === 'user-agent') {
+        requestHeaders[key] = userAgent
+      }
+    }
+
+    callback({ requestHeaders })
+  })
+
+  ses.webRequest.onHeadersReceived((details, callback) => {
+    const responseHeaders = { ...details.responseHeaders }
+    const headersToRemove = [
+      'x-frame-options',
+      'X-Frame-Options',
+      'content-security-policy',
+      'Content-Security-Policy',
+      'cross-origin-opener-policy',
+      'Cross-Origin-Opener-Policy',
+      'cross-origin-embedder-policy',
+      'Cross-Origin-Embedder-Policy'
+    ]
+    for (const header of headersToRemove) {
+      if (responseHeaders[header]) delete responseHeaders[header]
+    }
+    callback({ cancel: false, responseHeaders })
+  })
+
+  installGoogleSessionPersistence(ses)
+  registerDownloadHandler(ses)
+}
 
 // Preserve the existing site-isolation policy; let V8 select its normal heap limit.
 app.commandLine.appendSwitch('disable-site-isolation-trials')
@@ -2653,7 +2775,10 @@ const DEFAULT_ACTION_KEYS: Record<string, string[]> = {
   'model-next': ['Ctrl', ']'],
   'model-prev': ['Ctrl', '['],
   'guide-open': ['F1'],
-  'stop-generation': ['Ctrl', '.'],
+  // Stop generation moved to Ctrl+Shift+dot when the container switcher took Ctrl+dot. The renderer
+  // pushes its own keymap from Settings, so this table is only the fallback before that arrives.
+  'stop-generation': ['Ctrl', 'Shift', '.'],
+  'containers-picker': ['Ctrl', '.'],
   'site-new-chat': ['Ctrl', 'Shift', 'N'],
   'tab-prev': ['Ctrl', 'K'],
   'tab-next': ['Ctrl', 'J'],
@@ -2664,6 +2789,56 @@ const DEFAULT_ACTION_KEYS: Record<string, string[]> = {
 
 let customKeymap: Record<string, string[]> = {}
 let overlaysOpen = false
+/**
+ * Whether the *container switcher* is the overlay that is open. Tracked separately because the
+ * switcher is the one overlay that has to be closable with the same key that opened it.
+ */
+let containerMenuOpen = false
+
+// See overlayWatchdog.ts: Escape is a request, and a request can land nowhere.
+let overlayWatchdog = createWatchdogState()
+let overlayWatchdogTimer: NodeJS.Timeout | null = null
+// How many consecutive "real bounds" messages arrived while main believed an overlay was open. Two is
+// already a contradiction: the renderer's own bounds sender refuses to fire during an overlay.
+let boundsWhileOverlay = 0
+
+/**
+ * Ask the renderer to close everything, and give it OVERLAY_CLOSE_GRACE_MS to confirm. If it does not,
+ * stop trusting its answer: clear the flags, tell it to force-close, and put the workspace back.
+ */
+function requestOverlayClose(reason: string): void {
+  sendToMainWindow('execute-global-action', { action: 'close_overlay' })
+  if (!overlaysOpen) return
+  overlayWatchdog = armWatchdog(overlayWatchdog, Date.now())
+  if (overlayWatchdogTimer) return
+  overlayWatchdogTimer = setTimeout(() => {
+    overlayWatchdogTimer = null
+    if (!isWatchdogOverdue(overlayWatchdog, Date.now()) || !overlaysOpen) {
+      overlayWatchdog = disarmWatchdog()
+      return
+    }
+    console.warn(
+      `[overlay] still open ${900}ms after ${reason} — forcing it closed and restoring the view`
+    )
+    overlayWatchdog = disarmWatchdog()
+    overlaysOpen = false
+    containerMenuOpen = false
+    sendToMainWindow('execute-global-action', { action: 'force_close_overlays' })
+    restoreWorkspaceAfterOverlay()
+  }, 900)
+}
+
+/** Put the native view back and give the keyboard to the shell-or-view that should have it. */
+function restoreWorkspaceAfterOverlay(): void {
+  reconcileViewPresentation()
+  const view = activeViewId ? aiViews.get(activeViewId) : null
+  if (view && !view.webContents.isDestroyed() && activeViewVisible && !overlaysOpen) {
+    view.webContents.focus()
+    focusPromptInView(view)
+  } else if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents) {
+    mainWindow.webContents.focus()
+  }
+}
 
 /**
  * Idempotent reconciliation of native view presentation state.
@@ -2765,11 +2940,27 @@ function loadCustomKeymap(): void {
   } catch {}
 }
 
+// The renderer says which overlay is up, so Ctrl+dot can close the switcher without stealing the key
+// from every other panel (Settings needs it to record the shortcut).
+ipcMain.on('set_container_menu_open', (_event, open: boolean) => {
+  containerMenuOpen = Boolean(open)
+})
+
 ipcMain.on('set_overlays_open', (_event, open: boolean) => {
   const next = Boolean(open)
   if (overlaysOpen === next) return
   overlaysOpen = next
   restartActiveArenaTitleSync()
+
+  if (!overlaysOpen) {
+    // The renderer confirmed it: the Escape deadline no longer applies.
+    overlayWatchdog = disarmWatchdog()
+    if (overlayWatchdogTimer) {
+      clearTimeout(overlayWatchdogTimer)
+      overlayWatchdogTimer = null
+    }
+    boundsWhileOverlay = 0
+  }
 
   if (overlaysOpen) {
     if (typeof dismissInAppToast === 'function') dismissInAppToast()
@@ -2784,8 +2975,18 @@ ipcMain.on('set_overlays_open', (_event, open: boolean) => {
         }
       } catch {}
     }
+    // The overlay owns the keyboard, so the shell has to own it too. Leaving it in a hidden native
+    // view is how Escape stops reaching anything at all.
+    try {
+      if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
+        mainWindow.focus()
+        mainWindow.webContents.focus()
+      }
+    } catch {}
+    console.log('[overlay] open — the shell has the keyboard, the AI view is hidden')
   } else {
-    reconcileViewPresentation()
+    console.log('[overlay] closed — restoring the workspace')
+    restoreWorkspaceAfterOverlay()
   }
 })
 
@@ -2881,8 +3082,25 @@ export function routeGlobalShortcut(
   // Escape always also reaches the renderer (non-consuming) so overlays can
   // run their own cancel logic; close_overlay is idempotent.
   if (keyLower === 'escape' || code === 'Escape') {
-    sendToMainWindow('execute-global-action', { action: 'close_overlay' })
+    // Still non-consuming, so an overlay can run its own cancel logic; but now the close is also a
+    // request with a deadline (see overlayWatchdog.ts), because a request that lands nowhere used to
+    // leave the window unreachable by any shortcut.
+    requestOverlayClose('Escape')
     return false
+  }
+
+  // Ctrl+dot -> the container / profile switcher, and the same key closes it again.
+  // Handled *before* the overlay guard on purpose: the switcher is itself an overlay, so the guard
+  // would swallow the key that is supposed to shut it.
+  if (matchesAction(input, 'containers-picker')) {
+    // Another overlay keeps the keyboard, so Ctrl+dot can still be *recorded* as a shortcut in
+    // Settings instead of opening the switcher underneath it. The switcher itself is the exception.
+    if (overlaysOpen && !containerMenuOpen) return false
+    event.preventDefault()
+    if (!input.isAutoRepeat) {
+      sendToMainWindow('execute-global-action', { action: 'toggle_container_menu' })
+    }
+    return true
   }
 
   // While a fullscreen overlay is open the renderer owns the keyboard.
@@ -2932,6 +3150,33 @@ export function routeGlobalShortcut(
           .catch((err) => {
             console.error('[prompt-nav] execution failed', modelKey, dir, err)
           })
+      }
+      return true
+    }
+  }
+
+  // Ctrl+Alt+1..9 -> open that container; Ctrl+Alt+0 -> the default one.
+  // AltGr on some layouts arrives as ctrl+alt; the digit check keeps this to deliberate presses.
+  // The container is resolved *here*, from the store, so the shortcut does not depend on the
+  // renderer's idea of the list — and a digit with no container is reported instead of doing nothing
+  // silently, which is what made the higher digits look broken.
+  if (isCtrlOrMeta && input.alt && !input.shift) {
+    const digit = /^\d$/.test(keyLower) ? keyLower : code.startsWith('Digit') ? code.slice(5) : ''
+    if (digit) {
+      event.preventDefault()
+      if (!input.isAutoRepeat) {
+        const containers = containerStore.list()
+        const container = containerForShortcutDigit(containers, digit)
+        console.log(
+          `[containers] Ctrl+Alt+${digit} -> ${container ? container.id : 'none'} of ${containers.length}`
+        )
+        sendToMainWindow('execute-global-action', {
+          action: 'open_container',
+          // Container 1 is the default one, so the numbering matches the list the user sees.
+          index: digit === '0' ? 1 : Number(digit),
+          containerId: container?.id ?? null,
+          total: containers.length
+        })
       }
       return true
     }
@@ -3085,7 +3330,7 @@ export function routeGlobalShortcut(
     return true
   }
 
-  // Digits 1..9: Ctrl+1..9 (regular/visual tab) or Alt+1..9 (pinned tab)
+  // Digits 1..9: Ctrl+1..9 (the tab numbered N, pinned tabs first) or Alt+1..9 (pinned only)
   const digitCodeMatch = code ? code.match(/^(?:Digit|Numpad)([1-9])$/) : null
   const digitKeyMatch = keyLower.match(/^[1-9]$/)
   const digitNum = digitCodeMatch
@@ -3095,21 +3340,22 @@ export function routeGlobalShortcut(
       : null
 
   if (digitNum !== null && !input.shift) {
-    const targetIndex = digitNum === 9 ? -1 : digitNum - 1
+    // The renderer owns the numbering (pinned tabs first, then the rest) so the digit it acts on is
+    // always the number printed on the tab. Main only forwards the digit; it is not a tab list.
     if (isCtrlOrMeta && !input.alt) {
       event.preventDefault()
       sendToMainWindow('execute-global-action', {
         action: 'switch_tab_index',
-        index: targetIndex,
-        isPinned: false
+        number: digitNum,
+        pinnedOnly: false
       })
       return true
     } else if (input.alt && !isCtrlOrMeta) {
       event.preventDefault()
       sendToMainWindow('execute-global-action', {
         action: 'switch_tab_index',
-        index: targetIndex,
-        isPinned: true
+        number: digitNum,
+        pinnedOnly: true
       })
       return true
     }
@@ -3496,13 +3742,17 @@ app.whenReady().then(() => {
   app.on('browser-window-created', (_, window) => {
     optimizer.watchWindowShortcuts(window)
     window.webContents.setWindowOpenHandler(() => {
+      // A popup opened from a container tab has to stay in that container's cookie store. Hard-coding
+      // the default partition here meant a Google login popup in container "2016" landed in the shared
+      // store — signing the wrong account in.
+      const partition = partitionOfOpener(window.webContents)
       return {
         action: 'allow',
         overrideBrowserWindowOptions: {
           parent: window,
           autoHideMenuBar: true,
           webPreferences: {
-            partition: 'persist:ai-shared',
+            partition,
             nodeIntegration: false,
             contextIsolation: true
           }
@@ -3511,58 +3761,9 @@ app.whenReady().then(() => {
     })
   })
 
-  // Task B3: Network Telemetry Blocker
-  session.fromPartition('persist:ai-shared').webRequest.onBeforeRequest(
-    {
-      urls: [
-        '*://sentry.io/*',
-        '*://*.sentry.io/*',
-        '*://google-analytics.com/*',
-        '*://*.google-analytics.com/*',
-        '*://posthog.com/*',
-        '*://*.posthog.com/*'
-      ]
-    },
-    (_details, callback) => {
-      callback({ cancel: true })
-    }
-  )
+  installAiSessionPolicy('persist:ai-shared')
 
-  session.fromPartition('persist:ai-shared').webRequest.onBeforeSendHeaders((details, callback) => {
-    const requestHeaders = { ...details.requestHeaders }
-
-    for (const key of Object.keys(requestHeaders)) {
-      if (key.toLowerCase() === 'user-agent') {
-        requestHeaders[key] = AI_UA
-      }
-    }
-
-    callback({ requestHeaders })
-  })
-
-  session.fromPartition('persist:ai-shared').webRequest.onHeadersReceived((details, callback) => {
-    const responseHeaders = { ...details.responseHeaders }
-    const headersToRemove = [
-      'x-frame-options',
-      'X-Frame-Options',
-      'content-security-policy',
-      'Content-Security-Policy',
-      'cross-origin-opener-policy',
-      'Cross-Origin-Opener-Policy',
-      'cross-origin-embedder-policy',
-      'Cross-Origin-Embedder-Policy'
-    ]
-
-    for (const header of headersToRemove) {
-      if (responseHeaders[header]) delete responseHeaders[header]
-    }
-
-    callback({ cancel: false, responseHeaders })
-  })
-
-  // Register intelligent download manager routing
-  installGoogleSessionPersistence(session.fromPartition('persist:ai-shared'))
-  registerDownloadHandler(session.fromPartition('persist:ai-shared'))
+  // Register intelligent download manager routing for the app's own windows
   registerDownloadHandler(session.defaultSession)
 
   // Intercept and cancel WebAuthn/Passkey prompts in webviews so that authentication flows
@@ -4057,7 +4258,7 @@ function shouldIgnoreProviderTitle(
   return isDefault || genericNoise
 }
 
-function ensureAiView(tabId: string): Electron.WebContentsView {
+function ensureAiView(tabId: string, containerId?: unknown): Electron.WebContentsView {
   let view = aiViews.get(tabId)
   if (view) {
     let isDestroyed = false
@@ -4095,15 +4296,22 @@ function ensureAiView(tabId: string): Electron.WebContentsView {
     console.warn('[lifecycle] Recreating destroyed view:', tabId)
   }
 
+  // The partition is decided once, at creation: a container's tabs must never end up sharing a
+  // cookie store with another container's, and Electron cannot move a live view between partitions.
+  if (containerId !== undefined) rememberTabContainer(tabId, containerId)
+  const partition = partitionForTab(tabId)
+  installAiSessionPolicy(partition)
+
   view = new WebContentsView({
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
-      partition: 'persist:ai-shared',
+      partition,
       backgroundThrottling: true
     }
   })
   view.webContents.setMaxListeners(50)
+  webContentsPartitions.set(view.webContents.id, partition)
 
   view.webContents.userAgent = AI_UA
   view.webContents.setZoomFactor(currentWebviewZoom)
@@ -4139,17 +4347,43 @@ function ensureAiView(tabId: string): Electron.WebContentsView {
   })
 
   view.webContents.on('render-process-gone', (_e, details) => {
-    if (tabId === activeViewId) {
-      console.log(
-        `[Lifecycle] Active tab ${tabId} discarded by OS (${details.reason}). Auto-reloading...`
-      )
-      try {
-        view.webContents.reload()
-      } catch (err) {
-        console.error('[Lifecycle] Failed to auto-reload:', err)
-      }
+    console.warn(`[Lifecycle] Tab ${tabId} renderer gone (${details.reason}); reloading it.`)
+    try {
+      view.webContents.reload()
+    } catch (err) {
+      console.error('[Lifecycle] Failed to auto-reload:', err)
     }
   })
+
+  /**
+   * A main-frame load that fails used to leave the view on whatever it had — usually nothing — until
+   * the tab was closed and reopened. Retry once, within the same reload budget, and say why in the
+   * console so a recurring failure is identifiable instead of looking like a random blank page.
+   */
+  view.webContents.on(
+    'did-fail-load',
+    (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+      if (!isMainFrame) return
+      // ERR_ABORTED is a navigation we replaced on purpose (a redirect or a second load), not a failure.
+      if (errorCode === -3) return
+      console.warn(`[view] ${tabId} load failed: ${errorCode} ${errorDescription} — ${validatedURL}`)
+      if (!validatedURL || !/^https?:/i.test(validatedURL)) return
+      const key = `retry:${validatedURL}`
+      const decision = reloadGuard.shouldReload(tabId, key)
+      if (!decision.allow) {
+        console.warn(`[view] ${tabId} not retrying: ${decision.reason}`)
+        return
+      }
+      reloadGuard.record(tabId, key)
+      setTimeout(() => {
+        if (view.webContents.isDestroyed()) return
+        console.log(`[view] ${tabId} retrying load once — ${validatedURL}`)
+        view.webContents.loadURL(validatedURL).catch((err) => {
+          console.warn(`[view] ${tabId} retry failed:`, err?.message ?? err)
+        })
+      }, 700)
+    }
+  )
 
   // Catch newly created popup windows (like OAuth or target="_blank" links)
   view.webContents.on('did-create-window', (popupWindow) => {
@@ -4253,6 +4487,9 @@ function ensureAiView(tabId: string): Electron.WebContentsView {
 
   // Allow OAuth popup windows to open with window.opener in the shared AI partition
   view.webContents.setWindowOpenHandler((_details) => {
+    // The popup belongs to the same session as the view that opened it. Hard-coding the shared
+    // partition here meant an OAuth popup in a container wrote its cookies into another account's
+    // store: the tab never saw the session and the sign-in looked like it did nothing.
     return {
       action: 'allow',
       overrideBrowserWindowOptions: {
@@ -4262,7 +4499,7 @@ function ensureAiView(tabId: string): Electron.WebContentsView {
         height: 680,
         center: true,
         webPreferences: {
-          partition: 'persist:ai-shared',
+          partition,
           nodeIntegration: false,
           contextIsolation: true
         }
@@ -4314,11 +4551,14 @@ function ensureAiView(tabId: string): Electron.WebContentsView {
     )
     const modelKey =
       viewModelKeys.get(tabId) || resolveModelKey(tabId, view.webContents.getURL()) || ''
+    // applyWebviewTheme itself clears our stylesheet on an auth page; the rest is provider automation.
     applyWebviewTheme(view, modelKey)
-    injectVirtualizationCss(view, modelKey)
-    applyProviderMotionMode(view, modelKey)
-    executeCustomInitScript(view, modelKey)
-    injectAiStatusObserver(view, modelKey, providerConfig, tabViewGenerations.get(tabId) ?? 1)
+    if (!isThirdPartyAuthPage(view.webContents.getURL())) {
+      injectVirtualizationCss(view, modelKey)
+      applyProviderMotionMode(view, modelKey)
+      executeCustomInitScript(view, modelKey)
+      injectAiStatusObserver(view, modelKey, providerConfig, tabViewGenerations.get(tabId) ?? 1)
+    }
   })
 
   view.webContents.on('did-finish-load', () => {
@@ -4329,23 +4569,50 @@ function ensureAiView(tabId: string): Electron.WebContentsView {
       focusPromptInView(view, modelKey)
     }
 
-    const script = buildWebviewRuntimeJs(modelKey)
-    view.webContents.executeJavaScript(script).catch((err) => console.error(err))
-    injectAiStatusObserver(view, modelKey, providerConfig, tabViewGenerations.get(tabId) ?? 1)
+    // Provider runtime automation (composer focus, send helpers, status hooks) has no business on an
+    // identity provider's page: it cannot match anything there, and its observers only add noise.
+    if (!isThirdPartyAuthPage(view.webContents.getURL())) {
+      const script = buildWebviewRuntimeJs(modelKey)
+      view.webContents.executeJavaScript(script).catch((err) => console.error(err))
+      injectAiStatusObserver(view, modelKey, providerConfig, tabViewGenerations.get(tabId) ?? 1)
+    }
   })
 
   view.webContents.on('did-navigate', (_event, url) => {
+    // Evidence, not behaviour: if a tab is being navigated by something we have not found yet, this
+    // says so once, with the URL, instead of leaving a page that appears to refresh forever.
+    const now = Date.now()
+    const entry = navigationCounters.get(tabId)
+    if (!entry || now - entry.since > 60_000) {
+      navigationCounters.set(tabId, { count: 1, since: now })
+    } else {
+      entry.count += 1
+      if (entry.count === 6) {
+        console.warn(
+          `[nav] tab ${tabId} navigated ${entry.count} times in under a minute — something is reloading it (${url})`
+        )
+      }
+    }
     const nextGen = bumpTabViewGeneration(tabId)
     setTabAiLifecycle(tabId, 'unknown', { viewGeneration: nextGen, skipTimer: true })
     viewCssState.delete(view.webContents)
     resolveModelKey(tabId, url)
     sendToMainWindow('ai-url-updated', tabId, url)
-    if (isGoogleLoginRecoveryUrl(url)) void recoverGoogleSessionFromLatestBrowser(tabId, view)
+    // `url` and the tab's own account: a container recovers only for its own store, and a tab that is
+    // *on* Google's sign-in page is left alone entirely (that is where the user signs in).
+    void recoverGoogleSessionFromLatestBrowser(
+      tabId,
+      view,
+      url,
+      containerForTab(tabId)?.accountId ?? 'default'
+    )
   })
   view.webContents.on('did-navigate-in-page', (_event, url) => {
     sendToMainWindow('ai-url-updated', tabId, url)
     const modelKey = viewModelKeys.get(tabId) || resolveModelKey(tabId, url) || ''
-    injectAiStatusObserver(view, modelKey, providerConfig, tabViewGenerations.get(tabId) ?? 1)
+    if (!isThirdPartyAuthPage(url)) {
+      injectAiStatusObserver(view, modelKey, providerConfig, tabViewGenerations.get(tabId) ?? 1)
+    }
   })
   view.webContents.on('did-start-loading', () => {
     sendToMainWindow('ai-loading', tabId, true)
@@ -4421,7 +4688,8 @@ function ensureAiView(tabId: string): Electron.WebContentsView {
   return view
 }
 
-ipcMain.on('navigate_to_url', async (_event, tabId, url, bounds, modelKey) => {
+ipcMain.on('navigate_to_url', async (_event, tabId, url, bounds, modelKey, containerId) => {
+  rememberTabContainer(tabId, containerId)
   await tabDiscardManager.waitForClose(tabId)
   wakeTokens.set(tabId, (wakeTokens.get(tabId) || 0) + 1)
   activeWakeOperations.delete(tabId)
@@ -4438,7 +4706,7 @@ ipcMain.on('navigate_to_url', async (_event, tabId, url, bounds, modelKey) => {
     }
   }
 
-  const view = ensureAiView(tabId)
+  const view = ensureAiView(tabId, containerId)
   applyWebviewTheme(view, viewModelKeys.get(tabId))
   view.setBounds(bounds)
   if (bounds.width > 0) lastRealBounds.set(tabId, bounds)
@@ -4747,6 +5015,7 @@ function updateWebviewTitlePoller(view: Electron.WebContentsView, modelKey: stri
 // Explicit opt-in; a sequence prevents stale async changes from restoring an older setting.
 let providerMotionSequence = 0
 function applyProviderMotionMode(view: Electron.WebContentsView, modelKey: string): void {
+  if (isThirdPartyAuthPage(view.webContents.getURL())) return
   if (view.webContents.isDestroyed()) return
   const feats = getMergedProviderFeatures(modelKey, providerConfig[modelKey])
   const script = buildProviderMotionScript(
@@ -4759,6 +5028,7 @@ function applyProviderMotionMode(view: Electron.WebContentsView, modelKey: strin
 }
 
 function injectVirtualizationCss(view: Electron.WebContentsView, modelKey: string): void {
+  if (isThirdPartyAuthPage(view.webContents.getURL())) return
   if (view.webContents.isDestroyed()) return
   const feats = getMergedProviderFeatures(modelKey, providerConfig[modelKey])
   const sel = feats.virtualizationSelector
@@ -4777,6 +5047,7 @@ function injectVirtualizationCss(view: Electron.WebContentsView, modelKey: strin
 }
 
 function executeCustomInitScript(view: Electron.WebContentsView, modelKey: string): void {
+  if (isThirdPartyAuthPage(view.webContents.getURL())) return
   if (view.webContents.isDestroyed()) return
   const feats = getMergedProviderFeatures(modelKey, providerConfig[modelKey])
   const script = feats.customInitScript
@@ -5248,14 +5519,20 @@ function getOverridesForTab(
   tabId: string | undefined
 ): ProviderOverrides | undefined {
   const baseOverrides = getOverridesForModel(modelKey, url)
+  // A container's colour is the aura's default, so every tab in it is recognisable at a glance.
+  // A tab's own aura colour still wins: someone who picked a colour for one chat meant it.
+  const containerColor = tabId ? containerForTab(tabId)?.color : undefined
   const tabColors = tabId ? viewTabColors.get(tabId) : undefined
-  if (!tabColors || (!tabColors.accentColor && !tabColors.auraColor)) return baseOverrides
+  if (!containerColor && (!tabColors || (!tabColors.accentColor && !tabColors.auraColor))) {
+    return baseOverrides
+  }
   const merged: ProviderOverrides = { ...(baseOverrides ?? {}) }
-  if (tabColors.accentColor) {
+  if (containerColor) merged.ambientAuraColor = containerColor
+  if (tabColors?.accentColor) {
     merged.accentColor = tabColors.accentColor
     if (!tabColors.auraColor) merged.ambientAuraColor = tabColors.accentColor
   }
-  if (tabColors.auraColor) merged.ambientAuraColor = tabColors.auraColor
+  if (tabColors?.auraColor) merged.ambientAuraColor = tabColors.auraColor
   return merged
 }
 
@@ -5400,6 +5677,20 @@ function computeThemeCss(view, modelKey?: string): string {
 function applyWebviewTheme(view, modelKey?: string) {
   const wc = view.webContents
   const url = wc.getURL()
+  if (isThirdPartyAuthPage(url)) {
+    // A sign-in page keeps its own appearance. Our stylesheet carries the drifting ambient aura and
+    // the provider's colour overrides; over Google's account chooser that is a page that appears to
+    // keep refreshing. Strip ours and leave the provider's page exactly as it shipped.
+    const state = viewCssState.get(wc)
+    if (state?.key) {
+      viewCssState.delete(wc)
+      void wc.removeInsertedCSS(state.key).catch(() => {})
+      console.log('[theme] removed Nexus stylesheet on an auth page:', url)
+    }
+    // Google's own surface greys, so the first paint is not a dark rectangle flashing white.
+    view.setBackgroundColor(nativeTheme.shouldUseDarkColors ? '#202124' : '#ffffff')
+    return
+  }
   const resolvedKey = modelKey || resolveModelKey('', url)
   const overrides = getOverridesForTab(resolvedKey, url, tabIdForWebContents(wc))
   const css = computeThemeCss(view, resolvedKey)
@@ -5989,8 +6280,11 @@ interface ActiveWakeOperation {
 }
 const activeWakeOperations = new Map<string, ActiveWakeOperation>()
 
-ipcMain.on('activate_tab', async (_event, tabId, url, bounds, modelKey) => {
+ipcMain.on('activate_tab', async (_event, tabId, url, bounds, modelKey, containerId) => {
   const revision = ++activationRevision
+  // Recorded before the view is ensured: the partition is fixed at creation, and a container tab
+  // must never be born on another container's cookie store.
+  rememberTabContainer(tabId, containerId)
   await tabDiscardManager.waitForClose(tabId)
   if (revision !== activationRevision) return
   if (currentUiZoom !== 1.0 && bounds) {
@@ -6005,7 +6299,7 @@ ipcMain.on('activate_tab', async (_event, tabId, url, bounds, modelKey) => {
   // 1. Ensure view exists safely; if creation fails, leave evicted state intact so user can retry
   let view: Electron.WebContentsView
   try {
-    view = ensureAiView(tabId)
+    view = ensureAiView(tabId, containerId)
   } catch (err) {
     console.error(`[activate_tab] Failed to create or ensure view for ${tabId}:`, err)
     return
@@ -6233,12 +6527,13 @@ ipcMain.on('activate_tab', async (_event, tabId, url, bounds, modelKey) => {
   }
 })
 
-ipcMain.on('navigate_tab', async (_event, tabId: string, url: string, modelKey?: string) => {
+ipcMain.on('navigate_tab', async (_event, tabId: string, url: string, modelKey?: string, containerId?: string) => {
+  rememberTabContainer(tabId, containerId)
   await tabDiscardManager.waitForClose(tabId)
   wakeTokens.set(tabId, (wakeTokens.get(tabId) || 0) + 1)
   activeWakeOperations.delete(tabId)
   tabDiscardManager.onExplicitNavigation(tabId)
-  const view = ensureAiView(tabId)
+  const view = ensureAiView(tabId, containerId)
   resolveModelKey(tabId, url, modelKey)
   applyWebviewTheme(view, viewModelKeys.get(tabId))
   console.log('[navigate_tab]', tabId, 'url=', url)
@@ -6344,15 +6639,130 @@ const GEMINI_LOGIN_URL =
     'https://gemini.google.com/signin?continue=https%3A%2F%2Fgemini.google.com%2Fapp'
   ) +
   '&flowName=GlifWebSignIn&flowEntry=ServiceLogin'
-ipcMain.handle('google_signin_start', () => {
-  void startGoogleSignIn(GEMINI_LOGIN_URL, { onEvent: forwardGoogleSignInEvent })
+const googleAccountStore = new GoogleAccountStore(
+  joinPath(app.getPath('userData'), 'google-accounts.json')
+)
+
+const containerStore = new ContainerStore(joinPath(app.getPath('userData'), 'containers.json'))
+
+/**
+ * Which container each tab belongs to. The renderer owns the durable tab records; main only needs
+ * this to pick a partition *before* a view is created, and to know which colour to paint its aura.
+ * It is filled by the IPC calls that open tabs (so it is always set before `ensureAiView` runs) and
+ * kept in sync in bulk whenever the tab list changes.
+ */
+const tabContainers = new Map<string, string>()
+
+function containerForTab(tabId: string): ReturnType<ContainerStore['get']> {
+  const containerId = tabContainers.get(tabId)
+  return containerId ? containerStore.get(containerId) : null
+}
+
+function rememberTabContainer(tabId: string, containerId: unknown): void {
+  if (typeof containerId !== 'string' || !containerId) return
+  tabContainers.set(tabId, containerId)
+}
+
+function partitionForTab(tabId: string): string {
+  const container = containerForTab(tabId)
+  // A container that has since been deleted falls back to the default store rather than to an
+  // empty partition nobody signed into.
+  return containerPartition(container ?? { accountId: 'default' })
+}
+
+ipcMain.handle('containers_list', () => {
+  // Asking for the list is also the moment to notice a Google account that has no container yet:
+  // people add accounts first and expect to find them here, not to build a container by hand.
+  const { containers, created } = containerStore.syncWithAccounts(googleAccountStore.list())
+  if (created.length > 0) {
+    console.log(`[containers] Created ${created.length} container(s) for existing accounts`)
+  }
+  return containers
+})
+
+ipcMain.handle('containers_save', (_event, input: unknown) => {
+  const payload = (input && typeof input === 'object' ? input : {}) as {
+    id?: string
+    name?: string
+    color?: string | null
+    accountId?: string
+  }
+  // The store cannot know which accounts exist; this is the one place that can, and a container
+  // pointing at a missing account would silently sign into an empty cookie store.
+  if (payload.accountId && payload.accountId !== 'default' && !googleAccountStore.get(payload.accountId)) {
+    return { error: 'That account no longer exists. Pick another one.' }
+  }
+  const result = containerStore.save(payload)
+  if (result.container) {
+    // Recolour live views of that container: the aura is painted from the container, not the tab.
+    for (const [tabId, containerId] of tabContainers.entries()) {
+      if (containerId !== result.container.id) continue
+      const view = aiViews.get(tabId)
+      if (view && !view.webContents.isDestroyed()) {
+        applyWebviewTheme(view, resolveModelKey(tabId, view.webContents.getURL()))
+      }
+    }
+    sendToMainWindow('containers-changed', containerStore.list())
+  }
+  return result
+})
+
+ipcMain.handle('containers_delete', (_event, containerId: string) => {
+  const result = containerStore.remove(containerId)
+  if (!result.removed) return result
+  // Tabs that lived there fall back to the default container (and its store) without losing their
+  // view: the partition was already fixed at creation, so only the label and aura change.
+  for (const [tabId, id] of [...tabContainers.entries()]) {
+    if (id === containerId) tabContainers.delete(tabId)
+  }
+  sendToMainWindow('containers-changed', containerStore.list())
+  return result
+})
+
+/** Bulk sync from the renderer: the tab list is the source of truth for who belongs where. */
+ipcMain.on('set_tab_containers', (_event, map: unknown) => {
+  if (!map || typeof map !== 'object') return
+  tabContainers.clear()
+  for (const [tabId, containerId] of Object.entries(map as Record<string, unknown>)) {
+    if (typeof containerId === 'string' && containerId) tabContainers.set(tabId, containerId)
+  }
+})
+
+ipcMain.handle('google_signin_accounts', () => googleAccountStore.list())
+ipcMain.handle('google_signin_add_account', (_event, label: string) => {
+  const result = googleAccountStore.add(label)
+  if (result.account) {
+    // A new account is a new workspace: give it a container straight away, coloured and ready.
+    const { created } = containerStore.syncWithAccounts(googleAccountStore.list())
+    if (created.length > 0) sendToMainWindow('containers-changed', containerStore.list())
+  }
+  return result
+})
+ipcMain.handle('google_signin_remove_account', (_event, accountId: string) =>
+  googleAccountStore.remove(accountId)
+)
+
+ipcMain.handle('google_signin_start', (_event, accountId?: string) => {
+  // Sign-in happens in a window Nexus owns, on the AI tab partition: the cookies are where they are
+  // needed the moment they are set, so nothing has to be read out of another browser afterwards.
+  void startGoogleSignIn(GEMINI_LOGIN_URL, {
+    accountId: accountId || 'default',
+    onEvent: forwardGoogleSignInEvent,
+    openAuthWindow: (url, partition, onBlocked) =>
+      openInAppSignInWindow(url, { partition, parent: mainWindow, onBlocked })
+  })
 })
 ipcMain.handle('google_signin_pick_profile', (_event, profileId: string) => {
   void startGoogleSignIn(GEMINI_LOGIN_URL, { profileId, onEvent: forwardGoogleSignInEvent })
 })
+ipcMain.handle('google_signin_status', async (_event, accountId?: string) => {
+  // Whether Nexus itself already holds a Google session — the state the UI should show first.
+  return { signedIn: await hasGoogleSessionInNexus(accountId || 'default') }
+})
 ipcMain.handle('google_signin_profiles', () => listProfiles())
 ipcMain.on('google_signin_cancel', () => {
   cancelGoogleSignIn()
+  closeInAppSignInWindow()
 })
 
 ipcMain.handle('sessions_sync_all', async (event) => {
@@ -6437,6 +6847,27 @@ ipcMain.on('resize_view', (_event, bounds) => {
   }
 
   const hidden = bounds.width === 0 && bounds.height === 0
+
+  // A native view is painted above the DOM, so re-showing it while an overlay is up puts the AI page
+  // on top of the panel the user is looking at — the panel is still there, just invisible, and every
+  // click lands on the page. The renderer's own bounds sender already refuses to fire during an
+  // overlay, so a real-bounds message here means the two disagree; three in a row means main's flag is
+  // the stale one and it is cleared rather than letting the window stay covered.
+  if (!hidden && overlaysOpen) {
+    boundsWhileOverlay += 1
+    if (boundsWhileOverlay <= 2) {
+      console.log('[view] ignoring a bounds restore while an overlay is open')
+      return
+    }
+    console.warn(
+      '[overlay] the renderer keeps reporting view bounds while main thinks an overlay is open — clearing the stale overlay flag'
+    )
+    overlaysOpen = false
+    containerMenuOpen = false
+    boundsWhileOverlay = 0
+    overlayWatchdog = disarmWatchdog()
+  }
+
   const wasViewVisible = activeViewVisible
   activeViewVisible = !hidden
   if (wasViewVisible !== activeViewVisible) restartActiveArenaTitleSync()

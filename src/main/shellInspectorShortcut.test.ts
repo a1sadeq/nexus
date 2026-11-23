@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import vm from 'node:vm'
 import ts from 'typescript'
+import * as overlayWatchdog from './overlayWatchdog'
 
 describe('Nexus Shell Inspector Shortcut (Ctrl+Alt+Shift+I)', () => {
   const mainSrc = readFileSync(join(__dirname, 'index.ts'), 'utf8')
@@ -63,6 +64,12 @@ describe('Nexus Shell Inspector Shortcut (Ctrl+Alt+Shift+I)', () => {
       viewModelKeys: new Map([['tab-1', 'gemini']]),
       sendToMainWindow: vi.fn(),
       restartActiveArenaTitleSync: vi.fn(),
+      // Escape arms the overlay watchdog; these supply the module and a timer that never fires.
+      ...overlayWatchdog,
+      setTimeout: vi.fn(() => 1),
+      clearTimeout: vi.fn(),
+      reconcileViewPresentation: vi.fn(),
+      focusPromptInView: vi.fn(),
       console: console
     }
 
