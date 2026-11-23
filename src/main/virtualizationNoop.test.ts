@@ -14,10 +14,10 @@ describe('production off-screen rendering injector', () => {
     const dom = new JSDOM('<!doctype html><head></head><body></body>', { runScripts: 'outside-only' })
     let selector = '[data-agent-transcript-message="true"]'
     const ctx: Record<string, unknown> = {}
-    new Function('providerConfig', 'getMergedProviderFeatures', 'globalThis', js)({}, () => ({ virtualizationSelector: selector }), ctx)
+    new Function('providerConfig', 'getMergedProviderFeatures', 'isThirdPartyAuthPage', 'globalThis', js)({}, () => ({ virtualizationSelector: selector }), () => false, ctx)
     const inject = ctx.inject as (view: unknown, key: string) => void
     const execute = vi.fn((script: string) => { dom.window.eval(script); return Promise.resolve() })
-    const view = { webContents: { isDestroyed: () => false, executeJavaScript: execute } }
+    const view = { webContents: { isDestroyed: () => false, executeJavaScript: execute, getURL: () => 'https://example.com' } }
     inject(view, 'arena-ai')
     const style = dom.window.document.getElementById('__nexus_virtualization')!
     const mutation = new dom.window.MutationObserver(() => {})

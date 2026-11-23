@@ -65,11 +65,11 @@ describe('production provider update integration', () => {
       'arena-ai': { features: { pauseCssAnimations: true } }, gemini: { features: { pauseCssAnimations: false } }
     }
     const context: Record<string, unknown> = {}
-    new Function('providerConfig', 'getMergedProviderFeatures', 'buildProviderMotionScript', 'globalThis', compiled)(
-      config, (_key: string, overrides: { features?: object }) => overrides?.features || {}, buildProviderMotionScript, context
+    new Function('providerConfig', 'getMergedProviderFeatures', 'buildProviderMotionScript', 'isThirdPartyAuthPage', 'globalThis', compiled)(
+      config, (_key: string, overrides: { features?: object }) => overrides?.features || {}, buildProviderMotionScript, () => false, context
     )
     const apply = context.apply as (view: unknown, modelKey: string) => void
-    const view = { webContents: { isDestroyed: () => false, executeJavaScript: execute } }
+    const view = { webContents: { isDestroyed: () => false, executeJavaScript: execute, getURL: () => 'https://example.com' } }
     apply(view, 'arena-ai')
     expect(dom.window.document.querySelector('style[data-nexus-provider-motion]')).not.toBeNull()
     apply(view, 'gemini')
