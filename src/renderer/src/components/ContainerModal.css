@@ -1,0 +1,208 @@
+.container-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(4, 6, 10, 0.62);
+  backdrop-filter: blur(3px);
+}
+
+.container-modal {
+  width: 440px;
+  max-width: calc(100vw - 32px);
+  padding: 18px;
+  border-radius: 18px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  box-shadow: 0 28px 70px rgba(0, 0, 0, 0.55);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.container-modal-head h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
+  color: var(--text);
+}
+
+.container-modal-sub {
+  display: block;
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--text2);
+}
+
+.container-modal-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text2);
+}
+
+.container-modal-field input,
+.container-modal-field select {
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+  outline: none;
+}
+
+.container-modal-field input:focus,
+.container-modal-field select:focus {
+  border-color: var(--accent);
+}
+
+.container-modal-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.container-swatch {
+  width: 22px;
+  height: 22px;
+  border-radius: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  cursor: pointer;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+
+.container-swatch:hover {
+  transform: translateY(-1px);
+}
+
+.container-swatch.is-active {
+  box-shadow: 0 0 0 2px var(--bg), 0 0 0 3px currentColor;
+  border-color: #fff;
+}
+
+.container-swatch-none {
+  background: transparent;
+  color: var(--text2);
+  font-size: 11px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.container-modal-custom {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.container-modal-custom input {
+  flex: 1;
+  font-family: ui-monospace, monospace;
+}
+
+.container-modal-preview {
+  padding: 6px 12px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text2);
+}
+
+.container-modal-note {
+  font-size: 10.5px;
+  line-height: 1.45;
+  color: var(--text2);
+  opacity: 0.85;
+}
+
+.container-modal-error {
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  background: rgba(239, 68, 68, 0.1);
+  color: #fca5a5;
+  font-size: 11.5px;
+}
+
+.container-modal-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.container-modal-spacer {
+  flex: 1;
+}
+
+.container-modal-actions button {
+  padding: 8px 14px;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+}
+
+.container-modal-actions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.container-modal-save {
+  background: var(--accent) !important;
+  border-color: var(--accent) !important;
+  color: #fff !important;
+}
+
+.container-modal-danger {
+  color: #fca5a5 !important;
+  border-color: rgba(239, 68, 68, 0.4) !important;
+  background: transparent !important;
+}
+
+/* Account chips: the OS dropdown cannot be themed, so the picker is not one. */
+.container-modal-accounts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-height: 116px;
+  overflow-y: auto;
+  padding: 2px;
+}
+
+.container-account-chip {
+  padding: 6px 11px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text2);
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: color 120ms ease, border-color 120ms ease, background 120ms ease;
+}
+
+.container-account-chip:hover {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+}
+
+.container-account-chip.is-active {
+  color: #fff;
+  background: color-mix(in srgb, var(--accent) 70%, transparent);
+  border-color: var(--accent);
+}
