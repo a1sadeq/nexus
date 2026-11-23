@@ -25,12 +25,15 @@ import {
   describeEmptyRead,
   describeGoogleOnlySync
 } from './cookieDbCopy'
+import { partitionForAccount } from './googleAccounts'
+import { GOOGLE_REJECTION_MESSAGE } from './googleSignInBlock'
 
 const POLL_INTERVAL_MS = 2000
 const POLL_TIMEOUT_MS = 180_000
 export type GoogleSignInEvent =
   | { stage: 'opening-browser' }
   | { stage: 'waiting' }
+  | { stage: 'blocked'; message: string }
   | { stage: 'success'; email?: string }
   | { stage: 'error'; message: string }
   | { stage: 'keyring-error'; message: string }
@@ -265,14 +268,159 @@ function isRequiredGoogleAuthCookie(name: string): boolean {
   return REQUIRED_GOOGLE_AUTH_COOKIES.has(name)
 }
 
+export type OpenAuthWindow = (
+  url: string,
+  partition: string,
+  /** Google refused the page as an embedded browser; the window stays open for "Try again". */
+  onBlocked?: (page: { url?: string; title?: string }) => void
+) => { close: () => void; closed: Promise<void> }
+
+export interface GoogleSignInOptions {
+  onEvent: EventSink
+  /** Read a browser profile that stores its cookies in a readable database (Firefox, Zen, Floorp). */
+  profileId?: string
+  /** Which of Nexus' own accounts is being signed in. Defaults to the one every tab uses. */
+  accountId?: string
+  /** Opens the login page in a window Nexus owns, on the account's partition. */
+  openAuthWindow?: OpenAuthWindow
+}
+
+const IN_APP_SIGNIN_TIMEOUT_MS = 10 * 60_000
+
+function isGoogleDomain(domain: string | undefined): boolean {
+  const host = (domain ?? '').replace(/^\./, '').toLowerCase()
+  return host === 'google.com' || host.endsWith('.google.com')
+}
+
+/** Does Nexus itself already hold a usable Google session, in this account's partition? */
+export async function hasGoogleSessionInNexus(accountId: string = 'default'): Promise<boolean> {
+  try {
+    const ses = session.fromPartition(partitionForAccount(accountId))
+    const now = Date.now() / 1000
+    for (const name of REQUIRED_GOOGLE_AUTH_COOKIES) {
+      const cookies = await ses.cookies.get({ name })
+      if (
+        cookies.some(
+          (c) => isGoogleDomain(c.domain) && !!c.value && (!c.expirationDate || c.expirationDate > now)
+        )
+      ) {
+        return true
+      }
+    }
+  } catch (err) {
+    console.warn('[google-signin] Could not read the Nexus cookie store:', err)
+  }
+  return false
+}
+
+/**
+ * Sign in inside Nexus.
+ *
+ * The login page is loaded on the partition the AI tabs use, so the cookies Google sets are already
+ * where they are needed — no import, no copying, and nothing to decrypt. This is the only route that
+ * works with Chrome and Edge on Windows, whose cookie files are app-bound encrypted ("v20") and
+ * cannot be read from outside the browser at all.
+ */
+async function startInAppSignIn(
+  loginUrl: string,
+  accountId: string,
+  onEvent: EventSink,
+  openAuthWindow: OpenAuthWindow
+): Promise<void> {
+  const partition = partitionForAccount(accountId)
+  const handle = openAuthWindow(loginUrl, partition, () => {
+    // Not fatal: "Try again" on that page is a genuine retry, so the wait continues. But say it now
+    // rather than letting the window look like an ordinary slow sign-in.
+    onEvent({ stage: 'blocked', message: GOOGLE_REJECTION_MESSAGE })
+  })
+  onEvent({ stage: 'waiting' })
+
+  let settled = false
+  const started = Date.now()
+  const finish = (ev: GoogleSignInEvent): void => {
+    if (settled) return
+    settled = true
+    if (pollTimer) {
+      clearInterval(pollTimer)
+      pollTimer = null
+    }
+    onEvent(ev)
+  }
+
+  void handle.closed.then(() => {
+    // Give the last navigation's cookies a moment to land before calling it a failure.
+    setTimeout(() => {
+      if (settled) return
+      void hasGoogleSessionInNexus(accountId).then((signedIn) => {
+        if (settled) return
+        finish(
+          signedIn
+            ? { stage: 'success' }
+            : {
+                stage: 'error',
+                message:
+                  'The sign-in window closed before Nexus had a Google session. Sign in again, and wait for Gemini to load in that window.'
+              }
+        )
+      })
+    }, 500)
+  })
+
+  if (pollTimer) clearInterval(pollTimer)
+  pollTimer = setInterval(() => {
+    if (settled) return
+    if (Date.now() - started > IN_APP_SIGNIN_TIMEOUT_MS) {
+      handle.close()
+      finish({
+        stage: 'error',
+        message: 'Sign-in timed out after 10 minutes. Nothing was changed.'
+      })
+      return
+    }
+    void hasGoogleSessionInNexus(accountId).then(async (signedIn) => {
+      if (!signedIn || settled) return
+      try {
+        // Make it durable before the window closes: the point of this route is that the session is
+        // still there after a restart.
+        await session.fromPartition(partition).cookies.flushStore()
+      } catch (err) {
+        console.warn('[google-signin] Could not flush the cookie store:', err)
+      }
+      handle.close()
+      finish({ stage: 'success' })
+    })
+  }, 1000)
+}
+
 export async function startGoogleSignIn(
   loginUrl: string,
-  opts: { profileId?: string; onEvent: EventSink } = { onEvent: () => {} }
+  opts: GoogleSignInOptions = { onEvent: () => {} }
 ): Promise<void> {
-  const { profileId, onEvent } = opts
+  const { profileId, accountId = 'default', onEvent, openAuthWindow } = opts
   cancelGoogleSignIn()
   signInGeneration++
   const generation = signInGeneration
+
+  if (!profileId) {
+    if (!openAuthWindow) {
+      onEvent({
+        stage: 'error',
+        message: 'No sign-in window is available. Sign in inside a Nexus AI tab instead.'
+      })
+      return
+    }
+    return startInAppSignIn(loginUrl, accountId, onEvent, openAuthWindow)
+  }
+
+  return startBrowserCookieSignIn(loginUrl, profileId, onEvent, generation)
+}
+
+async function startBrowserCookieSignIn(
+  loginUrl: string,
+  profileId: string | undefined,
+  onEvent: EventSink,
+  generation: number
+): Promise<void> {
   onEvent({ stage: 'opening-browser' })
   try {
     await shell.openExternal(loginUrl)

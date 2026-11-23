@@ -209,8 +209,10 @@ export function describeEmptyRead(
       return (
         `"${profileName}" has ${found} matching cookie(s), but ${stats.undecryptable} could not be read: ` +
         `they use Chrome's app-bound encryption ("v20"), which only the browser's own service can unlock. ` +
-        `Import them as JSON instead — export with a cookie-editor extension, then use Import from JSON — ` +
-        `or import from a Firefox/Zen profile.`
+        `Nothing outside that browser can open them — including Nexus. ` +
+        `Sign in inside Nexus instead (Sessions → "Sign in inside Nexus"), which stores the session in ` +
+        `Nexus' own profile; or export the cookies as JSON and use Import from JSON; or import from a ` +
+        `Firefox/Zen profile, which is not encrypted.`
       );
     }
     if (stats.keyAvailable === false) {

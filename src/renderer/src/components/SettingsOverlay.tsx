@@ -839,6 +839,18 @@ export default function SettingsOverlay({
   const [syncingAll, setSyncingAll] = useState(false)
   const [syncingProfileId, setSyncingProfileId] = useState<string | null>(null)
   const [syncFeedback, setSyncFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null)
+  // Signing in inside Nexus: the only route that works against a browser whose cookie store cannot
+  // be read from outside (Chrome/Edge on Windows).
+  const [inAppSignIn, setInAppSignIn] = useState<{
+    state: 'idle' | 'waiting' | 'done' | 'error'
+    message?: string
+  }>({ state: 'idle' })
+  // One cookie store per Google account; the default is the one every tab shares today.
+  const [googleAccounts, setGoogleAccounts] = useState<
+    Array<{ id: string; label: string; partition: string }>
+  >([{ id: 'default', label: 'Default', partition: 'persist:ai-shared' }])
+  const [activeGoogleAccount, setActiveGoogleAccount] = useState('default')
+  const [newAccountLabel, setNewAccountLabel] = useState('')
 
   const [styleSubTab, setStyleSubTab] = useState<string>(() => {
     try {
@@ -1026,8 +1038,85 @@ export default function SettingsOverlay({
   useEffect(() => {
     if (tab === 'sessions') {
       fetchBrowserProfiles()
+      fetchGoogleAccounts()
     }
   }, [tab, fetchBrowserProfiles])
+
+  const fetchGoogleAccounts = async () => {
+    try {
+      // @ts-ignore
+      const list = await window.electron?.googleSignIn?.getAccounts?.()
+      if (Array.isArray(list) && list.length > 0) setGoogleAccounts(list)
+    } catch (err) {
+      console.warn('[fetchGoogleAccounts] Failed to load Google accounts:', err)
+    }
+  }
+
+  const handleAddGoogleAccount = async () => {
+    const label = newAccountLabel.trim()
+    if (!label) return
+    sfx.click()
+    try {
+      // @ts-ignore
+      const res = await window.electron?.googleSignIn?.addAccount?.(label)
+      if (res?.account) {
+        setNewAccountLabel('')
+        await fetchGoogleAccounts()
+        setActiveGoogleAccount(res.account.id)
+        setInAppSignIn({
+          state: 'idle',
+          message: `Account "${label}" added — sign in to fill it.`
+        })
+      } else if (res?.error) {
+        setInAppSignIn({ state: 'error', message: res.error })
+      }
+    } catch (err: any) {
+      setInAppSignIn({ state: 'error', message: err?.message || 'Could not add the account.' })
+    }
+  }
+
+  const handleInAppSignIn = async () => {
+    sfx.click()
+    setInAppSignIn({ state: 'waiting', message: 'Sign in in the window that just opened.' })
+    setSyncFeedback(null)
+    try {
+      // @ts-ignore
+      await window.electron?.googleSignIn?.start?.(activeGoogleAccount)
+    } catch (err: any) {
+      setInAppSignIn({ state: 'error', message: err?.message || 'Could not open the sign-in window.' })
+    }
+  }
+
+  useEffect(() => {
+    // @ts-ignore
+    const api = window.electron?.googleSignIn
+    if (!api?.onEvent) return
+    const onEvent = (_e: unknown, ev: any): void => {
+      if (!ev?.stage) return
+      if (ev.stage === 'opening-browser') {
+        // The old path: the system browser was opened and its cookie file is about to be read. This
+        // only happens when the running main process is older than this UI.
+        setInAppSignIn({
+          state: 'error',
+          message:
+            'Nexus opened your system browser instead of its own window — the running main process is older than this UI. Quit Nexus completely and start it again.'
+        })
+      } else if (ev.stage === 'blocked') {
+        setInAppSignIn({ state: 'error', message: ev.message })
+      } else if (ev.stage === 'waiting') {
+        setInAppSignIn({ state: 'waiting', message: 'Waiting for the Google session…' })
+      } else if (ev.stage === 'success') {
+        setInAppSignIn({ state: 'done', message: 'Signed in. AI tabs reload with the new session.' })
+      } else if (ev.stage === 'error' || ev.stage === 'no-auth') {
+        setInAppSignIn({ state: 'error', message: ev.message || 'Sign-in did not complete.' })
+      }
+    }
+    api.onEvent(onEvent)
+    return () => {
+      // @ts-ignore
+      window.electron?.ipcRenderer?.removeAllListeners?.('google-signin-event')
+    }
+  }, [])
 
   const handleSyncAllSessions = async () => {
     sfx.click()
@@ -2379,6 +2468,136 @@ export default function SettingsOverlay({
                 </button>
               </div>
             )}
+
+            {/* Sign in inside Nexus. First, because it is the only route that works for a browser
+                whose cookie store cannot be read from outside — Chrome and Edge on Windows. */}
+            <Card className="shrink-0 min-h-fit">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 shrink-0">
+                <div className="flex items-center gap-3">
+                  <div
+                    className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 border shadow-sm"
+                    style={{
+                      background: 'var(--surface2)',
+                      borderColor: 'var(--accent)',
+                      color: 'var(--accent)'
+                    }}
+                  >
+                    <IconGlobe size={20} />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-[var(--text)] flex items-center gap-2">
+                      Sign in inside Nexus
+                      <span
+                        className="px-2 py-0.5 rounded-full text-[10px] font-mono uppercase tracking-wider font-semibold border"
+                        style={{
+                          background: 'rgba(16, 185, 129, 0.12)',
+                          borderColor: 'rgba(16, 185, 129, 0.35)',
+                          color: '#34d399'
+                        }}
+                      >
+                        Recommended
+                      </span>
+                    </h3>
+                    <p className="text-xs text-[var(--text2)] mt-0.5">
+                      Opens Google in a window Nexus owns. The session is stored in Nexus' own profile
+                      and survives restarts. Chrome and Edge on Windows encrypt their cookie files so
+                      that nothing outside the browser can read them — including this app — so signing
+                      in here is the way that always works.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
+                  <select
+                    value={activeGoogleAccount}
+                    onChange={(e) => setActiveGoogleAccount(e.target.value)}
+                    disabled={inAppSignIn.state === 'waiting'}
+                    className="px-2 py-2 rounded-xl text-xs border cursor-pointer"
+                    style={{
+                      background: 'var(--surface)',
+                      borderColor: 'var(--border)',
+                      color: 'var(--text)'
+                    }}
+                    title="Each account has its own cookie store"
+                  >
+                    {googleAccounts.map((a) => (
+                      <option key={a.id} value={a.id}>
+                        {a.label}
+                      </option>
+                    ))}
+                  </select>
+
+                  <input
+                    value={newAccountLabel}
+                    onChange={(e) => setNewAccountLabel(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') void handleAddGoogleAccount()
+                    }}
+                    placeholder="New account name"
+                    className="px-2 py-2 rounded-xl text-xs border w-32"
+                    style={{
+                      background: 'var(--surface)',
+                      borderColor: 'var(--border)',
+                      color: 'var(--text)'
+                    }}
+                    title="Adds a separate cookie store — one Google account each, ready for containers"
+                  />
+
+                  <button
+                    type="button"
+                    onClick={handleAddGoogleAccount}
+                    disabled={!newAccountLabel.trim()}
+                    className="px-2.5 py-2 rounded-xl text-xs font-medium border transition-all cursor-pointer disabled:opacity-40 hover:bg-white/5"
+                    style={{
+                      background: 'var(--surface)',
+                      borderColor: 'var(--border)',
+                      color: 'var(--text)'
+                    }}
+                    title="Add an account"
+                  >
+                    <IconPlus size={13} />
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={inAppSignIn.state === 'waiting'}
+                    className="px-3.5 py-2 rounded-xl text-xs font-semibold border transition-all cursor-pointer flex items-center gap-1.5 shadow-sm hover:opacity-95 disabled:opacity-50"
+                    style={{
+                      background: 'var(--accent)',
+                      borderColor: 'var(--accent)',
+                      color: '#ffffff'
+                    }}
+                    onClick={handleInAppSignIn}
+                    title="Open a sign-in window on the selected account's own cookie store"
+                  >
+                    {inAppSignIn.state === 'waiting' ? (
+                      <span>Waiting for sign-in...</span>
+                    ) : (
+                      <>
+                        <IconGlobe size={13} />
+                        <span>Sign in inside Nexus</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              {inAppSignIn.state !== 'idle' && inAppSignIn.message && (
+                <p
+                  className="text-[11px] mt-2"
+                  style={{
+                    color:
+                      inAppSignIn.state === 'error'
+                        ? '#f87171'
+                        : inAppSignIn.state === 'done'
+                          ? '#34d399'
+                          : 'var(--text2)'
+                  }}
+                >
+                  {inAppSignIn.message}
+                </p>
+              )}
+            </Card>
 
             <Card className="shrink-0 min-h-fit">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 shrink-0">

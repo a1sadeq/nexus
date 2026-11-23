@@ -459,3 +459,92 @@ describe('pollCallbackRunning generation ownership', () => {
     expect(() => googleAuth.cancelGoogleSignIn()).not.toThrow()
   })
 })
+
+describe('sign in inside Nexus', () => {
+  const auth = () => import('./googleAuth')
+
+  const liveSid = (over: Record<string, unknown> = {}) => ({
+    name: 'SID',
+    value: 'sid-value',
+    domain: '.google.com',
+    expirationDate: Date.now() / 1000 + 3600,
+    ...over
+  })
+
+  async function mockPartitionCookies(rows: unknown[]): Promise<void> {
+    const { session } = await import('electron')
+    vi.mocked(session.fromPartition).mockReturnValue({
+      cookies: {
+        get: vi.fn(async () => rows),
+        set: vi.fn(),
+        remove: vi.fn(),
+        flushStore: vi.fn(async () => undefined)
+      }
+    } as never)
+  }
+
+  it('treats a live SID in the Nexus partition as signed in', async () => {
+    await mockPartitionCookies([liveSid()])
+    expect(await (await auth()).hasGoogleSessionInNexus()).toBe(true)
+  })
+
+  it('does not accept an expired cookie, or one from another domain', async () => {
+    await mockPartitionCookies([liveSid({ expirationDate: Date.now() / 1000 - 60 })])
+    expect(await (await auth()).hasGoogleSessionInNexus()).toBe(false)
+
+    await mockPartitionCookies([liveSid({ domain: '.example.com' })])
+    expect(await (await auth()).hasGoogleSessionInNexus()).toBe(false)
+
+    await mockPartitionCookies([liveSid({ value: '' })])
+    expect(await (await auth()).hasGoogleSessionInNexus()).toBe(false)
+  })
+
+  it('opens a window Nexus owns and reports success once the session lands', async () => {
+    const events: string[] = []
+    const opened: string[] = []
+    const closeCalls: number[] = []
+    await mockPartitionCookies([liveSid()])
+
+    await (await auth()).startGoogleSignIn('https://accounts.google.com/x', {
+      onEvent: (ev) => events.push(ev.stage),
+      openAuthWindow: (url) => {
+        opened.push(url)
+        return {
+          close: () => {
+            closeCalls.push(1)
+          },
+          closed: new Promise<void>(() => undefined)
+        }
+      }
+    })
+    await new Promise((r) => setTimeout(r, 1400))
+
+    if (opened.join() !== 'https://accounts.google.com/x') throw new Error(`opened ${opened.join()}`)
+    if (!events.includes('waiting')) throw new Error(`events ${events.join(',')}`)
+    if (!events.includes('success')) throw new Error(`events ${events.join(',')}`)
+    if (closeCalls.length !== 1) throw new Error(`close called ${closeCalls.length} times`)
+    void (await auth()).cancelGoogleSignIn()
+  })
+
+  it('says the window closed rather than claiming a session it does not have', async () => {
+    const events: Array<{ stage: string; message?: string }> = []
+    await mockPartitionCookies([])
+    let resolveClosed: () => void = () => undefined
+    const closed = new Promise<void>((r) => { resolveClosed = r })
+
+    await (await auth()).startGoogleSignIn('https://accounts.google.com/x', {
+      onEvent: (ev) => events.push(ev as never),
+      openAuthWindow: () => ({ close: () => undefined, closed })
+    })
+    resolveClosed()
+    await new Promise((r) => setTimeout(r, 900))
+
+    const last = events[events.length - 1]
+    if (last?.stage !== 'error') throw new Error(`last stage ${last?.stage}`)
+    if (!/closed before Nexus had a Google session/.test(last.message ?? '')) {
+      throw new Error(`message ${last.message}`)
+    }
+    if (events.some((e) => e.stage === 'success')) throw new Error('reported success without a session')
+    void (await auth()).cancelGoogleSignIn()
+  })
+})

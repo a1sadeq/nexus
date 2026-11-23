@@ -55,9 +55,14 @@ export interface NexusSessions {
 }
 
 export interface NexusGoogleSignIn {
-  start: () => Promise<unknown>
+  start: (accountId?: string) => Promise<unknown>
   pickProfile: (profileId: string) => Promise<unknown>
   getProfiles: () => Promise<Array<SessionProfile>>
+  /** Whether Nexus itself already holds a usable Google session for this account. */
+  status: (accountId?: string) => Promise<{ signedIn: boolean }>
+  getAccounts: () => Promise<Array<{ id: string; label: string; partition: string; createdAt: number }>>
+  addAccount: (label: string) => Promise<{ account?: { id: string; label: string; partition: string }; error?: string }>
+  removeAccount: (accountId: string) => Promise<{ removed: boolean; error?: string }>
   cancel: () => void
   syncAll: () => Promise<{ success: boolean; count: number; message: string }>
   syncProfile: (profileId: string) => Promise<{ success: boolean; profileName?: string; message?: string; count?: number }>
@@ -151,6 +156,25 @@ export interface NexusCacheBridge {
   purge: () => Promise<any>
 }
 
+export interface NexusContainerRecord {
+  id: string
+  name: string
+  color?: string
+  accountId: string
+  createdAt: number
+}
+
+export interface NexusContainers {
+  list: () => Promise<NexusContainerRecord[]>
+  save: (input: {
+    id?: string
+    name?: string
+    color?: string | null
+    accountId?: string
+  }) => Promise<{ container?: NexusContainerRecord; error?: string }>
+  remove: (containerId: string) => Promise<{ removed: boolean; error?: string }>
+}
+
 export interface NexusDiagnosticsBridge {
   capture: (samplingMs?: number) => Promise<any>
   exportToFile: (report: any) => Promise<any>
@@ -163,6 +187,7 @@ declare global {
       ipcRenderer: NexusIpcRenderer
       sessions?: NexusSessions
       googleSignIn?: NexusGoogleSignIn
+      containers?: NexusContainers
       platform?: string
       windowControls?: NexusWindowControls
       skills?: NexusSkills

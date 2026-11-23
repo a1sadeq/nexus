@@ -50,12 +50,29 @@ const electronAPI = {
       ipcRenderer.removeAllListeners(channel)
     }
   },
-  // Google sign-in opens in system browser; cookies are imported into Electron after detection.
+  // Google sign-in opens a window Nexus owns, on the account's own partition — nothing is read out
+  // of another browser.
+  /** Containers: named, coloured workspaces, each on one Google account's cookie store. */
+  containers: {
+    list: (): Promise<unknown> => ipcRenderer.invoke('containers_list'),
+    save: (input: unknown): Promise<unknown> => ipcRenderer.invoke('containers_save', input),
+    remove: (containerId: string): Promise<unknown> =>
+      ipcRenderer.invoke('containers_delete', containerId)
+  },
   googleSignIn: {
-    start: (): Promise<unknown> => ipcRenderer.invoke('google_signin_start'),
+    start: (accountId?: string): Promise<unknown> =>
+      ipcRenderer.invoke('google_signin_start', accountId),
+    /** Google accounts, each on its own cookie store. */
+    getAccounts: (): Promise<unknown> => ipcRenderer.invoke('google_signin_accounts'),
+    addAccount: (label: string): Promise<unknown> =>
+      ipcRenderer.invoke('google_signin_add_account', label),
+    removeAccount: (accountId: string): Promise<unknown> =>
+      ipcRenderer.invoke('google_signin_remove_account', accountId),
     pickProfile: (profileId: string): Promise<unknown> =>
       ipcRenderer.invoke('google_signin_pick_profile', profileId),
     getProfiles: (): Promise<unknown> => ipcRenderer.invoke('google_signin_profiles'),
+    status: (accountId?: string): Promise<{ signedIn: boolean }> =>
+      ipcRenderer.invoke('google_signin_status', accountId) as Promise<{ signedIn: boolean }>,
     cancel: (): void => ipcRenderer.send('google_signin_cancel'),
     syncAll: (): Promise<unknown> => ipcRenderer.invoke('sessions_sync_all'),
     syncProfile: (profileId: string): Promise<unknown> =>
