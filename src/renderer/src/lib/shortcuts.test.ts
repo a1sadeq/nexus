@@ -6,6 +6,7 @@ import {
   resetShortcutKeys,
   resetAllShortcuts,
   getEffectiveShortcuts,
+  loadCustomShortcuts,
   findShortcutCollision,
   matchesShortcut,
   parseKeyEventToKeys
@@ -198,5 +199,83 @@ describe('shortcuts module', () => {
     expect(matchesShortcut(plainDot, ['Ctrl', '.'])).toBe(true)
     expect(matchesShortcut(shiftDot, stop!.defaultKeys)).toBe(true)
     expect(matchesShortcut(shiftDot, picker!.defaultKeys)).toBe(false)
+  })
+})
+
+/**
+ * The environment that broke `ShortcutKeys.test.tsx` on a real machine.
+ *
+ * Node 22.4+ defines a `localStorage` global, and it is unusable unless the process was started with
+ * `--localstorage-file`: every read returns null and every write throws. When that global shadows the
+ * window's storage, a customised shortcut is written nowhere and read back as the default — which is
+ * exactly what a badge on a button must never do.
+ */
+describe('shortcuts storage resolution', () => {
+  it('saves the customisation where it will be read, when the ambient localStorage is the Node stub', () => {
+    const scope = globalThis as unknown as { window?: unknown; localStorage?: unknown }
+    const savedWindow = scope.window
+    const savedStorage = scope.localStorage
+
+    const unavailable = (): never => {
+      throw new Error('localStorage is not available because --localstorage-file was not provided')
+    }
+    const windowStore = new Map<string, string>()
+
+    scope.localStorage = {
+      getItem: unavailable,
+      setItem: unavailable,
+      removeItem: unavailable,
+      clear: unavailable,
+      key: unavailable,
+      get length(): number {
+        return unavailable()
+      }
+    }
+    scope.window = {
+      localStorage: {
+        getItem: (key: string) => windowStore.get(key) ?? null,
+        setItem: (key: string, value: string) => void windowStore.set(key, value),
+        removeItem: (key: string) => void windowStore.delete(key),
+        clear: () => windowStore.clear(),
+        key: () => null,
+        length: 0
+      },
+      dispatchEvent: () => true
+    }
+
+    try {
+      setShortcutKeys('tab-colours', ['Ctrl', 'Alt', 'K'])
+      expect(getShortcutKeys('tab-colours')).toEqual(['Ctrl', 'Alt', 'K'])
+      expect(windowStore.size).toBe(1)
+
+      resetShortcutKeys('tab-colours')
+      expect(getShortcutKeys('tab-colours')).toEqual(
+        DEFAULT_SHORTCUTS.find((shortcut) => shortcut.id === 'tab-colours')!.defaultKeys
+      )
+      // The map is rewritten without the entry rather than removed, so an empty object is the empty state.
+      expect(JSON.parse(windowStore.get('nexus.custom_shortcuts') ?? '{}')).toEqual({})
+    } finally {
+      scope.window = savedWindow
+      scope.localStorage = savedStorage
+    }
+  })
+
+  it('keeps the customisation in memory when there is no storage at all', () => {
+    const scope = globalThis as unknown as { window?: unknown; localStorage?: unknown }
+    const savedWindow = scope.window
+    const savedStorage = scope.localStorage
+    scope.window = undefined
+    scope.localStorage = undefined
+    try {
+      expect(() => setShortcutKeys('tab-colours', ['Ctrl', 'Alt', 'K'])).not.toThrow()
+      // Nowhere to persist, so the session keeps it in memory rather than silently reverting under the
+      // user's fingers — the badge and the keymap still agree with each other.
+      expect(getShortcutKeys('tab-colours')).toEqual(['Ctrl', 'Alt', 'K'])
+      expect(loadCustomShortcuts()).toEqual({ 'tab-colours': ['Ctrl', 'Alt', 'K'] })
+    } finally {
+      resetShortcutKeys('tab-colours')
+      scope.window = savedWindow
+      scope.localStorage = savedStorage
+    }
   })
 })

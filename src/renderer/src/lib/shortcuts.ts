@@ -266,9 +266,66 @@ const STORAGE_KEY = 'nexus.custom_shortcuts'
 const LEGACY_STORAGE_KEY = 'vicinae.custom_shortcuts'
 const SHORTCUTS_CHANGED_EVENT = 'nexus-shortcuts-changed'
 
+/**
+ * The storage the keymap writes to, and a usable one even when the platform has none.
+ *
+ * A bare `localStorage` is not the one you think it is. Node 22.4+ defines a `localStorage` global that
+ * only works when the process was started with `--localstorage-file`; without the flag every read throws.
+ * Vitest's jsdom environment aliases `window` to that same global, so in a test there can be no working
+ * storage anywhere in the process — which meant a customised shortcut was written nowhere and read back
+ * as the default, the one thing a key badge must never do.
+ *
+ * So: probe the candidates, use the first that actually round-trips a value, and fall back to memory when
+ * none does. In the app this is always the window's storage; in a test it is the stub; in a broken
+ * environment it is memory, and the session still behaves.
+ */
+function usableStorage(candidate: Storage | null | undefined): candidate is Storage {
+  if (!candidate) return false
+  const probe = '__nexus_storage_probe__'
+  try {
+    candidate.setItem(probe, '1')
+    const roundTripped = candidate.getItem(probe) === '1'
+    candidate.removeItem(probe)
+    return roundTripped
+  } catch {
+    return false
+  }
+}
+
+function memoryStorage(): Storage {
+  const entries = new Map<string, string>()
+  return {
+    get length(): number {
+      return entries.size
+    },
+    key: (index: number): string | null => Array.from(entries.keys())[index] ?? null,
+    getItem: (key: string): string | null => entries.get(key) ?? null,
+    setItem: (key: string, value: string): void => void entries.set(key, String(value)),
+    removeItem: (key: string): void => void entries.delete(key),
+    clear: (): void => entries.clear()
+  }
+}
+
+const fallbackStorage = memoryStorage()
+
+function shortcutStorage(): Storage {
+  try {
+    if (typeof window !== 'undefined' && usableStorage(window.localStorage)) return window.localStorage
+  } catch {
+    /* storage blocked for this origin */
+  }
+  try {
+    if (typeof localStorage !== 'undefined' && usableStorage(localStorage)) return localStorage
+  } catch {
+    /* the Node global without --localstorage-file throws on access */
+  }
+  return fallbackStorage
+}
+
 export function loadCustomShortcuts(): Record<string, string[]> {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY) || localStorage.getItem(LEGACY_STORAGE_KEY)
+    const storage = shortcutStorage()
+    const raw = storage.getItem(STORAGE_KEY) || storage.getItem(LEGACY_STORAGE_KEY)
     if (raw) {
       const parsed = JSON.parse(raw)
       if (parsed && typeof parsed === 'object') {
@@ -281,9 +338,9 @@ export function loadCustomShortcuts(): Record<string, string[]> {
 
 export function saveCustomShortcuts(custom: Record<string, string[]>): void {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(custom))
+    shortcutStorage().setItem(STORAGE_KEY, JSON.stringify(custom))
   } catch {}
-  if (typeof window !== 'undefined') {
+  if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
     window.dispatchEvent(new CustomEvent(SHORTCUTS_CHANGED_EVENT))
   }
 }
@@ -330,9 +387,9 @@ export function resetShortcutKeys(id: string): void {
 
 export function resetAllShortcuts(): void {
   try {
-    localStorage.removeItem(STORAGE_KEY)
+    shortcutStorage().removeItem(STORAGE_KEY)
   } catch {}
-  if (typeof window !== 'undefined') {
+  if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
     window.dispatchEvent(new CustomEvent(SHORTCUTS_CHANGED_EVENT))
   }
 }
