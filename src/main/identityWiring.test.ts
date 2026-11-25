@@ -10,6 +10,8 @@ import { join } from 'node:path'
  */
 const main = readFileSync(join(__dirname, 'index.ts'), 'utf8')
 const signIn = readFileSync(join(__dirname, 'googleSignInWindow.ts'), 'utf8')
+const switcher = readFileSync(join(__dirname, 'identitySwitch.ts'), 'utf8')
+const watcher0 = main.slice(main.indexOf("app.on('web-contents-created'"), main.indexOf("app.on('web-contents-created'") + 5200)
 
 describe('one identity decision, applied app-wide', () => {
   it('decides identity in webIdentity.ts, not in the request hook', () => {
@@ -39,11 +41,37 @@ describe('one identity decision, applied app-wide', () => {
 
   it('switches the page as well as the header when a sign-in surface is loaded', () => {
     const hook = main.slice(main.indexOf('ses.webRequest.onBeforeSendHeaders'), main.indexOf('ses.webRequest.onHeadersReceived'))
-    expect(hook).toContain('adoptNativeIdentity(contents, NATIVE_ELECTRON_UA)')
-    expect(hook).toContain('releaseNativeIdentity(contents)')
-    expect(hook).toContain("decision.identity === 'native' ? NATIVE_ELECTRON_UA : AI_UA")
+    expect(hook).toContain('switchPageIdentityMidRequest(contents, decision.identity)')
+    expect(hook).toContain("hasNativeIdentity(extra.webContentsId) ? 'native' : 'ai'")
+    expect(hook).toContain("identity === 'native' ? NATIVE_ELECTRON_UA : AI_UA")
     // No lock, no switch: the answer comes from the registry every time.
     expect(hook).not.toContain('isInAppSignInWebContents')
+  })
+
+  it('never switches a page with setUserAgent from inside a request', () => {
+    // `setUserAgent` makes Chromium discard the navigation that is in flight, and a request hook only
+    // ever runs during one. Doing it here aborted every Google sign-in one hop after the provider's
+    // server redirect — chat.z.ai answered `302 accounts.google.com`, the hook switched the page, and
+    // Chromium threw the redirect away and re-committed `/auth`. The page "just reloaded".
+    const hook = main.slice(main.indexOf('ses.webRequest.onBeforeSendHeaders'), main.indexOf('ses.webRequest.onHeadersReceived'))
+    expect(hook).not.toContain('adoptNativeIdentity')
+    expect(hook).not.toContain('releaseNativeIdentity')
+    expect(hook).not.toContain('setUserAgent')
+    // The switch itself goes through the protocol override, which leaves navigation state alone.
+    expect(main).toContain("from './identitySwitch'")
+    expect(main).toContain('applyUserAgentOverCdp(')
+    expect(main).toContain('markNativeIdentity(contents) : markChromeIdentity(contents)')
+    expect(switcher).toContain("sendCommand('Emulation.setUserAgentOverride'")
+    // Nothing else in main adopts a page's identity directly: the sign-in window is the one owner.
+    expect(main).not.toContain('adoptNativeIdentity(')
+    expect(main).not.toContain('releaseNativeIdentity(')
+  })
+
+  it('names every server redirect in the trace', () => {
+    // A sign-in is a redirect chain, and a redirect leaves no `did-start-navigation` behind. Without
+    // this line the trace of the broken flow named only `chat.z.ai/auth` twice and no Google URL at all.
+    expect(watcher0).toContain("contents.on('will-redirect'")
+    expect(watcher0).toContain('the server sent the page on')
   })
 
   it('watches every webContents in the app, not each creation site', () => {
@@ -110,9 +138,10 @@ describe('one identity decision, applied app-wide', () => {
   })
 
   it('never leaves a page whose header and navigator disagree', () => {
-    // Adopting without also switching the document is the one state Google refuses.
-    const adoptSites = main.split('adoptNativeIdentity(').length - 1
-    expect(adoptSites).toBeGreaterThan(0)
+    // Adopting without also switching the document is the one state Google refuses — and switching it
+    // with `setUserAgent` mid-navigation is the state that loses the navigation. Both halves are pinned:
+    // the protocol switch for the moment of the request, and the repair reload after the load.
+    expect(main).toContain('switchPageIdentityMidRequest(')
     expect(main).toContain("executeJavaScript('navigator.userAgent'")
   })
 })

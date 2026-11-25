@@ -129,17 +129,18 @@ import {
 import { closeInAppSignInWindow, openInAppSignInWindow } from './googleSignInWindow'
 import { NATIVE_ELECTRON_UA } from './electronIdentity'
 import {
-  adoptNativeIdentity,
   configureProviderHosts,
   configureUserAgents,
   desiredIdentityFor,
   forgetNativeIdentity,
   hasNativeIdentity,
   identityReason,
-  releaseNativeIdentity,
+  markChromeIdentity,
+  markNativeIdentity,
   resolveIdentityForRequest,
   syncIdentity
 } from './webIdentity'
+import { applyUserAgentOverCdp } from './identitySwitch'
 import { GoogleAccountStore, partitionForAccount } from './googleAccounts'
 import {
   ContainerStore,
@@ -1023,6 +1024,17 @@ app.on('web-contents-created', (_event, contents) => {
   }
   contents.on('did-navigate', (_e, url) => settle(url))
   contents.on('did-navigate-in-page', (_e, url) => settle(url))
+  // A server-side redirect is otherwise invisible in the navigation trace, and a sign-in is a redirect
+  // chain: `provider/oauth/…` → `accounts.google.com`. Naming each hop turns "the page reloaded itself"
+  // into a journey that can be followed, and says which identity the hop was supposed to present.
+  contents.on('will-redirect', (_e, url, _isInPlace, isMainFrame) => {
+    if (!isMainFrame) return
+    traceNav(tabIdForContents(contents), 'event', 'will-redirect — the server sent the page on', {
+      url,
+      identity: desiredIdentityFor(url),
+      current: contents.isDestroyed() ? '(gone)' : contents.getURL() || '(none)'
+    })
+  })
   contents.on('destroyed', () => forgetNativeIdentity(contents.id))
 
   // A page that had to be switched mid-flight — a provider's "Sign in with Google" popup, or a tab
@@ -1262,6 +1274,49 @@ function installAiSessionPolicy(partition: string): void {
 }
 
 /**
+ * Put a page on the identity its next document needs, mid-navigation, without cancelling anything.
+ *
+ * Returns true only when the page really is presenting `identity` now. `false` means "it is not, and I
+ * did not touch it" — the caller then picks the header from what the page actually presents, because a
+ * header that disagrees with `navigator.userAgent` is the state Google refuses, while a navigation that
+ * disappears is the state the user reports as "the page just reloads".
+ */
+function switchPageIdentityMidRequest(
+  contents: Electron.WebContents | null | undefined,
+  identity: 'ai' | 'native'
+): boolean {
+  if (!contents) return false
+  try {
+    if (contents.isDestroyed()) return false
+  } catch {
+    return false
+  }
+  // Nothing to do: the page already presents this identity.
+  if (hasNativeIdentity(contents.id) === (identity === 'native')) return true
+  const userAgent = identity === 'native' ? NATIVE_ELECTRON_UA : AI_UA
+  // Never `setUserAgent` here. Chromium discards a navigation that is still in flight when a page's user
+  // agent changes, and every request this hook sees is made during a navigation — that abort is what
+  // ended every Google sign-in one hop after the provider's server redirect (identitySwitch.ts has the
+  // whole account of it). The DevTools override changes the page without touching navigation state.
+  if (!applyUserAgentOverCdp(contents, userAgent, (message) => console.warn(`[identity] ${message}`))) {
+    return false
+  }
+  const marked = identity === 'native' ? markNativeIdentity(contents) : markChromeIdentity(contents)
+  if (!marked) return false
+  traceNav(tabIdForContents(contents), 'note', 'identity switched without cancelling the navigation', {
+    identity,
+    url: (() => {
+      try {
+        return contents.getURL() || '(none)'
+      } catch {
+        return '(gone)'
+      }
+    })()
+  })
+  return true
+}
+
+/**
    * The one place a request's user agent is decided, shared by every policy above so a partition can be
    * given the identity without the rest of the AI treatment.
    */
@@ -1271,23 +1326,25 @@ function installIdentityHeaderHook(ses: Electron.Session): void {
     const extra = details as unknown as { webContentsId?: number; resourceType?: string }
     // One decision, in webIdentity.ts, and the same one the navigation watcher makes: Google's own
     // properties get the honest Electron identity, an AI provider's page keeps the Chrome-shaped one,
-    // and every request of a document inherits that document's identity. The switch happens *here*,
-    // before the response becomes a document, because a header that disagrees with
-    // navigator.userAgent is exactly what Google refuses.
+    // and every request of a document inherits that document's identity.
     const decision = resolveIdentityForRequest({
       url: details.url,
       isMainFrame: extra.resourceType === 'mainFrame',
       webContentsId: extra.webContentsId
     })
+    let identity: 'ai' | 'native' = decision.identity
     if (decision.adopt || decision.release) {
       const contents =
-        extra.webContentsId === undefined
+        extra.webContentsId === undefined || extra.webContentsId < 0
           ? null
           : electronWebContents.fromId(extra.webContentsId)
-      if (decision.adopt) adoptNativeIdentity(contents, NATIVE_ELECTRON_UA)
-      else releaseNativeIdentity(contents)
+      if (!switchPageIdentityMidRequest(contents, decision.identity)) {
+        // The page could not be switched (no debugger, or a DevTools session holds one). The header
+        // follows the page as it is; the app-wide watcher switches it once this navigation commits.
+        identity = hasNativeIdentity(extra.webContentsId) ? 'native' : 'ai'
+      }
     }
-    const userAgent = decision.identity === 'native' ? NATIVE_ELECTRON_UA : AI_UA
+    const userAgent = identity === 'native' ? NATIVE_ELECTRON_UA : AI_UA
 
     for (const key of Object.keys(requestHeaders)) {
       if (key.toLowerCase() === 'user-agent') {
@@ -1977,6 +2034,9 @@ function startAutoUpdates() {
     const { autoUpdater } = electronUpdater
     // Use configured engine settings where available
     autoUpdater.autoDownload = true
+    // A downloaded update applies on any ordinary quit as well as on the timer, so "Later" is never the
+    // same as losing it — and a friend who closes Nexus for the night still wakes up on the new build.
+    autoUpdater.autoInstallOnAppQuit = true
     autoUpdater.allowPrerelease = false
     autoUpdater.allowDowngrade = false
     const publish = (state: UpdateStatus) => {
@@ -1994,6 +2054,14 @@ function startAutoUpdates() {
           }).show()
         }
       },
+      notifyReady: (state) => {
+        if (!Notification.isSupported()) return
+        const what = state.targetVersion ? `Nexus ${state.targetVersion}` : 'An update'
+        new Notification({
+          title: 'Nexus update ready',
+          body: `${what} is downloaded. Restart from Settings to install it now, or leave it — it installs when you quit.`
+        }).show()
+      },
       prepareInstall: async () => {
         // Bound shutdown preparation: fail open if cookie flush hangs.
         await Promise.race([
@@ -2007,6 +2075,18 @@ function startAutoUpdates() {
       }
     })
     autoUpdateService.start()
+    // The quarter-hour cadence is the floor, not the schedule. These two are the moments a person is
+    // actually in front of the app again — and nudge() throttles them, so alt-tabbing costs nothing.
+    try {
+      powerMonitor.on('resume', () => autoUpdateService?.nudge('the machine woke up'))
+    } catch (error) {
+      console.warn('[auto-update] power resume hook unavailable:', error)
+    }
+    try {
+      app.on('browser-window-focus', () => autoUpdateService?.nudge('a window gained focus'))
+    } catch (error) {
+      console.warn('[auto-update] focus hook unavailable:', error)
+    }
   } catch (error) {
     console.error('[auto-update] Could not initialize updater:', error)
   }
@@ -9027,6 +9107,16 @@ ipcMain.handle('nexus-update-check', () => {
     return autoUpdateService.check()
   }
   return Promise.resolve()
+})
+
+ipcMain.handle('nexus-update-install', () => {
+  autoUpdateService?.installNow()
+  return autoUpdateService ? autoUpdateService.getStatus() : unsupportedUpdateStatus()
+})
+
+ipcMain.handle('nexus-update-defer', () => {
+  autoUpdateService?.defer()
+  return autoUpdateService ? autoUpdateService.getStatus() : unsupportedUpdateStatus()
 })
 
 // Universal file-backed app state (tabs, pinned, models, providers, interface-settings, theme)

@@ -131,6 +131,34 @@ export function adoptNativeIdentity(
 }
 
 /**
+ * The registry half of `adoptNativeIdentity`, for a switch made *during* a navigation.
+ *
+ * The request hook cannot call `setUserAgent` — Chromium discards the pending navigation when the page's
+ * user agent changes (see identitySwitch.ts). It switches the page over the DevTools protocol instead,
+ * and this is how the registry learns about it, so every later request of that document agrees with the
+ * header. Kept apart from `adoptNativeIdentity` on purpose: one switches a page, the other only records
+ * that the page has been switched.
+ */
+export function markNativeIdentity(contents: IdentityWebContents | null | undefined): boolean {
+  if (!contents) return false
+  try {
+    if (contents.isDestroyed()) return false
+  } catch {
+    return false
+  }
+  nativeNow.add(contents.id)
+  return true
+}
+
+/** The registry half of `releaseNativeIdentity`. A permanent holder never gives its identity up. */
+export function markChromeIdentity(contents: IdentityWebContents | null | undefined): boolean {
+  if (!contents) return false
+  if (permanent.has(contents.id)) return false
+  nativeNow.delete(contents.id)
+  return true
+}
+
+/**
  * Back to the Chrome-shaped identity. Returns false for a permanent holder: the sign-in window keeps
  * its identity until it closes, and nothing else is allowed to take it away.
  */
