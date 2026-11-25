@@ -7,6 +7,7 @@ import {
   IconX,
   IconCheck
 } from './BrandIcons'
+import LogsPanel from './LogsPanel'
 
 export interface ProcessDiagnostic {
   pid: number
@@ -92,7 +93,7 @@ export const DiagnosticsModal: React.FC<DiagnosticsModalProps> = ({ isOpen, onCl
   const [copied, setCopied] = useState(false)
   const [exportedPath, setExportedPath] = useState<string | null>(null)
   const [exportError, setExportError] = useState<string | null>(null)
-  const [activeTab, setActiveTab] = useState<'processes' | 'tabs' | 'system'>('processes')
+  const [activeTab, setActiveTab] = useState<'processes' | 'tabs' | 'system' | 'logs'>('processes')
 
   const fetchDiagnostics = useCallback(async (samplingMs: number = 2000) => {
     setLoading(true)
@@ -257,7 +258,63 @@ export const DiagnosticsModal: React.FC<DiagnosticsModalProps> = ({ isOpen, onCl
 
         {/* Content Body */}
         <div className="flex-1 overflow-y-auto p-6 flex flex-col gap-5 custom-scrollbar min-h-0">
-          {report ? (
+          {/* The sub-nav sits outside the report guard: Logs has nothing to do with the process tree and
+              must open while the 2-second CPU sample is still running. */}
+            {/* Sub-nav Tabs */}
+            <div className="flex items-center gap-2 border-b pb-2" style={{ borderColor: 'var(--border, rgba(255,255,255,0.08))' }}>
+              <button
+                type="button"
+                onClick={() => setActiveTab('processes')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                  activeTab === 'processes'
+                    ? 'bg-white/10 text-white shadow-sm'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                Process Tree ({report ? report.processes.length : '—'})
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveTab('tabs')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                  activeTab === 'tabs'
+                    ? 'bg-white/10 text-white shadow-sm'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                Tab Lifecycle ({report ? report.tabs.length : '—'})
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveTab('system')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                  activeTab === 'system'
+                    ? 'bg-white/10 text-white shadow-sm'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                Host & Hardware Specs
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveTab('logs')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 border ${
+                  activeTab === 'logs'
+                    ? 'bg-cyan-500/15 text-cyan-200 border-cyan-500/30 shadow-sm'
+                    : 'text-slate-400 hover:text-slate-200 border-transparent'
+                }`}
+              >
+                <span
+                  className="w-1.5 h-1.5 rounded-full"
+                  style={{ background: activeTab === 'logs' ? '#22d3ee' : '#475569' }}
+                />
+                Logs
+              </button>
+            </div>
+
+          {activeTab === 'logs' ? (
+            <LogsPanel compact height={470} />
+          ) : report ? (
             <>
               {/* Stat Cards */}
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
@@ -324,43 +381,6 @@ export const DiagnosticsModal: React.FC<DiagnosticsModalProps> = ({ isOpen, onCl
                     <span className="text-[10px] opacity-50">capped @ 100MB</span>
                   </div>
                 </div>
-              </div>
-
-              {/* Sub-nav Tabs */}
-              <div className="flex items-center gap-2 border-b pb-2" style={{ borderColor: 'var(--border, rgba(255,255,255,0.08))' }}>
-                <button
-                  type="button"
-                  onClick={() => setActiveTab('processes')}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
-                    activeTab === 'processes'
-                      ? 'bg-white/10 text-white shadow-sm'
-                      : 'text-slate-400 hover:text-slate-200'
-                  }`}
-                >
-                  Process Tree ({report.processes.length})
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setActiveTab('tabs')}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
-                    activeTab === 'tabs'
-                      ? 'bg-white/10 text-white shadow-sm'
-                      : 'text-slate-400 hover:text-slate-200'
-                  }`}
-                >
-                  Tab Lifecycle ({report.tabs.length})
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setActiveTab('system')}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
-                    activeTab === 'system'
-                      ? 'bg-white/10 text-white shadow-sm'
-                      : 'text-slate-400 hover:text-slate-200'
-                  }`}
-                >
-                  Host & Hardware Specs
-                </button>
               </div>
 
               {/* Tab 1: Process Table */}

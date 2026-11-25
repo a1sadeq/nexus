@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import ts from 'typescript'
 import { describe, it, expect } from 'vitest'
 import { getMergedProviderFeatures, type ProviderConfigMap } from '../shared/providerConfig'
+import { isThirdPartyAuthPage } from './loginWall'
 
 const main = readFileSync(join(process.cwd(), 'src/main/index.ts'), 'utf8')
 function getGeneratedScripts(config: ProviderConfigMap, modelKey = 'arena-ai') {
@@ -14,14 +15,22 @@ function getGeneratedScripts(config: ProviderConfigMap, modelKey = 'arena-ai') {
       compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
     }).outputText
     const exports: Record<string, (...args: any[]) => any> = {}
-    new Function('exports', 'providerConfig', 'getMergedProviderFeatures', 'PAGE_HELPERS', code)(
-      exports, config, getMergedProviderFeatures, 'const splitList = (x) => [x];'
-    )
+    // The production code consults webIdentity.ts before injecting into a page; the real predicate is
+    // passed in so the guard behaves exactly as it does when it ships.
+    new Function(
+      'exports',
+      'providerConfig',
+      'getMergedProviderFeatures',
+      'PAGE_HELPERS',
+      'isThirdPartyAuthPage',
+      code
+    )(exports, config, getMergedProviderFeatures, 'const splitList = (x) => [x];', isThirdPartyAuthPage)
     return exports[name]
   }
   const runtime = compile('buildWebviewRuntimeJs')(modelKey) as string
   let update = ''
   compile('updateWebviewTitlePoller')({ webContents: { isDestroyed: () => false,
+    getURL: () => 'https://arena.ai/chat',
     executeJavaScript: (script: string) => { update = script; return Promise.resolve() } } }, modelKey)
   return { runtime, update }
 }

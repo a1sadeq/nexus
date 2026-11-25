@@ -51,6 +51,35 @@ export function tabNumberMap(
 }
 
 /**
+ * tab id -> number for a list that is *already in the order it is drawn*.
+ *
+ * The sidebar groups tabs by state: pinned, then active sessions, then sleeping/discarded ones at the
+ * bottom. Numbering off the raw `tabs` array meant the badges froze the moment a tab was discarded —
+ * the list read 1, 2, 3, 5, 7, 8, 4, 6 — while the digits still resolved against the same stale map,
+ * so the keys worked but the numbers looked broken. Numbering the drawn order fixes both at once: the
+ * list always reads 1…N downwards, and the digit that reaches a tab is the number printed on it.
+ */
+export function tabNumbersForOrder<T extends NumberableTab>(
+  orderedTabs: T[],
+  max: number = MAX_TAB_SHORTCUT_NUMBER
+): Record<string, number> {
+  const map: Record<string, number> = {}
+  orderedTabs.slice(0, max).forEach((tab, index) => {
+    map[tab.id] = index + 1
+  })
+  return map
+}
+
+/** The tab a digit opens from a list that is already in drawn order. */
+export function tabForShortcutNumberInOrder<T extends NumberableTab>(
+  orderedTabs: T[],
+  number: number
+): T | null {
+  if (!Number.isFinite(number) || number < 1 || number > MAX_TAB_SHORTCUT_NUMBER) return null
+  return orderedTabs[number - 1] ?? null
+}
+
+/**
  * The tab a digit opens. `number` is 1-based and already checked against the list length, so a
  * stray `Ctrl+7` with five tabs open returns null and the caller can say why.
  */

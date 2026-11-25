@@ -57,7 +57,13 @@ const electronAPI = {
     list: (): Promise<unknown> => ipcRenderer.invoke('containers_list'),
     save: (input: unknown): Promise<unknown> => ipcRenderer.invoke('containers_save', input),
     remove: (containerId: string): Promise<unknown> =>
-      ipcRenderer.invoke('containers_delete', containerId)
+      ipcRenderer.invoke('containers_delete', containerId),
+    /** The switcher order and the Ctrl+Alt+N numbering both come from this list. */
+    reorder: (orderedIds: string[]): Promise<unknown> =>
+      ipcRenderer.invoke('containers_reorder', orderedIds),
+    /** Clears that profile's Google session and opens the account chooser again. */
+    reconnect: (containerId: string): Promise<unknown> =>
+      ipcRenderer.invoke('containers_reconnect', containerId)
   },
   googleSignIn: {
     start: (accountId?: string): Promise<unknown> =>
@@ -180,6 +186,15 @@ const electronAPI = {
   diagnostics: {
     capture: (samplingMs?: number): Promise<unknown> => ipcRenderer.invoke('capture_diagnostics', samplingMs),
     exportToFile: (report: unknown): Promise<unknown> => ipcRenderer.invoke('export_diagnostics_file', report)
+  },
+  // The navigation trace: what happened to a tab's page, in order, including who aborted it.
+  navigationTrace: {
+    get: (options?: { tabId?: string; limit?: number; includeText?: boolean }): Promise<unknown> =>
+      ipcRenderer.invoke('nav_trace_get', options),
+    setVerbose: (verbose: boolean): Promise<unknown> => ipcRenderer.invoke('nav_trace_set_verbose', verbose),
+    clear: (): Promise<unknown> => ipcRenderer.invoke('nav_trace_clear'),
+    note: (tabId: string, message: string, data?: Record<string, unknown>): void =>
+      ipcRenderer.send('nav_trace_note', tabId, message, data)
   },
   nexusState: {
     get: (key: string): Promise<unknown> => ipcRenderer.invoke(`get_${key}`),

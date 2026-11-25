@@ -173,11 +173,55 @@ export interface NexusContainers {
     accountId?: string
   }) => Promise<{ container?: NexusContainerRecord; error?: string }>
   remove: (containerId: string) => Promise<{ removed: boolean; error?: string }>
+  reorder: (orderedIds: string[]) => Promise<{ containers?: NexusContainerRecord[]; error?: string }>
+  reconnect: (containerId: string) => Promise<{ ok: boolean; error?: string }>
 }
 
 export interface NexusDiagnosticsBridge {
   capture: (samplingMs?: number) => Promise<any>
   exportToFile: (report: any) => Promise<any>
+}
+
+/** One line of the navigation trace — a request, a load, an abort, a view operation, in order. */
+export interface NexusNavTraceEvent {
+  seq: number
+  at: number
+  t: number
+  tabId: string
+  kind: 'request' | 'load' | 'abort' | 'settle' | 'event' | 'intent' | 'view' | 'repair' | 'overlay' | 'note'
+  message: string
+  data?: Record<string, unknown>
+}
+
+export interface NexusNavTraceTab {
+  tabId: string
+  url: string
+  modelKey: string
+  title: string
+  active: boolean
+  loading: boolean
+  evicted: boolean
+  pendingNavigation: string
+  listeners: { stopLoading: number; failLoad: number; startNavigation: number } | null
+  lastEvent: { seq: number; kind: string; message: string; t: number } | null
+}
+
+export interface NexusNavTraceResult {
+  success: boolean
+  verbose?: boolean
+  lastSeq?: number
+  tabId?: string
+  events?: NexusNavTraceEvent[]
+  tabs?: NexusNavTraceTab[]
+  text?: string
+  reason?: string
+}
+
+export interface NexusNavTraceBridge {
+  get: (options?: { tabId?: string; limit?: number; includeText?: boolean }) => Promise<NexusNavTraceResult>
+  setVerbose: (verbose: boolean) => Promise<{ success: boolean; verbose?: boolean }>
+  clear: () => Promise<{ success: boolean }>
+  note: (tabId: string, message: string, data?: Record<string, unknown>) => void
 }
 
 declare global {
@@ -200,6 +244,7 @@ declare global {
       nexusState?: NexusStateBridge
       cache?: NexusCacheBridge
       diagnostics?: NexusDiagnosticsBridge
+      navigationTrace?: NexusNavTraceBridge
     }
   }
 }

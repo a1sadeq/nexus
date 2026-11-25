@@ -13,17 +13,18 @@ import {
   createTab,
   countModelUsage,
   isProviderHomeUrl,
+  shouldAcceptReportedUrl,
   reorderTabs
 } from './lib/tabs'
+import { partitionTabSections } from './lib/tabSections'
 import { sfx } from './lib/soundFx'
 import { getShortcutKeys, getShortcutMap, onShortcutsChanged } from './lib/shortcuts'
 import { describeOverlays, dismissibleOverlayKeys, isAnyOverlayOpen, type OverlayKey } from './lib/overlays'
 import {
   MAX_TAB_SHORTCUT_NUMBER,
   shortcutLabelForTab,
-  shortcutTabCount,
-  tabForShortcutNumber,
-  tabNumberMap,
+  tabForShortcutNumberInOrder,
+  tabNumbersForOrder,
   pinnedTabForShortcutNumber
 } from './lib/tabNumbering'
 import type { Tab, HistoryItem, ModelKey } from './lib/tabs'
@@ -33,7 +34,8 @@ import ContainerModal from './components/ContainerModal'
 import ContainerManager from './components/ContainerManager'
 import VerticalTabs from './components/VerticalTabs'
 import type { TabAiStatus } from './lib/tabStatus'
-import { BRAND_IDS, modelLabel, modelColor } from './lib/modelVisuals'
+import { BRAND_IDS, modelLabel } from './lib/modelVisuals'
+import { providerColorFor, providerColorMap, providerIconFor } from './lib/providerVisuals'
 import { BrandIcon, IconPanelLeft, IconPanelLeftClose, IconSearch, IconPlus } from './components/BrandIcons'
 import { pushClosedTab, reopenClosedTab, type ClosedTabEntry } from './lib/tabs'
 import type { SkillDef } from '../../shared/skills'
@@ -61,10 +63,11 @@ import {
 import type { ProviderConfigMap } from '../../shared/providerConfig'
 import UrlBarModal from './components/UrlBarModal'
 import { JarvisBootOverlay } from './components/JarvisBootOverlay'
-import { ZenGuideModal } from './components/ZenGuideModal'
+import { GuideTour } from './components/GuideTour'
 import { WindowTitleBar } from './components/WindowTitleBar'
 import TabColorModal from './components/TabColorModal'
 import TabColorButton from './components/TabColorButton'
+import ShortcutKeys from './components/ShortcutKeys'
 import { applyTabColors, sanitiseTabColors, tabAccentColor, type TabColors } from './lib/tabColors'
 import {
   containerColorOf,
@@ -72,6 +75,9 @@ import {
   containerIdOf,
   defaultContainerInfo,
   findContainer,
+  moveContainerInList,
+  auraRingStyle,
+  DEFAULT_CONTAINER_AURA_STRENGTH,
   insetRectForAura,
   tabCountsByContainer,
   type ContainerInfo
@@ -84,7 +90,10 @@ import './App.css'
 
 /** Bumped whenever this file's UI changes, so a stale bundle is obvious at a glance
  *  (`document.querySelector('[data-nexus-build]')` in devtools). */
-const NEXUS_UI_BUILD = '6'
+const NEXUS_UI_BUILD = '12'
+
+/** Where the "the guide has been seen" state lives. Set on close, cleared by "Tour again". */
+const GUIDE_SEEN_KEY = 'vicinae.guide.seen.v1'
 
 import {
   DEFAULT_MODELS,
@@ -159,6 +168,12 @@ function App() {
     return { tabs: [initial], activeId: initial.id, mruTabIds: [initial.id] }
   })
   const [tabs, setTabs] = useState<Tab[]>(initialTabs.tabs)
+  /**
+   * The last URL the user asked for from the address bar, so a page reporting its own URL back can be
+   * told apart from the page wandering off on its own. Without it, the "a provider bouncing to its home
+   * page must not overwrite a deep chat link" rule also swallowed the user's own navigation — see onUrl.
+   */
+  const userNavigationRef = useRef<{ tabId: string; host: string; at: number } | null>(null)
   const [activeId, setActiveId] = useState<string | null>(initialTabs.activeId)
   const [residentTabIds, setResidentTabIds] = useState<string[]>(() =>
     Array.isArray((initialTabs as any).residentTabIds) ? (initialTabs as any).residentTabIds : getRecentActiveTabIds(initialTabs.tabs, initialTabs.activeId, initialTabs.mruTabIds, 7)
@@ -330,6 +345,7 @@ function App() {
 
   const [showHistory, setShowHistory] = useState(false)
   const [showTabOverview, setShowTabOverview] = useState(false)
+  const showTabOverviewRef = useRef(false)
   // Per-tab accent & aura picker. One dialog, two entry points (title bar + quick actions).
   const [showTabColors, setShowTabColors] = useState(false)
   const activeTabColors = useMemo(
@@ -426,6 +442,20 @@ function App() {
   const [showExport, setShowExport] = useState(false)
   const [showUrlBar, setShowUrlBar] = useState(false)
   const [showGuide, setShowGuide] = useState(false)
+  /**
+   * The guide opens itself once, on first run, and never again unless F1 asks for it. The key records
+   * how it ended (`done` / `skipped` / `escape`) so a person who walked away from it is not greeted by
+   * it on the next launch either.
+   */
+  const guideOpenedOnce = useRef(false)
+  /** Which Settings section the guide asked for, so the panel opens where the step is. */
+  const [settingsRequestedTab, setSettingsRequestedTab] = useState<string | null>(null)
+  /** Bumped whenever interface styling changes — the guide's palette step waits for this. */
+  const [settingsRevision, setSettingsRevision] = useState(0)
+  /** True while the settings panel on screen was opened by the guide rather than by the user. */
+  const guideOwnsSettings = useRef(false)
+  /** Bumped on every open, and used as the guide's key: each visit starts at step one with no reset code. */
+  const [guideRun, setGuideRun] = useState(0)
   const [folderUploadData, setFolderUploadData] = useState<FolderScanResult | null>(null)
   const [showBootSequence, setShowBootSequence] = useState(true)
   const [uiZoom, setUiZoom] = useState(() => {
@@ -629,20 +659,21 @@ function App() {
 
   const usageCounts = useMemo(() => countModelUsage(tabs, history), [tabs, history])
 
-  const modelColors = useMemo(() => {
-    const map: Record<string, string> = {}
-    for (const m of models) map[m.key] = m.color || modelColor(m.key)
-    return map
-  }, [models])
+  // Provider colour and icon come from one resolver (lib/providerVisuals), so the tab list, the title
+  // bar pillar and this shell cannot disagree about what a provider looks like.
+  const modelColors = useMemo(() => providerColorMap(models), [models])
 
   // The per-provider "Custom SVG Icon Markup" from Settings → AI Providers, handed to the tab
   // surfaces so a configured icon actually appears on them and not just in settings.
   const modelIcons = useMemo(() => {
     const map: Record<string, string> = {}
-    for (const m of models) if (m.icon) map[m.key] = m.icon
+    for (const m of models) {
+      const icon = providerIconFor(m.key, models)
+      if (icon) map[m.key] = icon
+    }
     return map
   }, [models])
-  const colorFor = (key: string) => modelColors[key] || modelColor(key)
+  const colorFor = (key: string) => providerColorFor(key, models)
 
   const deleteHistoryItem = (id: string) => {
     setHistory((prev) => prev.filter((h) => h.id !== id))
@@ -836,9 +867,6 @@ Acknowledge these skills with a concise confirmation in this exact format:
   })
   useEffect(() => { pinnedIdsRef.current = pinnedIds }, [pinnedIds])
 
-  // The number printed on each tab is the digit that opens it: pinned first, then the rest. One
-  // map feeds the badges and the Ctrl+1…9 handler, so a badge cannot point at the wrong tab.
-  const tabNumbers = useMemo(() => tabNumberMap(tabs, pinnedIds), [tabs, pinnedIds])
 
   // Reconcile pinned tabs on mount. A one-time non-destructive migration merges legacy
   // localStorage with backend pinned.json; subsequent boots treat the backend as authoritative.
@@ -881,16 +909,51 @@ Acknowledge these skills with a concise confirmation in this exact format:
       .catch(() => {})
   }, [])
 
+  /**
+   * Expanded unless the user says otherwise.
+   *
+   * The key is v2 on purpose. v1 remembered "collapsed" from a build where collapsing also switched the
+   * footer to single-column rows; a window that started up with v1 set looked like the new layout had
+   * failed to apply. Starting from v2 means everyone sees the sidebar the way it is designed once, and
+   * whatever they choose after that is remembered.
+   */
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
     try {
-      return localStorage.getItem('vicinae.sidebarCollapsed') === 'true'
+      localStorage.removeItem('vicinae.sidebarCollapsed')
+      return localStorage.getItem('vicinae.sidebarCollapsed.v2') === 'true'
     } catch {
       return false
     }
   })
 
+  // Collapsed tiles keep the expanded arrangement — a label row, then the keys — with the label row
+  // reduced to its icon. That only looks deliberate if the icon is centred, so every tile row shares
+  // this class instead of each button deciding for itself.
+  const tileLabelRow = `flex items-center gap-1.5 min-w-0${sidebarCollapsed ? ' justify-center' : ''}`
+
   const [loadingTabId, setLoadingTabId] = useState<string | null>(null)
   const [tabStatuses, setTabStatuses] = useState<Record<string, TabAiStatus>>({})
+
+  // The number printed on each tab is the digit that opens it, counted down the list as it is drawn:
+  // pinned, then active sessions, then the sleeping/discarded ones at the bottom. Numbering off the raw
+  // tab array froze the badges once a tab was discarded (the list read 1, 2, 3, 5, 7, 8, 4, 6), so the
+  // numbers are re-sorted whenever the grouping changes. One order feeds both the badges and the
+  // Ctrl+1…9 handler, so a badge cannot point at the wrong tab.
+  const pinnedSectionOrder = interfaceSettings.pinnedPosition === 'section'
+  const visualTabOrder = useMemo(
+    () =>
+      partitionTabSections({
+        tabs,
+        activeId,
+        pinnedIds,
+        tabStatuses,
+        residentTabIds,
+        discardedTabIds,
+        pinnedSection: pinnedSectionOrder
+      }).order,
+    [tabs, activeId, pinnedIds, tabStatuses, residentTabIds, discardedTabIds, pinnedSectionOrder]
+  )
+  const tabNumbers = useMemo(() => tabNumbersForOrder(visualTabOrder), [visualTabOrder])
   const tabStatusesRef = useRef<Record<string, TabAiStatus>>({})
   useEffect(() => {
     tabStatusesRef.current = tabStatuses
@@ -993,63 +1056,113 @@ Acknowledge these skills with a concise confirmation in this exact format:
       })
     }
 
+    /**
+     * A tab told us its URL changed.
+     *
+     * This used to do all of its work — including the trace note and the history write — inside a
+     * `setTabs` updater. React is allowed to call an updater more than once (StrictMode always does),
+     * so every URL change produced four identical "URL report accepted" lines in the trace and four
+     * history writes. The decision is now made once against `tabsRef`, then written once.
+     */
     const onUrl = (_e: unknown, tabId: string, url: string) => {
-      setTabs((prev) => {
-        const existing = prev.find((t) => t.id === tabId)
-        if (
-          existing &&
-          isProviderHomeUrl(url) &&
-          existing.url &&
-          !isProviderHomeUrl(existing.url)
-        ) {
-          return prev
+      // A provider that bounces itself back to its home page must not overwrite the deep chat link the
+      // tab is on — but the *user* asking for that page is a different matter. This used to be one
+      // rule, which is why a restored tab (sitting on a chat URL, not a home URL) ignored every
+      // navigation from the address bar: the URL never reached the tab, so the next activation put the
+      // old page back. "Ctrl+L only works on new tabs" was exactly this.
+      const pending = userNavigationRef.current
+      let isUserNavigation = false
+      if (pending && pending.tabId === tabId && Date.now() - pending.at < 30_000) {
+        try {
+          const host = new URL(url).host.toLowerCase()
+          isUserNavigation = host === pending.host || host.endsWith(`.${pending.host}`)
+        } catch {
+          isUserNavigation = false
         }
-        const resolvedModel = resolveActiveProviderKey({ ...existing, url }, models)
-        const nextTabs = prev.map((t) =>
-          t.id === tabId && url ? { ...t, url, model: resolvedModel || t.model } : t
-        )
-        const updatedTab = nextTabs.find((t) => t.id === tabId)
+      }
+      if (isUserNavigation) userNavigationRef.current = null
 
-        if (
-          updatedTab &&
-          updatedTab.url &&
+      const existing = tabsRef.current.find((t) => t.id === tabId)
+      if (!existing) return
+
+      if (
+        !shouldAcceptReportedUrl({
+          reportedUrl: url,
+          currentUrl: existing.url,
+          isUserNavigation
+        })
+      ) {
+        traceNote(tabId, 'URL report dropped (provider bounced to its home page)', {
+          reported: url,
+          current: existing.url,
+          userNavigation: isUserNavigation
+        })
+        return
+      }
+
+      if (!url) return
+
+      const resolvedModel = resolveActiveProviderKey({ ...existing, url }, models)
+      const nextTabs = tabsRef.current.map((t) =>
+        t.id === tabId ? { ...t, url, model: resolvedModel || t.model } : t
+      )
+      // Keep the mirror in step so a burst of reports in one tick is not applied against stale tabs.
+      tabsRef.current = nextTabs
+      setTabs(nextTabs)
+
+      const updatedTab = nextTabs.find((t) => t.id === tabId)
+      const isConversationUrl = Boolean(
+        updatedTab?.url &&
           updatedTab.url.length > 3 &&
           !updatedTab.url.endsWith('.com/') &&
           !updatedTab.url.endsWith('.ai/')
-        ) {
-          setHistory((prevHistory) => {
-            const rawTitle = updatedTab.title || updatedTab.model.toUpperCase()
-            const title = cleanConversationTitle(rawTitle, updatedTab.model) || rawTitle
-            const isDefaultTitle = checkIsDefaultTitle(title, updatedTab.model);
+      )
 
-            if (isDefaultTitle) return prevHistory; // Do not corrupt history with trash!
+      traceNote(tabId, 'URL report accepted', {
+        reported: url,
+        userNavigation: isUserNavigation,
+        ...(isConversationUrl ? {} : { history: 'home page, not saved' })
+      })
 
-            const existingItem = prevHistory.find(
-              (h) => h.url === updatedTab.url || h.id === updatedTab.id
-            )
-            const updatedHistory = prevHistory.filter(
-              (h) => h.url !== updatedTab.url && h.title !== title
-            )
+      if (!updatedTab || !isConversationUrl) return
 
-            const newHistoryItem = {
-              id: updatedTab.id,
-              title,
-              url: updatedTab.url,
-              model: updatedTab.model,
-              thumbnail: existingItem?.thumbnail,
-              ...(updatedTab.accentColor ? { accentColor: updatedTab.accentColor } : {}),
-              ...(updatedTab.auraColor ? { auraColor: updatedTab.auraColor } : {}),
-              timestamp: Date.now(),
-              updatedAt: new Date().toISOString()
-            }
-            const finalHistory = [newHistoryItem, ...updatedHistory].slice(0, 100)
-            window.electron?.ipcRenderer.invoke('save_history', JSON.stringify(finalHistory)).catch(() => {})
-            return finalHistory
-          })
+      setHistory((prevHistory) => {
+        const rawTitle = updatedTab.title || updatedTab.model.toUpperCase()
+        const title = cleanConversationTitle(rawTitle, updatedTab.model) || rawTitle
+        const isDefaultTitle = checkIsDefaultTitle(title, updatedTab.model)
+
+        if (isDefaultTitle) return prevHistory // Do not corrupt history with trash!
+
+        const existingItem = prevHistory.find(
+          (h) => h.url === updatedTab.url || h.id === updatedTab.id
+        )
+        const updatedHistory = prevHistory.filter(
+          (h) => h.url !== updatedTab.url && h.title !== title
+        )
+
+        const newHistoryItem = {
+          id: updatedTab.id,
+          title,
+          url: updatedTab.url,
+          model: updatedTab.model,
+          thumbnail: existingItem?.thumbnail,
+          // The colour is how this project is recognised in a list of forty conversations.
+          ...(updatedTab.accentColor ? { accentColor: updatedTab.accentColor } : {}),
+          ...(updatedTab.auraColor ? { auraColor: updatedTab.auraColor } : {}),
+          timestamp: Date.now(),
+          updatedAt: new Date().toISOString()
         }
-        return nextTabs
+        const finalHistory = [newHistoryItem, ...updatedHistory].slice(0, 100)
+        // Writing inside a `setHistory` updater is the same impure-updater bug; do it on the next tick.
+        queueMicrotask(() => {
+          window.electron?.ipcRenderer
+            .invoke('save_history', JSON.stringify(finalHistory))
+            .catch(() => {})
+        })
+        return finalHistory
       })
     }
+
   const onLoading = (_e: unknown, tabId: string, loading: boolean) => {
       setLoadingTabId(loading ? tabId : null)
       // NOTE: Chromium page navigation loading (did-start/stop-loading)
@@ -1191,7 +1304,7 @@ Acknowledge these skills with a concise confirmation in this exact format:
     setSidebarCollapsed((prev) => {
       const next = !prev
       try {
-        localStorage.setItem('vicinae.sidebarCollapsed', String(next))
+        localStorage.setItem('vicinae.sidebarCollapsed.v2', String(next))
       } catch (e) {
         console.error(e)
       }
@@ -1203,6 +1316,7 @@ Acknowledge these skills with a concise confirmation in this exact format:
   // Read by containerBounds(), which is also called from observers: a ref keeps the geometry
   // functions free of the render cycle.
   const auraRingColorRef = useRef<string | undefined>(undefined)
+  const auraRingStrengthRef = useRef<number>(DEFAULT_CONTAINER_AURA_STRENGTH)
 
   const containerBounds = () => {
     if (showBootSequence) return { x: 0, y: 0, width: 0, height: 0 }
@@ -1214,9 +1328,11 @@ Acknowledge these skills with a concise confirmation in this exact format:
       width: Math.max(0, Math.round(rect.width)),
       height: Math.max(0, Math.round(rect.height))
     }
-    // A coloured container draws its aura in the space the native view leaves free.
+    // A coloured container draws its aura in the space the native view leaves free — and how much space
+    // that is belongs to the user (Settings → Style → Container aura). Strength 0 means no ring, so the
+    // page goes flush to the edge and the inset has to be zero too, not a hidden 6px gap.
     if (!auraRingColorRef.current) return base
-    const inset = insetRectForAura(base, true)
+    const inset = insetRectForAura(base, true, auraRingStrengthRef.current)
     return { x: inset.x, y: inset.y, width: inset.width, height: inset.height }
   }
 
@@ -1234,9 +1350,9 @@ Acknowledge these skills with a concise confirmation in this exact format:
       const nextDiscarded = discardedTabIdsRef.current.filter((tabId) => tabId !== id)
       discardedTabIdsRef.current = nextDiscarded
       setDiscardedTabIds(nextDiscarded)
-      // Dismiss in-app toast for this tab
-      // @ts-ignore
-      window.electron?.ipcRenderer?.send('dismiss_in_app_toast')
+      // The in-app toast is *not* dismissed here. This used to fire on every single tab switch, which is
+      // why notifications vanished the moment the user moved between tabs. It now lives out its timer
+      // (clicking it opens the tab, the X closes it), and main hides it only while a panel is up.
 
       const bounds = containerBounds() || { x: 0, y: 0, width: 0, height: 0 }
       if (url) {
@@ -1370,6 +1486,92 @@ Acknowledge these skills with a concise confirmation in this exact format:
     [loadContainers]
   )
 
+  /**
+   * Reordering is optimistic: the row moves under the pointer, then main writes the order down.
+   *
+   * The list *is* the numbering — the switcher lists it and `Ctrl+Alt+N` opens the Nth — so a failed
+   * write has to put the old order back rather than leave the panel disagreeing with main.
+   */
+  const reorderContainer = useCallback((containerId: string, delta: number) => {
+    const before = containersRef.current
+    const next = moveContainerInList(before, containerId, delta)
+    if (next === before) return
+    setContainers(next)
+    containersRef.current = next
+    const restore = (): void => {
+      setContainers(before)
+      containersRef.current = before
+    }
+    void (async () => {
+      try {
+        const result = (await window.electron?.containers?.reorder?.(next.map((c) => c.id))) as
+          | { containers?: ContainerInfo[]; error?: string }
+          | undefined
+        if (result?.error) {
+          setContainerHint(result.error)
+          restore()
+          return
+        }
+        if (Array.isArray(result?.containers)) {
+          setContainers(result.containers)
+          containersRef.current = result.containers
+        }
+      } catch (err) {
+        console.warn('[containers] Reorder failed:', err)
+        setContainerHint('Could not save the new order.')
+        restore()
+      }
+    })()
+  }, [])
+
+  /**
+   * Signing a profile in again: main clears that account's store and opens Google's account chooser,
+   * so the account can be changed or a second one added. The panel closes first — the sign-in window
+   * is its own window, and leaving the panel open underneath it would put the two in each other's way.
+   */
+  const reconnectContainer = useCallback(async (containerId: string) => {
+    const container = findContainer(containersRef.current, containerId)
+    const result = (await window.electron?.containers?.reconnect?.(containerId)) as
+      | { ok?: boolean; error?: string }
+      | undefined
+    if (!result?.ok) {
+      return { ok: false, error: result?.error ?? 'Could not start the sign-in again.' }
+    }
+    setShowContainerManager(false)
+    requestAnimationFrame(() => restoreViewBoundsRef.current?.())
+    setContainerHint(
+      `Signing ${container.name} in again — pick the account in the window that just opened.`
+    )
+    return { ok: true }
+  }, [])
+
+  // What happened after the sign-in window closed. A separate channel from `google-signin-event`,
+  // which the settings panel owns and clears on unmount.
+  useEffect(() => {
+    // @ts-ignore
+    const cleanup = window.electron?.ipcRenderer?.on?.(
+      'container-reconnect-event',
+      (
+        _event: unknown,
+        payload: { containerName?: string; stage?: string; message?: string }
+      ) => {
+        if (payload?.stage === 'success') {
+          setContainerHint(
+            `${payload.containerName ?? 'The profile'} is signed in again — its tabs were reloaded. ` +
+              'If you chose a different account, rename it from Edit.'
+          )
+          return
+        }
+        if (payload?.stage === 'failed' || payload?.stage === 'blocked') {
+          setContainerHint(payload.message ?? 'The sign-in did not finish.')
+        }
+      }
+    )
+    return () => {
+      if (typeof cleanup === 'function') cleanup()
+    }
+  }, [])
+
   useEffect(() => {
     openContainerTabRef.current = openContainerTab
   }, [openContainerTab])
@@ -1475,6 +1677,39 @@ Acknowledge these skills with a concise confirmation in this exact format:
     if (changed) restoreViewBoundsRef.current?.()
   }, [activeContainerColor])
 
+  // The ring's *width* is a setting too: moving the slider has to move the native view with it, or the
+  // ring would grow under the page instead of around it.
+  const containerAuraStrength = interfaceSettings.containerAuraStrength ?? DEFAULT_CONTAINER_AURA_STRENGTH
+  useEffect(() => {
+    const changed = auraRingStrengthRef.current !== containerAuraStrength
+    auraRingStrengthRef.current = containerAuraStrength
+    if (changed) restoreViewBoundsRef.current?.()
+  }, [containerAuraStrength])
+
+  /**
+   * A paste that lands on the shell lands in the prompt.
+   *
+   * The composer is in the tab's native view, not in this renderer, so Ctrl+V with the sidebar (or a
+   * footer button, or the tab strip) focused was delivered to a document with nothing editable in it
+   * and simply vanished — the user had to click the page first. This listener catches the paste before
+   * any of that, refuses to touch it when it *is* going somewhere editable (an overlay's input, a
+   * settings field), and otherwise hands it to main, which gives the keyboard to the active tab, puts
+   * the caret back where it was and pastes for real.
+   */
+  useEffect(() => {
+    const onPaste = (event: ClipboardEvent): void => {
+      const target = event.target as HTMLElement | null
+      const tag = target?.tagName
+      if (target?.isContentEditable || tag === 'INPUT' || tag === 'TEXTAREA') return
+      if (anyOverlayOpenRef.current) return
+      event.preventDefault()
+      // @ts-ignore -- the preload bridge is untyped here, as everywhere else in this file
+      window.electron?.ipcRenderer?.send?.('paste_to_active_view')
+    }
+    document.addEventListener('paste', onPaste, true)
+    return () => document.removeEventListener('paste', onPaste, true)
+  }, [])
+
   const restoreViewBounds = useCallback(() => {
     if (anyOverlayOpenRef.current) {
       return
@@ -1554,6 +1789,34 @@ Acknowledge these skills with a concise confirmation in this exact format:
     window.electron?.ipcRenderer.send('resize_view', { x: 0, y: 0, width: 0, height: 0 })
   }, [])
 
+  // One owner for the Tab Overview panel. It was duplicated in both footers; the sidebar now has
+  // three entry points (button beside Agent Handoff, the key, and the title-bar button), so the
+  // "capture first, then close everything else" rule lives here instead of in three places.
+  const toggleTabOverviewPanel = useCallback(async () => {
+    const nextState = !showTabOverviewRef.current
+    // Recorded now, not in the mirror effect below: two clicks in one tick would otherwise both read
+    // "closed" and both ask to open, and the second would win while the first's capture is in flight.
+    showTabOverviewRef.current = nextState
+    if (nextState) {
+      await captureActiveSnapshot()
+    }
+    setShowTabOverview(nextState)
+    if (nextState) {
+      setShowHistory(false)
+      setShowSettings(false)
+      setShowNewTab(false)
+      // @ts-ignore -- the preload bridge is untyped here, as everywhere else in this file
+      window.electron?.ipcRenderer.send('resize_view', { x: 0, y: 0, width: 0, height: 0 })
+    } else {
+      restoreViewBounds()
+    }
+  }, [captureActiveSnapshot, restoreViewBounds])
+
+  // Everything else that closes the panel goes through setShowTabOverview, so the mirror is exact.
+  useEffect(() => {
+    showTabOverviewRef.current = showTabOverview
+  }, [showTabOverview])
+
   const closeTabColors = useCallback(() => {
     setShowTabColors(false)
     // anyOverlayOpenRef still reads true during this render, so restoring has to wait for the next
@@ -1603,12 +1866,58 @@ Acknowledge these skills with a concise confirmation in this exact format:
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [historyLoaded, tabsHydrated])
 
+  /**
+   * Say what the renderer decided, in the main process's navigation trace.
+   *
+   * The two decisions that used to be invisible — "the address bar asked for this URL" and "the page
+   * reported a URL and we dropped it" — are the whole story of the Ctrl+L bug. They now sit in the same
+   * list as the loads and the aborts, so the Diagnostics panel reads end to end, and in development
+   * they also print next to the main-process lines.
+   */
+  const traceNote = useCallback((tabId: string, message: string, data?: Record<string, unknown>) => {
+    try {
+      if (window.electron?.navigationTrace?.note) {
+        window.electron.navigationTrace.note(tabId, message, data)
+      } else {
+        window.electron?.ipcRenderer?.send?.('nav_trace_note', tabId, message, data)
+      }
+    } catch {
+      /* the trace must never break a navigation */
+    }
+    if (import.meta.env.DEV) console.debug('[nav]', message, tabId, data ?? '')
+  }, [])
+
+  /** Remember what the user asked the address bar for, so onUrl can let it through. */
+  const rememberUserNavigation = useCallback((tabId: string, url: string) => {
+    let host = ''
+    try {
+      host = new URL(url).host.toLowerCase()
+    } catch {
+      host = ''
+    }
+    userNavigationRef.current = { tabId, host, at: Date.now() }
+  }, [])
+
+  /** A tab the user navigated is loaded, not sleeping. Keeps the sidebar truthful. */
+  const markTabResident = useCallback((tabId: string) => {
+    const nextResident = residentTabIdsRef.current.includes(tabId)
+      ? residentTabIdsRef.current
+      : [...residentTabIdsRef.current, tabId]
+    residentTabIdsRef.current = nextResident
+    setResidentTabIds(nextResident)
+    const nextDiscarded = discardedTabIdsRef.current.filter((id) => id !== tabId)
+    discardedTabIdsRef.current = nextDiscarded
+    setDiscardedTabIds(nextDiscarded)
+  }, [])
+
   const handleUrlBarNavigate = useCallback(
     (newUrl: string, detectedModel?: string, inNewTab?: boolean) => {
       const modelToUse = (detectedModel) || 'gemini'
       if (inNewTab) {
         const result = addNewChat(tabs, modelToUse, newUrl)
         setTabs(result.tabs)
+        rememberUserNavigation(result.activeId, newUrl)
+        markTabResident(result.activeId)
         loadTabUrl(result.activeId, newUrl)
         restoreViewBounds()
         return
@@ -1621,6 +1930,10 @@ Acknowledge these skills with a concise confirmation in this exact format:
         t.id === activeId ? { ...t, url: newUrl, model: targetModel } : t
       )
       setTabs(updated)
+      rememberUserNavigation(activeId, newUrl)
+      traceNote(activeId, 'address bar → navigate_tab', { url: newUrl, model: targetModel })
+      // Navigating a tab loads it, so it is not a sleeping tab any more.
+      markTabResident(activeId)
       // @ts-ignore
       window.electron?.ipcRenderer?.send?.('navigate_tab', activeId, newUrl, targetModel)
       restoreViewBounds()
@@ -1674,6 +1987,13 @@ Acknowledge these skills with a concise confirmation in this exact format:
             // @ts-ignore
             window.electron?.ipcRenderer.send('reload_active_tab')
           }
+          restoreViewBounds()
+          break
+        case 'repair_view':
+          // Rebuild the native surface without reloading the page: the chat, its scroll position and
+          // its session survive. This is what closing and reopening the tab used to be for.
+          // @ts-ignore
+          window.electron?.ipcRenderer.invoke('repair_view', activeId || undefined)
           restoreViewBounds()
           break
         default:
@@ -1848,7 +2168,7 @@ Acknowledge these skills with a concise confirmation in this exact format:
         case 'toggle_sidebar': {
           setSidebarCollapsed((s) => {
             const next = !s
-            localStorage.setItem('vicinae.sidebarCollapsed', String(next))
+            localStorage.setItem('vicinae.sidebarCollapsed.v2', String(next))
             return next
           })
           break
@@ -1880,7 +2200,14 @@ Acknowledge these skills with a concise confirmation in this exact format:
           )
           break
         case 'guide_open':
-          openExclusive(() => setShowGuide(true), () => setShowGuide(false), showGuide)
+          openExclusive(
+            () => {
+              setGuideRun((n) => n + 1)
+              setShowGuide(true)
+            },
+            () => setShowGuide(false),
+            showGuide
+          )
           break
         case 'toggle_export':
         case 'export_context':
@@ -1911,7 +2238,7 @@ Acknowledge these skills with a concise confirmation in this exact format:
           const pinnedOnly = Boolean(data.pinnedOnly ?? data.isPinned)
           const target = pinnedOnly
             ? pinnedTabForShortcutNumber(tabs, pinnedIds, rawNumber)
-            : tabForShortcutNumber(tabs, pinnedIds, rawNumber)
+            : tabForShortcutNumberInOrder(visualTabOrder, rawNumber)
           if (target?.url) {
             setShowUrlBar(false)
             setShowTabOverview(false)
@@ -1920,7 +2247,7 @@ Acknowledge these skills with a concise confirmation in this exact format:
             switchToTab(target.id, target.url)
           } else if (!pinnedOnly) {
             // Say it instead of doing nothing: a digit that lands on no tab used to look broken.
-            const reachable = shortcutTabCount(tabs, pinnedIds)
+            const reachable = Math.min(visualTabOrder.length, MAX_TAB_SHORTCUT_NUMBER)
             const lastNumber = Math.min(reachable, MAX_TAB_SHORTCUT_NUMBER)
             setContainerHint(
               reachable === 0
@@ -1928,6 +2255,16 @@ Acknowledge these skills with a concise confirmation in this exact format:
                 : `No tab ${rawNumber} — you have ${reachable} numbered tab${reachable === 1 ? '' : 's'} (${shortcutLabelForTab(1)}–${lastNumber}).`
             )
           }
+          break
+        }
+        case 'toggle_tab_colours': {
+          // Ctrl+Shift+C — the same colours the Tab Colours tile opens, so the button and the key are
+          // the same feature rather than two.
+          if (showTabColors) {
+            closeTabColors()
+            break
+          }
+          openTabColors()
           break
         }
         case 'toggle_container_menu': {
@@ -2138,6 +2475,66 @@ Acknowledge these skills with a concise confirmation in this exact format:
     }
   }, [showBootSequence, showHistory, showTabOverview, showSettings, showNewTab, showExport, showUrlBar, showGuide, showSkillsPalette, showBaseSkillsModal, showSkillParamsModal, showSkillEditorModal, showDiagnosticsModal, showTabColors])
 
+  /**
+   * First run: the guide introduces itself once the boot sequence has settled. `GUIDE_SEEN_KEY` is
+   * written when it closes, however it closes, so this can only ever fire for a profile that has not
+   * seen it. F1 opens it at any time after that.
+   */
+  useEffect(() => {
+    if (showBootSequence) return
+    let seen: string | null = null
+    try {
+      seen = localStorage.getItem(GUIDE_SEEN_KEY)
+    } catch {
+      seen = 'done'
+    }
+    if (seen) return
+    const timer = setTimeout(() => {
+      setGuideRun((n) => n + 1)
+      setShowGuide(true)
+      // @ts-ignore -- the preload bridge is untyped here, as everywhere else in this file
+      window.electron?.ipcRenderer.send('resize_view', { x: 0, y: 0, width: 0, height: 0 })
+    }, 900)
+    return () => clearTimeout(timer)
+  }, [showBootSequence])
+
+  const closeGuide = useCallback(
+    (reason: 'done' | 'skipped' | 'escape') => {
+      setShowGuide(false)
+      if (guideOwnsSettings.current) {
+        guideOwnsSettings.current = false
+        setSettingsRequestedTab(null)
+        setShowSettings(false)
+      }
+      try {
+        localStorage.setItem(GUIDE_SEEN_KEY, reason)
+      } catch {
+        /* a locked-down profile still gets the guide; it just may not remember that it did */
+      }
+      restoreViewBounds()
+    },
+    [restoreViewBounds]
+  )
+
+  /**
+   * However the guide closes — its own buttons, F1 pressed again, Escape handled in main — the fact that
+   * it has been seen gets written down. `closeGuide` records the reason; this catches the routes that
+   * only flip the flag, so a first-run guide cannot reappear on the next launch.
+   */
+  useEffect(() => {
+    if (showGuide) {
+      guideOpenedOnce.current = true
+      return
+    }
+    if (!guideOpenedOnce.current) return
+    guideOpenedOnce.current = false
+    try {
+      if (!localStorage.getItem(GUIDE_SEEN_KEY)) localStorage.setItem(GUIDE_SEEN_KEY, 'closed')
+    } catch {
+      /* a locked-down profile simply gets the guide again */
+    }
+  }, [showGuide])
+
   return (
     <div
       data-nexus-build={NEXUS_UI_BUILD}
@@ -2147,7 +2544,7 @@ Acknowledge these skills with a concise confirmation in this exact format:
         <WindowTitleBar
           activeTabTitle={tabs.find((t) => t.id === activeId)?.title}
           activeModelName={models.find((m) => m.key === resolvedActiveModelKey)?.label || modelLabel(resolvedActiveModelKey)}
-          modelColor={modelColor(resolvedActiveModelKey)}
+          modelColor={colorFor(resolvedActiveModelKey)}
           maskTitle={interfaceSettings.maskTitlebarTitle}
           models={models}
           activeModelKey={resolvedActiveModelKey}
@@ -2155,7 +2552,7 @@ Acknowledge these skills with a concise confirmation in this exact format:
           autoHideMode={interfaceSettings.showTitlebar === false}
           onOpenDiagnostics={() => setShowDiagnosticsModal(true)}
           onOpenTabColors={activeTab ? openTabColors : undefined}
-          tabAccent={activeTab ? tabAccentColor(activeTab, modelColor(resolvedActiveModelKey)) : undefined}
+          tabAccent={activeTab ? tabAccentColor(activeTab, colorFor(resolvedActiveModelKey)) : undefined}
           hasCustomTabColors={Boolean(activeTabColors.accentColor || activeTabColors.auraColor)}
         />
       )}
@@ -2173,6 +2570,7 @@ Acknowledge these skills with a concise confirmation in this exact format:
           <div className="flex items-center justify-between p-2 border-b border-(--border)/80 shrink-0 gap-1 bg-(--surface)">
             <button
               onClick={toggleSidebar}
+              data-collapse-toggle="true"
               title={sidebarCollapsed ? 'Expand Sidebar' : 'Collapse Sidebar'}
               className="p-1.5 rounded-lg text-(--text2) hover:text-(--text) hover:bg-(--surface2) transition-colors cursor-pointer"
               aria-label={sidebarCollapsed ? 'Expand Sidebar' : 'Collapse Sidebar'}
@@ -2213,6 +2611,7 @@ Acknowledge these skills with a concise confirmation in this exact format:
           {/* Vertical Tabs Body */}
           {interfaceSettings.tabOrientation !== 'horizontal' ? (
             <VerticalTabs
+              data-guide="tabs"
               containerMarks={containerMarks}
               tabNumbers={tabNumbers}
               tabs={tabs}
@@ -2371,42 +2770,87 @@ Acknowledge these skills with a concise confirmation in this exact format:
           {/* Sidebar Footer: HUD Status, Agent Handoff, Tools */}
           {interfaceSettings.tabOrientation !== 'horizontal' && (
             <div className="p-2 border-t border-(--border)/80 flex flex-col gap-2 shrink-0 bg-(--surface)">
-              {/* Agent Handoff Export Button */}
-              <button
-                className={`history-btn w-full px-2.5 py-1.5 rounded-lg transition-all flex items-center gap-2 border shadow-xs cursor-pointer ${
-                  showExport
-                    ? 'bg-amber-500/25 border-amber-500/50 text-amber-300'
-                    : 'bg-(--surface2) hover:bg-(--border) border-white/10 text-(--text) hover:border-amber-500/40 hover:text-amber-200'
-                } ${sidebarCollapsed ? 'justify-center' : ''}`}
-                onClick={() => {
-                  const nextState = !showExport
-                  setShowExport(nextState)
-                  if (nextState) {
-                    setShowHistory(false)
-                    setShowSettings(false)
-                    setShowNewTab(false)
-                    // @ts-ignore
-                    window.electron?.ipcRenderer.send('resize_view', { x: 0, y: 0, width: 0, height: 0 })
-                  } else {
-                    restoreViewBounds()
-                  }
-                }}
-                title="Export Compressed Agent Handoff Context (Ctrl+Shift+E)"
+              {/* Agent Handoff and Tabs share a row: both are one-press tools that open a panel, and
+                  they were on different rows for no reason the user could see. The Tabs button used to
+                  live in the navigation row below; it moved up here beside Export, the same pairing the
+                  horizontal title bar already uses. */}
+              <div
+                className={`grid gap-1.5 ${sidebarCollapsed ? 'grid-cols-2' : 'grid-cols-[1.55fr_1fr]'}`}
+                data-agent-tabs="true"
+                data-guide="navigation"
               >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className="text-amber-400 shrink-0">
-                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                  <polyline points="7 10 12 15 17 10"/>
-                  <line x1="12" x2="12" y1="15" y2="3"/>
-                </svg>
-                {!sidebarCollapsed && (
-                  <>
-                    <span className="text-xs font-semibold flex-1 text-left truncate">Agent Handoff</span>
-                    <span className="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">
-                      Export
+                <button
+                  className={`history-btn min-w-0 px-2.5 py-1.5 rounded-lg transition-all flex items-center gap-2 border shadow-xs cursor-pointer ${
+                    showExport
+                      ? 'bg-amber-500/25 border-amber-500/50 text-amber-300'
+                      : 'bg-(--surface2) hover:bg-(--border) border-white/10 text-(--text) hover:border-amber-500/40 hover:text-amber-200'
+                  } ${sidebarCollapsed ? 'justify-center' : ''}`}
+                  onClick={() => {
+                    const nextState = !showExport
+                    setShowExport(nextState)
+                    if (nextState) {
+                      setShowHistory(false)
+                      setShowSettings(false)
+                      setShowNewTab(false)
+                      // @ts-ignore
+                      window.electron?.ipcRenderer.send('resize_view', { x: 0, y: 0, width: 0, height: 0 })
+                    } else {
+                      restoreViewBounds()
+                    }
+                  }}
+                  title="Export Compressed Agent Handoff Context (Ctrl+Shift+E)"
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className="text-amber-400 shrink-0">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                    <polyline points="7 10 12 15 17 10"/>
+                    <line x1="12" x2="12" y1="15" y2="3"/>
+                  </svg>
+                  {!sidebarCollapsed && (
+                    <>
+                      <span className="text-xs font-semibold flex-1 text-left truncate">Agent Handoff</span>
+                      <span className="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30 shrink-0">
+                        Export
+                      </span>
+                    </>
+                  )}
+                </button>
+
+                  <button
+                    type="button"
+                    onClick={() => void toggleTabOverviewPanel()}
+                    data-nav-tab-overview="sidebar-top"
+                    aria-expanded={showTabOverview}
+                    title={`Tab Overview (${getShortcutKeys('tab-overview').join('+')})`}
+                    className={`min-w-0 px-2 py-1.5 rounded-lg transition-colors border cursor-pointer flex flex-col items-stretch gap-1 justify-center ${
+                      showTabOverview
+                        ? 'bg-(--accent)/20 border-(--accent)/50 text-(--text)'
+                        : 'bg-(--surface2) hover:bg-(--border) text-(--text) border-white/10'
+                    }`}
+                  >
+                    <span className={`flex items-center gap-1.5 min-w-0 ${sidebarCollapsed ? 'justify-center' : ''}`}>
+                      <svg
+                        width="14"
+                        height="14"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        className="shrink-0"
+                        aria-hidden="true"
+                      >
+                        <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
+                        <line x1="8" x2="22" y1="21" y2="21" />
+                        <line x1="12" x2="12" y1="17" y2="21" />
+                      </svg>
+                      {!sidebarCollapsed && (
+                        <span className="text-xs font-semibold truncate min-w-0">Tabs</span>
+                      )}
                     </span>
-                  </>
-                )}
-              </button>
+                    <ShortcutKeys action="tab-overview" className="is-block" />
+                  </button>
+              </div>
 
               {/* Quick Actions: the four things people reach for but only discover by
                   remembering a shortcut. Same handlers as Ctrl+O, Ctrl+Shift+O, Ctrl+S and
@@ -2419,12 +2863,15 @@ Acknowledge these skills with a concise confirmation in this exact format:
                     window.electron?.ipcRenderer.send('trigger_active_upload')
                   }}
                   title={`Attach files (${getShortcutKeys('upload-file').join('+')})`}
-                  className={`px-2 py-1.5 rounded-lg transition-colors flex items-center justify-center gap-1.5 cursor-pointer bg-(--surface2) hover:bg-(--border) text-(--text) border border-white/10 hover:border-(--accent)/40 ${sidebarCollapsed ? 'col-span-2' : ''}`}
+                  className={`px-2 py-1.5 rounded-lg transition-colors flex flex-col items-stretch gap-1 cursor-pointer bg-(--surface2) hover:bg-(--border) text-(--text) border border-white/10 hover:border-(--accent)/40 `}
                 >
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
-                    <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+                  <span className={tileLabelRow}>
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
+                      <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
                   </svg>
-                  <span className="text-[11px] font-semibold truncate">Files</span>
+                    {!sidebarCollapsed && <span className="text-[11px] font-semibold truncate min-w-0">Files</span>}
+                  </span>
+                  <ShortcutKeys action="upload-file" className="is-block" />
                 </button>
 
                 <button
@@ -2434,12 +2881,15 @@ Acknowledge these skills with a concise confirmation in this exact format:
                     window.electron?.ipcRenderer.send('trigger_active_upload_folder')
                   }}
                   title={`Attach an entire folder as a codebase (${getShortcutKeys('upload-folder').join('+')})`}
-                  className={`px-2 py-1.5 rounded-lg transition-colors flex items-center justify-center gap-1.5 cursor-pointer bg-(--surface2) hover:bg-(--border) text-(--text) border border-white/10 hover:border-(--accent)/40 ${sidebarCollapsed ? 'col-span-2' : ''}`}
+                  className={`px-2 py-1.5 rounded-lg transition-colors flex flex-col items-stretch gap-1 cursor-pointer bg-(--surface2) hover:bg-(--border) text-(--text) border border-white/10 hover:border-(--accent)/40 `}
                 >
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
-                    <path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z" />
+                  <span className={tileLabelRow}>
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
+                      <path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z" />
                   </svg>
-                  <span className="text-[11px] font-semibold truncate">Folder</span>
+                    {!sidebarCollapsed && <span className="text-[11px] font-semibold truncate min-w-0">Folder</span>}
+                  </span>
+                  <ShortcutKeys action="upload-folder" className="is-block" />
                 </button>
 
                 <button
@@ -2455,12 +2905,15 @@ Acknowledge these skills with a concise confirmation in this exact format:
                     window.electron?.ipcRenderer.send('resize_view', { x: 0, y: 0, width: 0, height: 0 })
                   }}
                   title={`Skills & Tools palette (${getShortcutKeys('skills-palette').join('+')})`}
-                  className={`px-2 py-1.5 rounded-lg transition-colors flex items-center justify-center gap-1.5 cursor-pointer bg-(--surface2) hover:bg-(--border) text-(--text) border border-white/10 hover:border-amber-500/40 ${sidebarCollapsed ? 'col-span-2' : ''}`}
+                  className={`px-2 py-1.5 rounded-lg transition-colors flex flex-col items-stretch gap-1 cursor-pointer bg-(--surface2) hover:bg-(--border) text-(--text) border border-white/10 hover:border-amber-500/40 `}
                 >
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
-                    <path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3L12 3Z" />
+                  <span className={tileLabelRow}>
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
+                      <path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3L12 3Z" />
                   </svg>
-                  <span className="text-[11px] font-semibold truncate">Skills</span>
+                    {!sidebarCollapsed && <span className="text-[11px] font-semibold truncate min-w-0">Skills</span>}
+                  </span>
+                  <ShortcutKeys action="skills-palette" className="is-block" />
                 </button>
 
                 <button
@@ -2476,16 +2929,23 @@ Acknowledge these skills with a concise confirmation in this exact format:
                     window.electron?.ipcRenderer.send('resize_view', { x: 0, y: 0, width: 0, height: 0 })
                   }}
                   title={`Base skills framework rules (${getShortcutKeys('skills-base-modal').join('+')})`}
-                  className={`px-2 py-1.5 rounded-lg transition-colors flex items-center justify-center gap-1.5 cursor-pointer bg-(--surface2) hover:bg-(--border) text-(--text) border border-white/10 hover:border-amber-500/40 ${sidebarCollapsed ? 'col-span-2' : ''}`}
+                  className={`px-2 py-1.5 rounded-lg transition-colors flex flex-col items-stretch gap-1 cursor-pointer bg-(--surface2) hover:bg-(--border) text-(--text) border border-white/10 hover:border-amber-500/40 `}
                 >
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
-                    <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+                  <span className={tileLabelRow}>
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
+                      <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
                     <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2Z" />
                     <path d="M9 7h7" />
                   </svg>
-                  <span className="text-[11px] font-semibold truncate">Base</span>
+                    {!sidebarCollapsed && <span className="text-[11px] font-semibold truncate min-w-0">Base</span>}
+                  </span>
+                  <ShortcutKeys action="skills-base-modal" className="is-block" />
                 </button>
 
+                {/* Containers and the tab's own colours, one cell each in this same grid rather than
+                    two full-width rows: both answer the same question ("what is this tab, visually?")
+                    and the footer is the tightest space in the app. Nothing else about the footer
+                    moves — same grid, same order, two rows shorter. */}
                 <button
                   type="button"
                   onClick={() => {
@@ -2517,17 +2977,19 @@ Acknowledge these skills with a concise confirmation in this exact format:
                   title={`Containers — ${activeContainer.name} (Ctrl+. · right-click to manage)`}
                   aria-label={`Containers, current: ${activeContainer.name}`}
                   aria-expanded={showContainerMenu}
-                  className={`containers-btn px-2 py-1.5 rounded-lg flex items-center justify-center gap-1.5 cursor-pointer border ${
+                  data-guide="containers"
+                  className={`containers-btn col-span-2 min-w-0 px-2 py-1.5 rounded-lg flex flex-col items-stretch justify-center gap-1 cursor-pointer border ${
                     showContainerMenu ? 'is-open' : ''
                   } ${
                     activeContainerColor ? 'is-tinted' : 'bg-(--surface2) hover:bg-(--border) text-(--text) border-white/10 hover:border-(--accent)/40'
-                  } ${sidebarCollapsed ? 'col-span-2' : ''}`}
+                  }`}
                   style={
                     activeContainerColor
                       ? ({ '--container-color': activeContainerColor } as CSSProperties)
                       : undefined
                   }
                 >
+                  <span className={tileLabelRow}>
                   <span
                     className="containers-btn-swatch"
                     style={{
@@ -2537,59 +2999,56 @@ Acknowledge these skills with a concise confirmation in this exact format:
                     }}
                   />
                   {!sidebarCollapsed && (
-                    <span className="text-[11px] font-semibold truncate">
+                    <span className="text-[11px] font-semibold truncate flex-1 text-left min-w-0">
                       {activeContainer.name}
                     </span>
                   )}
+                  <span className="containers-btn-digit">
+                    {containers.findIndex((c) => c.id === activeContainer.id) + 1 || 1}
+                  </span>
+                  </span>
+                  <ShortcutKeys action="containers-picker" className="is-block" />
                   {!sidebarCollapsed && (
-                    <span className="containers-btn-digit">
-                      {containers.findIndex((c) => c.id === activeContainer.id) + 1 || 1}
-                    </span>
+                    <svg
+                      width="11"
+                      height="11"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2.4"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      className="shrink-0 opacity-60"
+                      style={{
+                        transform: showContainerMenu ? 'rotate(180deg)' : 'none',
+                        transition: 'transform 160ms ease'
+                      }}
+                      aria-hidden="true"
+                    >
+                      <path d="m6 9 6 6 6-6" />
+                    </svg>
                   )}
                 </button>
 
                 {/* Same picker as the title bar button: the colour belongs to the tab, and this
                     is where the other per-tab tools (upload, skills) live. */}
                 <TabColorButton
-                  accent={activeTabColors.accentColor ?? modelColor(resolvedActiveModelKey)}
+                  variant="half"
+                  collapsed={sidebarCollapsed}
+                  className="col-span-2"
+                  accent={activeTabColors.accentColor ?? colorFor(resolvedActiveModelKey)}
                   hasCustomColors={Boolean(activeTabColors.accentColor || activeTabColors.auraColor)}
                   disabled={!activeTab}
                   onClick={openTabColors}
                 />
               </div>
 
-              {/* Navigation Tools Row */}
-              <div className={`flex items-center gap-1.5 ${sidebarCollapsed ? 'justify-center' : 'justify-between'}`}>
+              {/* Navigation Tools Row — two half-width tiles. Tabs used to sit here spanning both
+                  columns; it now lives beside Agent Handoff, so History and Settings get the row to
+                  themselves and every button in it keeps its keys. */}
+              <div className="grid grid-cols-2 gap-1.5" data-nav-tools="true">
                 <button
-                  className="flex-1 bg-(--surface2) hover:bg-(--border) text-(--text) p-1.5 rounded-lg transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
-                  onClick={async () => {
-                    const nextState = !showTabOverview
-                    if (nextState) {
-                      await captureActiveSnapshot()
-                    }
-                    setShowTabOverview(nextState)
-                    if (nextState) {
-                      setShowHistory(false)
-                      setShowSettings(false)
-                      setShowNewTab(false)
-                      // @ts-ignore
-                      window.electron?.ipcRenderer.send('resize_view', { x: 0, y: 0, width: 0, height: 0 })
-                    } else {
-                      restoreViewBounds()
-                    }
-                  }}
-                  title={`Tab Overview (${getShortcutKeys('tab-overview').join('+')})`}
-                >
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/>
-                    <line x1="8" x2="22" y1="21" y2="21"/>
-                    <line x1="12" x2="12" y1="17" y2="21"/>
-                  </svg>
-                  {!sidebarCollapsed && <span className="text-xs">Tabs</span>}
-                </button>
-
-                <button
-                  className="flex-1 bg-(--surface2) hover:bg-(--border) text-(--text) p-1.5 rounded-lg transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+                  className="bg-(--surface2) hover:bg-(--border) text-(--text) p-1.5 rounded-lg transition-colors flex flex-col items-stretch gap-1 cursor-pointer"
                   onClick={async () => {
                     const nextState = !showHistory
 
@@ -2635,17 +3094,21 @@ Acknowledge these skills with a concise confirmation in this exact format:
                       restoreViewBounds()
                     }
                   }}
-                  title="History"
+                  title={`History (${getShortcutKeys('history-open').join('+')})`}
                 >
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <circle cx="12" cy="12" r="10" />
-                    <polyline points="12 6 12 12 16 14" />
-                  </svg>
-                  {!sidebarCollapsed && <span className="text-xs">History</span>}
+                  <span className={tileLabelRow}>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
+                      <circle cx="12" cy="12" r="10" />
+                      <polyline points="12 6 12 12 16 14" />
+                    </svg>
+                    {!sidebarCollapsed && <span className="text-xs truncate min-w-0">History</span>}
+                  </span>
+                  <ShortcutKeys action="history-open" className="is-block" />
                 </button>
 
                 <button
-                  className="bg-(--surface2) hover:bg-(--border) text-(--text) p-1.5 rounded-lg transition-colors flex items-center justify-center cursor-pointer"
+                  data-guide="settings"
+                  className="bg-(--surface2) hover:bg-(--border) text-(--text) p-1.5 rounded-lg transition-colors flex flex-col items-stretch gap-1 cursor-pointer"
                   onClick={() => {
                     const nextState = !showSettings
                     setShowSettings(nextState)
@@ -2663,22 +3126,27 @@ Acknowledge these skills with a concise confirmation in this exact format:
                       restoreViewBounds()
                     }
                   }}
-                  title="Manage AI Models"
+                  title={`Settings & Model Manager (${getShortcutKeys('settings-open').join('+')})`}
                 >
-                  <svg
-                    xmlns="http://www.w3.org/2000/svg"
-                    width="14"
-                    height="14"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  >
-                    <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
-                    <circle cx="12" cy="12" r="3" />
-                  </svg>
+                  <span className={tileLabelRow}>
+                    <svg
+                      xmlns="http://www.w3.org/2000/svg"
+                      width="14"
+                      height="14"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      className="shrink-0"
+                    >
+                      <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
+                      <circle cx="12" cy="12" r="3" />
+                    </svg>
+                    {!sidebarCollapsed && <span className="text-xs truncate min-w-0">Settings</span>}
+                  </span>
+                  <ShortcutKeys action="settings-open" className="is-block" />
                 </button>
               </div>
             </div>
@@ -2769,7 +3237,7 @@ Acknowledge these skills with a concise confirmation in this exact format:
               {/* Accent & aura for the active tab — beside Agent Handoff, matching the sidebar. */}
               <TabColorButton
                 variant="compact"
-                accent={activeTabColors.accentColor ?? modelColor(resolvedActiveModelKey)}
+                accent={activeTabColors.accentColor ?? colorFor(resolvedActiveModelKey)}
                 hasCustomColors={Boolean(activeTabColors.accentColor || activeTabColors.auraColor)}
                 disabled={!activeTab}
                 onClick={openTabColors}
@@ -2777,22 +3245,9 @@ Acknowledge these skills with a concise confirmation in this exact format:
 
               <button
                 className="bg-(--surface2) hover:bg-(--border) text-(--text) px-3 py-1.5 rounded transition-colors flex items-center gap-1.5"
-                onClick={async () => {
-                  const nextState = !showTabOverview
-                  if (nextState) {
-                    await captureActiveSnapshot()
-                  }
-                  setShowTabOverview(nextState)
-                  if (nextState) {
-                    setShowHistory(false)
-                    setShowSettings(false)
-                    setShowNewTab(false)
-                    // @ts-ignore
-                    window.electron?.ipcRenderer.send('resize_view', { x: 0, y: 0, width: 0, height: 0 })
-                  } else {
-                    restoreViewBounds()
-                  }
-                }}
+                onClick={() => void toggleTabOverviewPanel()}
+                data-nav-tab-overview="titlebar"
+                aria-expanded={showTabOverview}
                 title={`Tab Overview (${getShortcutKeys('tab-overview').join('+')})`}
               >
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -2897,13 +3352,15 @@ Acknowledge these skills with a concise confirmation in this exact format:
 
         {/* The Native Box Content Bounds: flush against bottom pinned dock */}
         <div className="flex-1 w-full h-full relative">
-          {activeContainerColor && (
+          {activeContainerColor && containerAuraStrength > 0 && (
             <div
               className="absolute inset-0 pointer-events-none nexus-container-aura"
               style={{
-                boxShadow: `inset 0 0 0 1px ${activeContainerColor}59, inset 0 0 26px -8px ${activeContainerColor}73`,
+                // The same function the ring maths uses, so what is painted and what is inset agree.
+                ...auraRingStyle(activeContainerColor, containerAuraStrength),
                 transition: 'box-shadow 220ms ease'
               }}
+              data-aura-strength={containerAuraStrength}
               aria-hidden
             />
           )}
@@ -3052,6 +3509,8 @@ Acknowledge these skills with a concise confirmation in this exact format:
             setShowContainerManager(false)
           }}
           onDelete={(containerId) => deleteContainer(containerId)}
+          onReorder={reorderContainer}
+          onReconnect={reconnectContainer}
           onClose={() => {
             setShowContainerManager(false)
             requestAnimationFrame(() => restoreViewBounds())
@@ -3088,9 +3547,12 @@ Acknowledge these skills with a concise confirmation in this exact format:
             restoreViewBounds()
           }}
           interfaceSettings={interfaceSettings}
+          initialSection={settingsRequestedTab as any}
           onInterfaceSettingsChange={(newSettings) => {
             setInterfaceSettings(newSettings)
             saveInterfaceSettings(newSettings)
+            // Any styling change counts: the guide's palette step only needs to know one landed.
+            setSettingsRevision((n) => n + 1)
           }}
           onClose={() => {
             setShowSettings(false)
@@ -3254,7 +3716,7 @@ Acknowledge these skills with a concise confirmation in this exact format:
         open={showTabColors && Boolean(activeTab)}
         tabTitle={activeTab?.title}
         colors={activeTabColors}
-        fallbackAccent={modelColor(resolvedActiveModelKey)}
+        fallbackAccent={colorFor(resolvedActiveModelKey)}
         onChange={applyColorsToActiveTab}
         onClose={closeTabColors}
       />
@@ -3309,24 +3771,46 @@ Acknowledge these skills with a concise confirmation in this exact format:
         </div>
       )}
 
-      {/* Nexus Helper Guide (F1) */}
-      <ZenGuideModal
+      {/* The guide: F1, or once on first run. A spotlight tour over the real controls. */}
+      <GuideTour
+        key={guideRun}
         isOpen={showGuide}
-        onClose={() => {
-          setShowGuide(false)
-          restoreViewBounds()
+        onClose={closeGuide}
+        providers={models.map((m) => ({
+          key: m.key,
+          label: m.label,
+          icon: modelIcons[m.key],
+          color: colorFor(m.key)
+        }))}
+        containers={containers.map((c) => ({ id: c.id, name: c.name, color: c.color }))}
+        tabCount={tabs.length}
+        settingsRevision={settingsRevision}
+        themeId={themeState.activeId}
+        onOpenSettingsSection={(section) => {
+          guideOwnsSettings.current = true
+          setSettingsRequestedTab(section)
+          setShowSettings(true)
+          // @ts-ignore -- the preload bridge is untyped here, as everywhere else in this file
+          window.electron?.ipcRenderer.send('resize_view', { x: 0, y: 0, width: 0, height: 0 })
         }}
-        models={models}
-        interfaceSettings={interfaceSettings}
-        onUpdateInterfaceSettings={(next) => {
-          setInterfaceSettings(next)
-          saveInterfaceSettings(next)
+        onCloseSettingsSection={() => {
+          if (!guideOwnsSettings.current) return
+          guideOwnsSettings.current = false
+          setSettingsRequestedTab(null)
+          setShowSettings(false)
         }}
-        onOpenFullSettings={() => {
+        onOpenSettings={() => {
           setShowGuide(false)
           setShowSettings(true)
-          // @ts-ignore
+          // @ts-ignore -- the preload bridge is untyped here, as everywhere else in this file
           window.electron?.ipcRenderer.send('resize_view', { x: 0, y: 0, width: 0, height: 0 })
+        }}
+        onReplayRequested={() => {
+          try {
+            localStorage.removeItem(GUIDE_SEEN_KEY)
+          } catch {
+            /* nothing to clear */
+          }
         }}
       />
 

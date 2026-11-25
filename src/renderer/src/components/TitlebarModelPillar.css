@@ -27,7 +27,14 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 10px;
+  /* Build 35: the providers are icons, and six names spelled out took the room the tab strip needed.
+     Build 37 keeps that for the five you are not in, and puts the name back on the one you *are* in —
+     "which provider am I looking at?" is a question the icon alone does not answer. See
+     `.titlebar-model-pill.active .titlebar-model-label` below. */
+  min-width: 28px;
+  height: 28px;
+  padding: 0 6px;
+  justify-content: center;
   border-radius: 9999px;
   border: 1px solid color-mix(in srgb, var(--provider-color, #00e5ff) 18%, rgba(255, 255, 255, 0.05));
   background: color-mix(in srgb, var(--provider-color, #00e5ff) 4%, rgba(255, 255, 255, 0.02));
@@ -182,41 +189,55 @@
 }
 
 .titlebar-model-label {
-  display: inline-block;
+  display: none;
   white-space: nowrap;
 }
 
-/* Tier 2: 1100px - 1439px -> Active Provider Expanded, Inactive Collapsed to Sleek Icon Badges */
-@media (max-width: 1439px) {
-  .titlebar-model-pill:not(.active) {
-    padding: 0;
-    width: 28px;
-    height: 28px;
-    justify-content: center;
-  }
-  .titlebar-model-pill:not(.active) .titlebar-model-label {
-    display: none;
-  }
-  .titlebar-model-pill.active {
-    padding: 4px 10px;
-  }
+/*
+ * One exception, and it is the one that matters: the pill you are actually in says its name. The
+ * feedback for "the tab switched provider" used to be a colour, which is not a name.
+ */
+.titlebar-model-pill.active .titlebar-model-label {
+  display: inline-block;
+  max-width: 110px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: #ffffff;
+  font-weight: 600;
 }
 
-/* Tier 3: < 1100px -> Compact Tactical HUD */
+/* Focus (keyboard or pointer) brings the name back on any pill you are pointing at. */
+.titlebar-model-pill:hover .titlebar-model-label,
+.titlebar-model-pill:focus-visible .titlebar-model-label,
+.titlebar-model-pill:focus .titlebar-model-label {
+  display: inline-block;
+}
+
+/* The active pill grows to hold its name; the others stay square. */
+.titlebar-model-pill.active {
+  min-width: 0;
+  padding: 0 11px 0 8px;
+  justify-content: flex-start;
+  gap: 7px;
+}
+
+/* A narrow window shrinks the pillar; it does not change what it shows. */
 @media (max-width: 1099px) {
   .titlebar-model-pillar {
     gap: 3px;
     padding: 2px 4px;
   }
   .titlebar-model-pill {
-    width: 24px;
+    min-width: 24px;
     height: 24px;
-    padding: 0;
-    justify-content: center;
+    padding: 0 4px;
   }
-  .titlebar-model-label,
-  .active-core-dot {
-    display: none !important;
+  .titlebar-model-pill.active {
+    padding: 0 8px 0 6px;
+  }
+  .titlebar-model-pill.active .titlebar-model-label {
+    max-width: 74px;
+    font-size: 10.5px;
   }
   .titlebar-model-icon svg {
     width: 13px;

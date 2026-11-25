@@ -125,6 +125,14 @@ export const DEFAULT_SHORTCUTS: ShortcutDef[] = [
     badge: 'Profiles'
   },
   {
+    id: 'tab-colours',
+    action: 'Tab Accent & Aura Colours',
+    desc: 'Give the active tab its own accent and aura colour',
+    category: 'tabs',
+    defaultKeys: ['Ctrl', 'Shift', 'C'],
+    badge: 'Identity'
+  },
+  {
     id: 'sidebar-toggle',
     action: 'Toggle Sidebar',
     desc: 'Expand or collapse the pinned chats sidebar',

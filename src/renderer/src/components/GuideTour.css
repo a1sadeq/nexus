@@ -1,0 +1,449 @@
+/*
+ * GuideTour — the F1 guide.
+ *
+ * One accent, one entrance, no decoration that is not information. The spotlight is a single element
+ * with a very large box-shadow rather than an SVG mask: it costs one paint, follows the target through
+ * any layout change, and needs no mask plumbing to keep the corners rounded.
+ */
+
+.guide-root {
+  position: fixed;
+  inset: 0;
+  /* Above the Settings panel (z 99999): two of the steps take the tour into it, and the guide has to
+     stay on top of the thing it is pointing at. Below the app's toasts. */
+  z-index: 100000;
+  font-family: inherit;
+  color: var(--text, #e6e8f0);
+  /* The whole layer is inert to the app beneath; the dialog re-enables itself. */
+  pointer-events: none;
+}
+
+/*
+ * The dim is deliberately shallow. Build 36 painted the window almost black behind the guide, so the
+ * only thing readable for eight steps was the card, and the tour read as a slideshow rather than as a
+ * walk through the app. Here the app stays legible the whole way: the ring, the card edge and the
+ * accent glow do the pointing, and the shade only takes a little contrast away from everything else.
+ */
+.guide-scrim {
+  position: absolute;
+  inset: 0;
+  background: rgba(6, 8, 14, 0.26);
+  pointer-events: auto;
+  animation: guide-fade-in 220ms ease both;
+}
+
+/* The hole. Its own shadow paints the dimming outside it, which is what makes the target read as lit. */
+.guide-spot {
+  position: absolute;
+  pointer-events: none;
+  box-shadow:
+    0 0 0 2px color-mix(in srgb, var(--accent, #6366f1) 85%, #ffffff 15%),
+    0 0 0 9999px rgba(6, 8, 14, 0.26),
+    0 0 34px color-mix(in srgb, var(--accent, #6366f1) 45%, transparent);
+  transition:
+    top 240ms cubic-bezier(0.22, 1, 0.36, 1),
+    left 240ms cubic-bezier(0.22, 1, 0.36, 1),
+    width 240ms cubic-bezier(0.22, 1, 0.36, 1),
+    height 240ms cubic-bezier(0.22, 1, 0.36, 1);
+  animation: guide-spot-in 320ms ease both;
+}
+
+@keyframes guide-spot-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.guide-root.is-reduced .guide-spot {
+  transition: none;
+}
+
+/*
+ * Pass-through mode (the practice step): four panels instead of one sheet, so the hole is a real hole
+ * and the button under it can be clicked. The hole keeps only its outline plus a slow breathe that
+ * says "this one", and stops breathing for anyone who asked motion to stop.
+ */
+.guide-block {
+  position: absolute;
+  background: rgba(6, 8, 14, 0.26);
+  pointer-events: auto;
+  animation: guide-fade-in 200ms ease both;
+}
+
+@keyframes guide-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.guide-spot.is-open {
+  box-shadow:
+    0 0 0 2px color-mix(in srgb, var(--accent, #6366f1) 90%, #ffffff 10%),
+    0 0 26px color-mix(in srgb, var(--accent, #6366f1) 55%, transparent);
+  animation: guide-breathe 2.4s ease-in-out infinite;
+}
+
+@keyframes guide-breathe {
+  0%,
+  100% {
+    box-shadow:
+      0 0 0 2px color-mix(in srgb, var(--accent, #6366f1) 90%, #ffffff 10%),
+      0 0 18px color-mix(in srgb, var(--accent, #6366f1) 40%, transparent);
+  }
+  50% {
+    box-shadow:
+      0 0 0 2px color-mix(in srgb, var(--accent, #6366f1) 90%, #ffffff 10%),
+      0 0 34px color-mix(in srgb, var(--accent, #6366f1) 70%, transparent);
+  }
+}
+
+.guide-card {
+  position: absolute;
+  pointer-events: auto;
+  /* A fixed measure: every card is the same width, so the tour does not jump around as it advances. */
+  width: 380px;
+  max-width: 380px;
+  /* Never taller than the window: on a short window the body scrolls and the buttons stay reachable. */
+  max-height: calc(100vh - 24px);
+  /* Nearly solid: with the window left readable behind it, the card has to hold its own against a
+     bright page rather than lean on the shade. */
+  background: color-mix(in srgb, var(--surface, #141724) 97%, #0b0e18 3%);
+  border: 1px solid color-mix(in srgb, var(--accent, #6366f1) 34%, transparent);
+  border-radius: 14px;
+  padding: 16px 18px 14px;
+  box-shadow:
+    0 24px 60px rgba(0, 0, 0, 0.62),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  outline: none;
+  /* The card arrives once, on mount. `scale` is its own property so it never fights the placement
+     transform that puts the card beside its anchor. */
+  animation: guide-card-in 240ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  transition:
+    top 220ms ease,
+    left 220ms ease;
+}
+
+@keyframes guide-card-in {
+  from {
+    opacity: 0;
+    scale: 0.985;
+  }
+  to {
+    opacity: 1;
+    scale: 1;
+  }
+}
+
+/* Placement is a clamped top-left corner set inline; being centred is only a wider measure. */
+.guide-card.is-center {
+  width: 420px;
+  max-width: 420px;
+}
+
+.guide-card:focus-visible {
+  border-color: color-mix(in srgb, var(--accent, #6366f1) 70%, transparent);
+}
+
+.guide-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.guide-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: color-mix(in srgb, var(--accent, #6366f1) 80%, #ffffff 20%);
+  letter-spacing: 0.01em;
+}
+
+.guide-counter {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  color: var(--text2, #9aa0b4);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.guide-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text2, #9aa0b4);
+  cursor: pointer;
+  transition: background 140ms ease, color 140ms ease;
+}
+
+.guide-close:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text, #e6e8f0);
+}
+
+.guide-title {
+  margin: 0;
+  font-size: 17px;
+  line-height: 1.28;
+  font-weight: 650;
+  letter-spacing: -0.011em;
+}
+
+.guide-body {
+  font-size: 12.5px;
+  line-height: 1.62;
+  color: color-mix(in srgb, var(--text, #e6e8f0) 82%, transparent);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.guide-body p {
+  margin: 0;
+}
+
+.guide-quiet {
+  color: var(--text2, #9aa0b4);
+  font-size: 11.5px;
+}
+
+.guide-body kbd,
+.guide-recap kbd {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: color-mix(in srgb, var(--text, #e6e8f0) 88%, transparent);
+}
+
+.guide-keys {
+  display: inline-flex;
+  gap: 3px;
+  vertical-align: baseline;
+  margin: 0 2px;
+}
+
+.guide-keys kbd {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: color-mix(in srgb, var(--text, #e6e8f0) 88%, transparent);
+}
+
+.guide-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-top: 2px;
+}
+
+.guide-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px 3px 6px;
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--text2, #9aa0b4);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.guide-chip.is-active {
+  color: var(--text, #e6e8f0);
+  border-color: color-mix(in srgb, var(--accent, #6366f1) 55%, transparent);
+  background: color-mix(in srgb, var(--accent, #6366f1) 16%, transparent);
+}
+
+.guide-swatch {
+  width: 9px;
+  height: 9px;
+  border-radius: 3px;
+  border: 1.5px solid currentColor;
+  flex: 0 0 auto;
+}
+
+.guide-progress {
+  display: flex;
+  gap: 5px;
+  padding: 2px 0 0;
+}
+
+.guide-dot {
+  width: 18px;
+  height: 3px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  transition: background 180ms ease, width 180ms ease;
+}
+
+.guide-dot.is-on {
+  background: color-mix(in srgb, var(--accent, #6366f1) 55%, transparent);
+}
+
+.guide-dot.is-current {
+  width: 28px;
+  background: var(--accent, #6366f1);
+}
+
+.guide-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-top: 2px;
+}
+
+.guide-actions-left,
+.guide-actions-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.guide-ghost {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--text2, #9aa0b4);
+  background: transparent;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: background 140ms ease, color 140ms ease;
+}
+
+.guide-ghost:hover {
+  color: var(--text, #e6e8f0);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.guide-primary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 13px;
+  border-radius: 9px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #ffffff;
+  background: var(--accent, #6366f1);
+  border: 1px solid color-mix(in srgb, var(--accent, #6366f1) 70%, #ffffff 30%);
+  cursor: pointer;
+  transition: filter 140ms ease, opacity 140ms ease;
+}
+
+.guide-primary:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.guide-primary:disabled {
+  cursor: progress;
+  opacity: 0.55;
+  filter: saturate(0.6);
+}
+
+.guide-primary:focus-visible,
+.guide-ghost:focus-visible,
+.guide-close:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent, #6366f1) 70%, #ffffff 30%);
+  outline-offset: 2px;
+}
+
+.guide-recap {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 8px 10px;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  font-size: 11.5px;
+  color: var(--text2, #9aa0b4);
+}
+
+.guide-recap span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.guide-skipped {
+  margin: 0;
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: color-mix(in srgb, var(--text2, #9aa0b4) 70%, transparent);
+}
+
+/* A narrow window: the card stops being a balloon next to the target and becomes a sheet. */
+@media (max-width: 720px) {
+  .guide-card,
+  .guide-card.is-right,
+  .guide-card.is-left,
+  .guide-card.is-bottom,
+  .guide-card.is-top {
+    left: 12px !important;
+    right: 12px;
+    top: auto !important;
+    bottom: 12px;
+    width: auto;
+    max-width: none;
+    transform: none !important;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .guide-spot,
+  .guide-card,
+  .guide-scrim,
+  .guide-block {
+    transition: none;
+  }
+
+  .guide-spot,
+  .guide-spot.is-open,
+  .guide-block {
+    animation: none;
+  }
+}
+
+.guide-root.is-reduced .guide-spot.is-open,
+.guide-root.is-reduced .guide-block {
+  animation: none;
+}
+
+/* The dialog takes focus on open; the outline belongs on the controls, not on the card. */
+.guide-card:focus {
+  outline: none;
+}

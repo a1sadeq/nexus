@@ -280,4 +280,87 @@ describe('ContainerStore', () => {
     expect(written.containers.map((c: { id: string }) => c.id)).toEqual(['work'])
     expect(written.containers[0].color).toBe('#f43f5e')
   })
+
+  describe('reorder', () => {
+    const ids = (list: Array<{ id: string }>): string[] => list.map((c) => c.id)
+
+    function seed(): void {
+      store.save({ name: 'Work', accountId: 'work' })
+      store.save({ name: 'Lab', accountId: 'lab' })
+      store.save({ name: 'Client', accountId: 'client' })
+    }
+
+    it('reports the order the user chose, and reloads it from disk', () => {
+      seed()
+      expect(ids(store.list())).toEqual([DEFAULT_CONTAINER_ID, 'work', 'lab', 'client'])
+
+      store.reorder(['work', 'default', 'client', 'lab'])
+
+      expect(ids(store.list())).toEqual(['work', DEFAULT_CONTAINER_ID, 'client', 'lab'])
+      // A second store over the same file: order is persisted, not remembered in memory.
+      const reopened = new ContainerStore(file)
+      expect(ids(reopened.list())).toEqual(['work', DEFAULT_CONTAINER_ID, 'client', 'lab'])
+    })
+
+    it('lets the default container move — it is a profile too', () => {
+      seed()
+      store.reorder(['lab', 'client', 'work', DEFAULT_CONTAINER_ID])
+      expect(ids(store.list())).toEqual(['lab', 'client', 'work', DEFAULT_CONTAINER_ID])
+    })
+
+    it('appends anything the caller forgot instead of dropping it', () => {
+      seed()
+      // A panel open while a container was created elsewhere sends a stale list.
+      store.reorder(['client'])
+      expect(ids(store.list())).toEqual(['client', DEFAULT_CONTAINER_ID, 'work', 'lab'])
+    })
+
+    it('ignores ids that do not exist and duplicates', () => {
+      seed()
+      store.reorder(['nope', 'lab', 'lab', '', 'client-corrupt-', 'work', DEFAULT_CONTAINER_ID, 'client'])
+      expect(ids(store.list())).toEqual(['lab', 'work', DEFAULT_CONTAINER_ID, 'client'])
+    })
+
+    it('does not rewrite the file when the order did not change', () => {
+      seed()
+      const before = readFileSync(file, 'utf8')
+      store.reorder([DEFAULT_CONTAINER_ID, 'work', 'lab', 'client'])
+      expect(readFileSync(file, 'utf8')).toBe(before)
+    })
+
+    it('keeps a new container at the end of an order that already exists', () => {
+      seed()
+      store.reorder(['client', 'lab', DEFAULT_CONTAINER_ID, 'work'])
+      store.save({ name: 'Later', accountId: 'later' })
+      expect(ids(store.list())).toEqual(['client', 'lab', DEFAULT_CONTAINER_ID, 'work', 'later'])
+    })
+
+    it('drops a deleted container out of the stored order', () => {
+      seed()
+      store.reorder(['client', 'lab', DEFAULT_CONTAINER_ID, 'work'])
+      store.remove('lab')
+      const written = JSON.parse(readFileSync(file, 'utf8'))
+      expect(written.order).toEqual(['client', DEFAULT_CONTAINER_ID, 'work'])
+      expect(ids(store.list())).toEqual(['client', DEFAULT_CONTAINER_ID, 'work'])
+    })
+
+    it('survives a corrupt order array without losing a container', () => {
+      seed()
+      const raw = JSON.parse(readFileSync(file, 'utf8'))
+      raw.order = [42, null, 'work']
+      writeFileSync(file, JSON.stringify(raw), 'utf8')
+
+      expect(ids(store.list())).toEqual(['work', DEFAULT_CONTAINER_ID, 'lab', 'client'])
+    })
+
+    it('numbers the shortcut from the same order the switcher shows', () => {
+      seed()
+      store.reorder(['client', 'lab', DEFAULT_CONTAINER_ID, 'work'])
+      expect(containerShortcutIndex(store.list(), 'client')).toBe(1)
+      expect(containerForShortcutDigit(store.list(), '1')?.id).toBe('client')
+      // 0 has always meant the first container, wherever it is now.
+      expect(containerForShortcutDigit(store.list(), '0')?.id).toBe('client')
+      expect(containerForShortcutDigit(store.list(), '4')?.id).toBe('work')
+    })
+  })
 })

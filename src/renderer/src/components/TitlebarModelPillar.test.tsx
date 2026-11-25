@@ -138,4 +138,52 @@ describe('TitlebarModelPillar Component', () => {
     expect(geminiBtn.style.getPropertyValue('--provider-gradient-start')).toBe('#22d3ee')
     expect(geminiBtn.style.getPropertyValue('--provider-gradient-end')).toBe('#4f46e5')
   })
+
+  // Build 37 — "the ai providers in the titlebar the active ai provider don't have their name visible".
+  it('shows the active provider name, and only the active one, without being asked', () => {
+    const css = readFileSync(resolve(__dirname, 'TitlebarModelPillar.css'), 'utf8')
+    const labelRule = css.slice(css.indexOf('.titlebar-model-label {'), css.indexOf('}', css.indexOf('.titlebar-model-label {')))
+    // The base rule still hides the name — five of six pills stay square.
+    expect(labelRule).toContain('display: none')
+    // …and the active pill brings its own name back, unconditionally.
+    expect(css).toContain('.titlebar-model-pill.active .titlebar-model-label {')
+    const activeRule = css.slice(
+      css.indexOf('.titlebar-model-pill.active .titlebar-model-label {'),
+      css.indexOf('}', css.indexOf('.titlebar-model-pill.active .titlebar-model-label {'))
+    )
+    expect(activeRule).toContain('display: inline-block')
+    expect(activeRule).not.toContain('display: none')
+    // The three ways a pill can have the user's attention bring the name back…
+    expect(css).toContain('.titlebar-model-pill:hover .titlebar-model-label,')
+    expect(css).toContain('.titlebar-model-pill:focus-visible .titlebar-model-label,')
+    expect(css).toContain('.titlebar-model-pill:focus .titlebar-model-label {')
+    // …and no width tier may override that with `display: none !important` any more.
+    expect(css).not.toContain('.titlebar-model-label,\n  .active-core-dot {\n    display: none !important;')
+  })
+
+  it('draws the provider icon with the same component the tabs use', async () => {
+    const onSelect = vi.fn()
+    await act(async () => {
+      root.render(
+        <TitlebarModelPillar
+          models={[
+            {
+              key: 'glm',
+              label: 'GLM',
+              url: 'https://chat.z.ai',
+              icon: '<svg viewBox="0 0 24 24"><circle r="4" /></svg>'
+            }
+          ]}
+          activeModelKey="glm"
+          onSelectModel={onSelect}
+        />
+      )
+    })
+    // Configured markup reaches the pill through ProviderIcon, the same resolved + sanitised path the
+    // tab strip takes — not a second raw `dangerouslySetInnerHTML`.
+    expect(container.querySelector('[data-provider-icon="custom"]')).toBeTruthy()
+    const source = readFileSync(resolve(__dirname, 'TitlebarModelPillar.tsx'), 'utf8')
+    expect(source).toContain('<ProviderIcon')
+    expect(source).not.toContain('dangerouslySetInnerHTML')
+  })
 })

@@ -2,8 +2,11 @@ import { describe, it, expect } from 'vitest'
 
 import {
   AURA_RING_INSET,
+  auraRingWidth,
   DEFAULT_CONTAINER_ID,
   auraRingStyle,
+  canMoveContainerInList,
+  moveContainerInList,
   containerColorOf,
   containerForShortcutIndex,
   containerIdOf,
@@ -118,6 +121,36 @@ describe('the aura ring', () => {
     expect(style.boxShadow).toContain('inset')
   })
 
+  it('scales the ring with the configured strength — build 33', () => {
+    const rect = { x: 0, y: 0, width: 400, height: 300 }
+    // 0 = no ring at all, so the page fills the frame instead of leaving a hidden gap.
+    expect(insetRectForAura(rect, true, 0)).toEqual(rect)
+    expect(auraRingWidth(0)).toBe(0)
+    expect(auraRingStyle('#f43f5e', 0)).toEqual({})
+    // 100 is the historical ring, unchanged, so an existing install looks exactly the same.
+    expect(auraRingWidth(100)).toBe(AURA_RING_INSET)
+    expect(insetRectForAura(rect, true, 100)).toEqual(insetRectForAura(rect, true))
+    // Above 100 the ring reaches further rather than only getting more opaque.
+    expect(auraRingWidth(200)).toBeGreaterThan(AURA_RING_INSET)
+    expect(auraRingWidth(300)).toBeGreaterThan(auraRingWidth(200))
+    // Clamped, so a stale localStorage value cannot produce a negative-sized view.
+    expect(auraRingWidth(-50)).toBe(0)
+    expect(auraRingWidth(10_000)).toBe(auraRingWidth(300))
+    const huge = insetRectForAura(rect, true, 300)
+    expect(huge.width).toBeGreaterThan(0)
+    expect(huge.width).toBeLessThan(rect.width)
+  })
+
+  it('keeps the painted ring and the view inset in step', () => {
+    // The glow used to live twice — hardcoded alphas in App.tsx and different ones here — so the veil
+    // the user saw was not the one the maths described. Both now come from auraRingStyle().
+    const soft = auraRingStyle('#f43f5e', 40)
+    const bold = auraRingStyle('#f43f5e', 240)
+    const alpha = (shadow?: string): number => Number(/(?:rgba\([^)]*,\s*)([\d.]+)\)/.exec(shadow || '')?.[1] ?? 0)
+    expect(alpha(bold.boxShadow)).toBeGreaterThan(alpha(soft.boxShadow))
+    expect(bold.boxShadow).not.toEqual(soft.boxShadow)
+  })
+
   it('converts hex to rgba without leaking the raw string', () => {
     expect(hexToRgba('#000000', 0.5)).toBe('rgba(0, 0, 0, 0.5)')
     expect(hexToRgba('#ffffff', 2)).toBe('rgba(255, 255, 255, 1)')
@@ -137,5 +170,43 @@ describe('tabContainerMark', () => {
       name: 'Default',
       isDefault: true
     })
+  })
+})
+
+describe('moveContainerInList', () => {
+  const ids = (list: ContainerInfo[]): string[] => list.map((c) => c.id)
+
+  it('moves a container up and down', () => {
+    expect(ids(moveContainerInList(list, 'lab', -1))).toEqual([DEFAULT_CONTAINER_ID, 'lab', 'work'])
+    expect(ids(moveContainerInList(list, 'work', 1))).toEqual([DEFAULT_CONTAINER_ID, 'lab', 'work'])
+  })
+
+  it('can move the default container, because the list is the numbering', () => {
+    expect(ids(moveContainerInList(list, DEFAULT_CONTAINER_ID, 1))).toEqual(['work', DEFAULT_CONTAINER_ID, 'lab'])
+  })
+
+  it('returns the same list when the move would fall off either end', () => {
+    expect(moveContainerInList(list, DEFAULT_CONTAINER_ID, -1)).toBe(list)
+    expect(moveContainerInList(list, 'lab', 1)).toBe(list)
+  })
+
+  it('returns the same list for an unknown container or a no-op delta', () => {
+    expect(moveContainerInList(list, 'missing', 1)).toBe(list)
+    expect(moveContainerInList(list, 'work', 0)).toBe(list)
+    expect(moveContainerInList(list, 'work', Number.NaN)).toBe(list)
+  })
+
+  it('does not mutate the list it was given', () => {
+    const before = ids(list)
+    moveContainerInList(list, 'lab', -2)
+    expect(ids(list)).toEqual(before)
+  })
+
+  it('reports whether a row has somewhere to go', () => {
+    expect(canMoveContainerInList(list, DEFAULT_CONTAINER_ID, -1)).toBe(false)
+    expect(canMoveContainerInList(list, DEFAULT_CONTAINER_ID, 1)).toBe(true)
+    expect(canMoveContainerInList(list, 'lab', 1)).toBe(false)
+    expect(canMoveContainerInList(list, 'lab', -1)).toBe(true)
+    expect(canMoveContainerInList(list, 'missing', 1)).toBe(false)
   })
 })

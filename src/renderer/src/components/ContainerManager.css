@@ -139,7 +139,7 @@
 .container-manager-cols,
 .container-manager-row {
   display: grid;
-  grid-template-columns: 18px minmax(120px, 1.3fr) minmax(120px, 1fr) 52px 132px minmax(120px, auto);
+  grid-template-columns: 18px minmax(110px, 1.3fr) minmax(110px, 1fr) 46px 124px minmax(210px, auto);
   align-items: center;
   gap: 12px;
   padding: 0 10px;
@@ -172,9 +172,16 @@
   border-color: color-mix(in srgb, var(--row-color, var(--accent)) 45%, transparent);
 }
 
-.container-manager-row.is-confirming {
+.container-manager-row.is-confirming,
+.container-manager-row.is-reconnecting {
   border-color: rgba(244, 63, 94, 0.55);
   background: rgba(244, 63, 94, 0.09);
+}
+
+/* A reconnect clears a session, so it reads as amber until it is confirmed. */
+.container-manager-row.is-reconnecting {
+  border-color: rgba(245, 158, 11, 0.55);
+  background: rgba(245, 158, 11, 0.09);
 }
 
 .container-manager-swatch {
@@ -269,6 +276,85 @@
 .container-manager-delete:disabled {
   opacity: 0.3;
   cursor: not-allowed;
+}
+
+.container-manager-move {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-right: 2px;
+}
+
+.container-manager-move-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 14px;
+  padding: 0;
+  border-radius: 5px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text2);
+  cursor: pointer;
+  line-height: 1;
+}
+
+.container-manager-move-button svg {
+  width: 11px;
+  height: 11px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  display: block;
+}
+
+.container-manager-move-button.is-up svg {
+  transform: rotate(90deg);
+}
+
+.container-manager-move-button.is-down svg {
+  transform: rotate(-90deg);
+}
+
+.container-manager-move-button:hover:not(:disabled) {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+.container-manager-move-button:disabled {
+  opacity: 0.25;
+  cursor: not-allowed;
+}
+
+.container-manager-move-button:focus-visible,
+.container-manager-reconnect:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
+  outline-offset: 1px;
+}
+
+.container-manager-reconnect {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 9px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--border) 90%, transparent);
+  background: rgba(255, 255, 255, 0.04);
+  color: color-mix(in srgb, var(--accent) 45%, var(--text));
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.container-manager-reconnect:hover {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  color: var(--text);
 }
 
 .container-manager-ask {

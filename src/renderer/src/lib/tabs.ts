@@ -412,6 +412,30 @@ const IGNORED_PATH_PATTERNS = [
   /\/search\b/i
 ]
 
+/**
+ * Should a URL the page reports about itself be written onto the tab?
+ *
+ * The rule that saved deep chat links: a provider that bounces to its own home page (after an auth
+ * redirect, say) must not replace the conversation URL the tab is on. The bug that came with it: the
+ * same rule swallowed the *user's* own navigation, because a restored tab sits on a chat URL, so every
+ * address-bar navigation to a provider home page was dropped — the tab kept its old URL and the next
+ * activation put the old page back. "Ctrl+L only works on new tabs" was exactly this: a new tab starts
+ * on a home URL, so the rule never applied to it.
+ */
+export function shouldAcceptReportedUrl(options: {
+  reportedUrl: string
+  currentUrl?: string
+  /** The user asked for this page from the address bar in the last few seconds. */
+  isUserNavigation?: boolean
+}): boolean {
+  const { reportedUrl, currentUrl, isUserNavigation } = options
+  if (!reportedUrl) return false
+  if (isUserNavigation) return true
+  if (!isProviderHomeUrl(reportedUrl)) return true
+  if (!currentUrl) return true
+  return isProviderHomeUrl(currentUrl)
+}
+
 export function isIgnoredHistoryUrl(url: string): boolean {
   if (!url || typeof url !== 'string' || url.length <= 3) return true
   if (url.startsWith('about:') || url.startsWith('chrome:')) return true

@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState, type CSSProperties, type ReactElement } from 'react'
 
 import {
+  canMoveContainerInList,
   containerColorOf,
   containerNameOf,
   shortcutLabelForIndex,
   type ContainerInfo
 } from '../lib/containers'
-import { IconPlus, IconTrash, IconX } from './BrandIcons'
+import { IconChevronLeft, IconPlus, IconRotate, IconTrash, IconX } from './BrandIcons'
 import './ContainerManager.css'
 
 interface Props {
@@ -18,14 +19,20 @@ interface Props {
   onAdd: () => void
   onEdit: (containerId: string) => void
   onDelete: (containerId: string) => Promise<{ error?: string } | void> | void
+  /** Moves a row one place; the list order is what `Ctrl+Alt+N` and the switcher follow. */
+  onReorder: (containerId: string, delta: number) => void
+  /** Clears that profile's session and starts the Google sign-in from the beginning. */
+  onReconnect: (containerId: string) => Promise<{ ok: boolean; error?: string } | void> | void
   onClose: () => void
 }
 
 /**
- * The containers section: every container in one list, with add, edit and delete.
+ * The containers section: every profile in one list, with add, edit, delete, reorder and reconnect.
  *
- * Deleting is the only destructive one, so it asks first — inline, on the row, rather than a browser
- * confirm() that steals focus from the panel and can end up painted behind the native view.
+ * Deleting and reconnecting are the two that cost something, so each asks first — inline, on the row,
+ * rather than a browser confirm() that steals focus from the panel and can end up painted behind the
+ * native view. Escape cancels an open question before it closes the panel: asking twice is worse than
+ * closing the wrong thing.
  */
 export default function ContainerManager({
   containers,
@@ -35,21 +42,23 @@ export default function ContainerManager({
   onAdd,
   onEdit,
   onDelete,
+  onReorder,
+  onReconnect,
   onClose
 }: Props): ReactElement {
   const [confirmingId, setConfirmingId] = useState<string | null>(null)
+  const [reconnectingId, setReconnectingId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key !== 'Escape') return
-      if (confirmingId) {
-        // Escape cancels the confirmation before it closes the panel: asking twice is worse than
-        // closing the wrong thing.
+      if (confirmingId || reconnectingId) {
         event.preventDefault()
         event.stopPropagation()
         setConfirmingId(null)
+        setReconnectingId(null)
         return
       }
       event.preventDefault()
@@ -57,7 +66,7 @@ export default function ContainerManager({
     }
     document.addEventListener('keydown', onKeyDown, true)
     return () => document.removeEventListener('keydown', onKeyDown, true)
-  }, [onClose, confirmingId])
+  }, [onClose, confirmingId, reconnectingId])
 
   const accountLabel = (accountId: string): string =>
     accounts.find((a) => a.id === accountId)?.label ??
@@ -79,6 +88,22 @@ export default function ContainerManager({
         return
       }
       setConfirmingId(null)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const reconnect = async (containerId: string): Promise<void> => {
+    if (busy) return
+    setBusy(true)
+    setError(null)
+    try {
+      const result = await onReconnect(containerId)
+      if (result && typeof result === 'object' && 'ok' in result && !result.ok) {
+        setError(result.error ?? 'Could not start the sign-in again.')
+        return
+      }
+      setReconnectingId(null)
     } finally {
       setBusy(false)
     }
@@ -142,12 +167,16 @@ export default function ContainerManager({
             const isDefault = container.id === 'default'
             const count = tabCounts[container.id] ?? 0
             const confirming = confirmingId === container.id
+            const reconnecting = reconnectingId === container.id
+            const canUp = canMoveContainerInList(containers, container.id, -1)
+            const canDown = canMoveContainerInList(containers, container.id, 1)
+            const name = containerNameOf(container)
             return (
               <div
                 key={container.id}
                 className={`container-manager-row${isActive ? ' is-active' : ''}${
                   confirming ? ' is-confirming' : ''
-                }`}
+                }${reconnecting ? ' is-reconnecting' : ''}`}
                 style={color ? ({ '--row-color': color } as CSSProperties) : undefined}
               >
                 <span
@@ -161,7 +190,7 @@ export default function ContainerManager({
                 />
 
                 <span className="container-manager-name">
-                  {containerNameOf(container)}
+                  {name}
                   {isActive && <span className="container-manager-current">current</span>}
                 </span>
 
@@ -196,13 +225,72 @@ export default function ContainerManager({
                         Keep
                       </button>
                     </>
+                  ) : reconnecting ? (
+                    <>
+                      <span className="container-manager-ask">
+                        {isDefault
+                          ? `Sign Google out of all ${count} tab${count === 1 ? '' : 's'} and sign in again?`
+                          : 'Sign this profile out of Google and sign in again?'}
+                      </span>
+                      <button
+                        type="button"
+                        className="container-manager-confirm danger"
+                        onClick={() => void reconnect(container.id)}
+                        disabled={busy}
+                      >
+                        {busy ? 'Clearing…' : 'Sign in again'}
+                      </button>
+                      <button
+                        type="button"
+                        className="container-manager-confirm"
+                        onClick={() => setReconnectingId(null)}
+                        disabled={busy}
+                      >
+                        Keep
+                      </button>
+                    </>
                   ) : (
                     <>
+                      <span className="container-manager-move">
+                        <button
+                          type="button"
+                          className="container-manager-move-button is-up"
+                          onClick={() => onReorder(container.id, -1)}
+                          disabled={!canUp}
+                          title={canUp ? `Move ${name} up` : 'Already first'}
+                          aria-label={`Move ${name} up`}
+                        >
+                          <IconChevronLeft size={13} />
+                        </button>
+                        <button
+                          type="button"
+                          className="container-manager-move-button is-down"
+                          onClick={() => onReorder(container.id, 1)}
+                          disabled={!canDown}
+                          title={canDown ? `Move ${name} down` : 'Already last'}
+                          aria-label={`Move ${name} down`}
+                        >
+                          <IconChevronLeft size={13} />
+                        </button>
+                      </span>
+                      <button
+                        type="button"
+                        className="container-manager-reconnect"
+                        onClick={() => {
+                          setError(null)
+                          setConfirmingId(null)
+                          setReconnectingId(container.id)
+                        }}
+                        title={`Sign ${name} in again — clears this profile's Google session so another account can be chosen`}
+                      >
+                        <IconRotate size={12} />
+                        <span>Sign in again</span>
+                      </button>
                       <button
                         type="button"
                         className="container-manager-edit"
                         onClick={() => onEdit(container.id)}
-                        title={`Edit ${containerNameOf(container)}`}
+                        title={`Edit ${name}`}
                       >
                         Edit
                       </button>
@@ -211,6 +299,7 @@ export default function ContainerManager({
                         className="container-manager-delete"
                         onClick={() => {
                           setError(null)
+                          setReconnectingId(null)
                           setConfirmingId(container.id)
                         }}
                         // The default container is where every older tab already lives; main refuses to
@@ -219,9 +308,9 @@ export default function ContainerManager({
                         title={
                           isDefault
                             ? 'The default container cannot be deleted — rename it instead'
-                            : `Delete ${containerNameOf(container)}`
+                            : `Delete ${name}`
                         }
-                        aria-label={`Delete ${containerNameOf(container)}`}
+                        aria-label={`Delete ${name}`}
                       >
                         <IconTrash size={13} />
                       </button>
@@ -235,8 +324,11 @@ export default function ContainerManager({
 
         <div className="container-manager-foot">
           <span className="container-manager-foot-hint">
-            Tabs in a deleted container move to Default and keep working — the tab's cookie store
-            cannot be moved after it is created, so it is relabelled rather than relocated.
+            Order sets the switcher and <b>Ctrl+Alt+1…9</b> — 0 always means the first row. Signing in
+            again clears this profile&apos;s <b>Google</b> session only: Gemini, ChatGPT and Claude stay
+            signed in. Pick a different account there and rename the profile from <b>Edit</b>. Tabs in a
+            deleted container move to Default and keep working: a tab&apos;s cookie store cannot be moved
+            after it is created, so it is relabelled rather than relocated.
           </span>
         </div>
       </div>

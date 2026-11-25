@@ -7,6 +7,7 @@ import {
   IconCheck
 } from './BrandIcons'
 import type { DiagnosticReport } from './DiagnosticsModal'
+import { NavigationTraceSection } from './NavigationTraceSection'
 
 export const DiagnosticsSettingsSection: React.FC = () => {
   const [report, setReport] = useState<DiagnosticReport | null>(null)
@@ -14,7 +15,9 @@ export const DiagnosticsSettingsSection: React.FC = () => {
   const [copied, setCopied] = useState(false)
   const [exportedPath, setExportedPath] = useState<string | null>(null)
   const [exportError, setExportError] = useState<string | null>(null)
-  const [activeSubTab, setActiveSubTab] = useState<'processes' | 'tabs' | 'system'>('processes')
+  const [activeSubTab, setActiveSubTab] = useState<'processes' | 'tabs' | 'navigation' | 'system'>(
+    'processes'
+  )
 
   const fetchDiagnostics = useCallback(async (samplingMs: number = 2000) => {
     setLoading(true)
@@ -269,6 +272,17 @@ export const DiagnosticsSettingsSection: React.FC = () => {
             </button>
             <button
               type="button"
+              onClick={() => setActiveSubTab('navigation')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                activeSubTab === 'navigation'
+                  ? 'bg-white/10 text-white shadow-sm'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              Navigation Trace
+            </button>
+            <button
+              type="button"
               onClick={() => setActiveSubTab('system')}
               className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
                 activeSubTab === 'system'
@@ -421,6 +435,8 @@ export const DiagnosticsSettingsSection: React.FC = () => {
           )}
 
           {/* View 3: Hardware & Runtime */}
+          {activeSubTab === 'navigation' && <NavigationTraceSection />}
+
           {activeSubTab === 'system' && (
             <div
               className="p-5 rounded-xl border grid grid-cols-1 md:grid-cols-2 gap-5 text-xs"
@@ -478,6 +494,8 @@ export const DiagnosticsSettingsSection: React.FC = () => {
             </div>
           )}
         </div>
+      ) : activeSubTab === 'navigation' ? (
+        <NavigationTraceSection />
       ) : (
         <div className="flex flex-col items-center justify-center py-20 gap-3 text-slate-400">
           <span className="w-8 h-8 border-2 border-indigo-400/30 border-t-indigo-400 rounded-full animate-spin" />

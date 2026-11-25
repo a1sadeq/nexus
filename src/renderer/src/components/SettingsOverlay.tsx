@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { sfx } from '../lib/soundFx'
+import { BROWSER_IMPORT_UI } from '../lib/featureFlags'
 import type { AppTheme, ThemeColors, ThemeState } from '../lib/themes'
 import { PRESET_THEMES, DEFAULT_THEME_ID, applyTheme } from '../lib/themes'
 import type { ModelDef } from '../App'
@@ -140,6 +141,7 @@ const SETTINGS_SEARCH_INDEX: SearchItem[] = [
   { id: 'geometry-curvature', title: 'Corner Curvature & Typography', subtitle: 'App border radius & typography vibe (Sans/Mono/Tech)', tab: 'style', category: 'layout', keywords: ['geometry', 'radius', 'corner', 'curve', 'font', 'typography', 'sans', 'mono', 'tech'] },
   { id: 'glass-motion', title: 'Glassmorphism & Spring Motion', subtitle: 'Frosted glass backdrop filters & animation speed', tab: 'style', category: 'layout', keywords: ['glass', 'glassmorphism', 'motion', 'spring', 'speed', 'reduced', 'snappy'] },
   { id: 'ambient-aura', title: 'Ambient Aura Illumination', subtitle: 'Living webview glow — 10–300% intensity, viewport frame & spotlight', tab: 'style', category: 'chat', keywords: ['aura', 'ambient', 'glow', 'spotlight', 'intensity', 'illumination', 'frame', 'breathe', 'living', 'pulse', '300', 'extended'] },
+  { id: 'container-aura', title: 'Container Aura Strength', subtitle: 'The ring a coloured container draws around the AI page — 0–300%', tab: 'style', category: 'chat', keywords: ['container', 'aura', 'ring', 'halo', 'border', 'glow', 'strength', 'inset', 'frame', 'webview'] },
   { id: 'chat-bubbles', title: 'AI Chat Bubbles & Width', subtitle: 'AI and user response max widths & gradient pills', tab: 'style', category: 'chat', keywords: ['bubble', 'chat', 'width', 'response', 'gradient', 'spacing', 'gap'] },
   { id: 'code-blocks-composer', title: 'Code Blocks & Composer Halo', subtitle: 'OLED code block styling & neon composer glow', tab: 'style', category: 'chat', keywords: ['code', 'block', 'composer', 'halo', 'neon', 'electric'] },
   { id: 'icon-packs', title: 'Icon Packs & Stroke Weight', subtitle: 'Lucide, Feather, Heroicons, Tabler, Phosphor', tab: 'style', category: 'icons', keywords: ['icon', 'pack', 'glyph', 'lucide', 'feather', 'heroicons', 'tabler', 'phosphor', 'stroke', 'weight'] },
@@ -1504,8 +1506,12 @@ export default function SettingsOverlay({
                 )}
               </div>
             ) : (
-              /* Grouped Navigation Rail */
-              <div className="flex flex-col gap-3.5 overflow-y-auto custom-scrollbar pr-0.5 max-h-[calc(100vh-230px)]">
+              /* Grouped Navigation Rail — the guide's settings step points here, because the sections are
+                 what someone has to learn; the search box above it finds them once they know what exists. */
+              <div
+                data-guide="settings-sections"
+                className="flex flex-col gap-3.5 overflow-y-auto custom-scrollbar pr-0.5 max-h-[calc(100vh-230px)]"
+              >
                 {/* GROUP 1: SYSTEM & PREFERENCES */}
                 <div className="flex flex-col gap-1">
                   <span className="text-[10px] font-bold uppercase tracking-wider text-(--text2) px-2 py-0.5 opacity-60">
@@ -2599,220 +2605,224 @@ export default function SettingsOverlay({
               )}
             </Card>
 
-            <Card className="shrink-0 min-h-fit">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 shrink-0">
-                <div className="flex items-center gap-3">
-                  <div
-                    className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 border shadow-sm"
-                    style={{
-                      background: 'var(--surface2)',
-                      borderColor: 'var(--accent)',
-                      color: 'var(--accent)'
-                    }}
-                  >
-                    <IconShield size={20} />
-                  </div>
-                  <div>
-                    <h3 className="text-sm font-bold text-[var(--text)] flex items-center gap-2">
-                      Universal Browser Session Sync
-                      <span
-                        className="px-2 py-0.5 rounded-full text-[10px] font-mono uppercase tracking-wider font-semibold border"
-                        style={{
-                          background: 'rgba(99, 102, 241, 0.1)',
-                          borderColor: 'rgba(99, 102, 241, 0.3)',
-                          color: 'var(--accent)'
-                        }}
-                      >
-                        Safe Merge Active
-                      </span>
-                    </h3>
-                    <p className="text-xs text-[var(--text2)] mt-0.5">
-                      Import active AI chat sessions from Zen, Firefox, Chrome, Edge, Brave, Opera, and custom profiles. Sessions are safely merged into Nexus without clearing other providers.
-                    </p>
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-2 shrink-0">
-                  <button
-                    type="button"
-                    disabled={syncingAll}
-                    className="px-3.5 py-2 rounded-xl text-xs font-semibold border transition-all cursor-pointer flex items-center gap-1.5 shadow-sm hover:opacity-95 disabled:opacity-50"
-                    style={{
-                      background: 'var(--accent)',
-                      borderColor: 'var(--accent)',
-                      color: '#ffffff'
-                    }}
-                    onClick={handleSyncAllSessions}
-                    title="Scan all detected browser profiles and merge active AI sessions into Nexus"
-                  >
-                    {syncingAll ? (
-                      <span>Syncing All...</span>
-                    ) : (
-                      <>
-                        <IconDownload size={13} />
-                        <span>Sync All AI Sessions</span>
-                      </>
-                    )}
-                  </button>
-
-                  <button
-                    type="button"
-                    className="px-3 py-2 rounded-xl text-xs font-medium border transition-all cursor-pointer flex items-center gap-1.5 hover:bg-white/5 active:scale-98"
-                    style={{
-                      background: 'var(--surface)',
-                      borderColor: 'var(--border)',
-                      color: 'var(--text)'
-                    }}
-                    onClick={handlePickCustomFolder}
-                    title="Select a custom or portable browser profile folder (Zen/Firefox or Chromium)"
-                  >
-                    <IconFolder size={13} />
-                    <span>Select Profile Folder</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    disabled={loadingProfiles}
-                    className="p-2 rounded-xl border transition-all cursor-pointer hover:bg-white/5 active:scale-98 text-[var(--text2)] hover:text-[var(--text)]"
-                    style={{
-                      background: 'var(--surface)',
-                      borderColor: 'var(--border)'
-                    }}
-                    onClick={() => {
-                      sfx.click()
-                      fetchBrowserProfiles()
-                    }}
-                    title="Refresh installed browser profiles"
-                  >
-                    <IconRotate size={14} className={loadingProfiles ? 'animate-spin' : ''} />
-                  </button>
-                </div>
-              </div>
-
-              {/* Detected Browser Profiles Grid */}
-              <div className="border-t pt-4 shrink-0" style={{ borderColor: 'var(--border)' }}>
-                <div className="flex items-center justify-between mb-3">
-                  <span className="text-xs font-semibold text-[var(--text2)] uppercase tracking-wider">
-                    Detected Browser Profiles ({browserProfiles.length})
-                  </span>
-                  <span className="text-[11px] text-[var(--text3)]">
-                    Supports Zen, Firefox, Floorp, Chrome, Edge, Brave, Opera, Vivaldi
-                  </span>
-                </div>
-
-                {loadingProfiles && browserProfiles.length === 0 ? (
-                  <div className="py-6 text-center text-xs text-[var(--text3)]">
-                    Scanning browser installations...
-                  </div>
-                ) : browserProfiles.length === 0 ? (
-                  <div className="py-6 px-4 rounded-xl border border-dashed text-center flex flex-col items-center gap-2" style={{ borderColor: 'var(--border)', background: 'var(--surface)' }}>
-                    <p className="text-xs text-[var(--text2)]">
-                      No browser profiles automatically detected in standard OS locations.
-                    </p>
-                    <button
-                      type="button"
-                      className="px-3 py-1.5 rounded-lg text-xs font-medium border transition-all hover:bg-white/10"
-                      style={{ background: 'var(--surface2)', borderColor: 'var(--border)', color: 'var(--text)' }}
-                      onClick={handlePickCustomFolder}
+            {/* Signing in inside Nexus is the supported route; importing another browser's cookies is
+                not part of this build. See lib/featureFlags.ts for why. */}
+            {BROWSER_IMPORT_UI && (
+              <Card className="shrink-0 min-h-fit">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 shrink-0">
+                  <div className="flex items-center gap-3">
+                    <div
+                      className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 border shadow-sm"
+                      style={{
+                        background: 'var(--surface2)',
+                        borderColor: 'var(--accent)',
+                        color: 'var(--accent)'
+                      }}
                     >
-                      Browse to Profile Folder...
-                    </button>
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                    {browserProfiles.map((p) => {
-                      const isSyncingThis = syncingProfileId === p.id
-                      const sessions: string[] = p.detectedAiSessions || []
-                      const hasSessions = sessions.length > 0 || p.hasGoogleAuth
-
-                      return (
-                        <div
-                          key={p.id}
-                          className="p-3.5 rounded-xl border flex flex-col justify-between gap-3 transition-all"
+                      <IconShield size={20} />
+                    </div>
+                    <div>
+                      <h3 className="text-sm font-bold text-[var(--text)] flex items-center gap-2">
+                        Universal Browser Session Sync
+                        <span
+                          className="px-2 py-0.5 rounded-full text-[10px] font-mono uppercase tracking-wider font-semibold border"
                           style={{
-                            background: 'var(--surface)',
-                            borderColor: p.isLatest ? 'var(--accent)' : 'var(--border)'
+                            background: 'rgba(99, 102, 241, 0.1)',
+                            borderColor: 'rgba(99, 102, 241, 0.3)',
+                            color: 'var(--accent)'
                           }}
                         >
-                          <div className="flex items-start justify-between gap-2">
-                            <div className="flex items-center gap-2.5 min-w-0">
-                              <span
-                                className="w-7 h-7 rounded-lg flex items-center justify-center font-bold text-xs uppercase shrink-0"
-                                style={{
-                                  background: p.browser === 'zen' ? '#a855f722' : p.browser === 'firefox' ? '#f9731622' : 'var(--surface2)',
-                                  color: p.browser === 'zen' ? '#c084fc' : p.browser === 'firefox' ? '#fb923c' : 'var(--accent)',
-                                  border: '1px solid currentColor'
-                                }}
-                              >
-                                {p.browser ? p.browser.substring(0, 2) : 'BR'}
-                              </span>
-                              <div className="min-w-0">
-                                <div className="text-xs font-semibold text-[var(--text)] truncate flex items-center gap-1.5">
-                                  <span>{p.name}</span>
-                                  {p.isLatest && (
-                                    <span className="px-1.5 py-0.2 rounded text-[9px] font-bold uppercase bg-indigo-500/20 text-indigo-300">
-                                      Active
-                                    </span>
-                                  )}
-                                </div>
-                                <div className="text-[10px] text-[var(--text3)] font-mono truncate">
-                                  {p.browser} • {p.id}
+                          Safe Merge Active
+                        </span>
+                      </h3>
+                      <p className="text-xs text-[var(--text2)] mt-0.5">
+                        Import active AI chat sessions from Zen, Firefox, Chrome, Edge, Brave, Opera, and custom profiles. Sessions are safely merged into Nexus without clearing other providers.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      disabled={syncingAll}
+                      className="px-3.5 py-2 rounded-xl text-xs font-semibold border transition-all cursor-pointer flex items-center gap-1.5 shadow-sm hover:opacity-95 disabled:opacity-50"
+                      style={{
+                        background: 'var(--accent)',
+                        borderColor: 'var(--accent)',
+                        color: '#ffffff'
+                      }}
+                      onClick={handleSyncAllSessions}
+                      title="Scan all detected browser profiles and merge active AI sessions into Nexus"
+                    >
+                      {syncingAll ? (
+                        <span>Syncing All...</span>
+                      ) : (
+                        <>
+                          <IconDownload size={13} />
+                          <span>Sync All AI Sessions</span>
+                        </>
+                      )}
+                    </button>
+
+                    <button
+                      type="button"
+                      className="px-3 py-2 rounded-xl text-xs font-medium border transition-all cursor-pointer flex items-center gap-1.5 hover:bg-white/5 active:scale-98"
+                      style={{
+                        background: 'var(--surface)',
+                        borderColor: 'var(--border)',
+                        color: 'var(--text)'
+                      }}
+                      onClick={handlePickCustomFolder}
+                      title="Select a custom or portable browser profile folder (Zen/Firefox or Chromium)"
+                    >
+                      <IconFolder size={13} />
+                      <span>Select Profile Folder</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={loadingProfiles}
+                      className="p-2 rounded-xl border transition-all cursor-pointer hover:bg-white/5 active:scale-98 text-[var(--text2)] hover:text-[var(--text)]"
+                      style={{
+                        background: 'var(--surface)',
+                        borderColor: 'var(--border)'
+                      }}
+                      onClick={() => {
+                        sfx.click()
+                        fetchBrowserProfiles()
+                      }}
+                      title="Refresh installed browser profiles"
+                    >
+                      <IconRotate size={14} className={loadingProfiles ? 'animate-spin' : ''} />
+                    </button>
+                  </div>
+                </div>
+
+                {/* Detected Browser Profiles Grid */}
+                <div className="border-t pt-4 shrink-0" style={{ borderColor: 'var(--border)' }}>
+                  <div className="flex items-center justify-between mb-3">
+                    <span className="text-xs font-semibold text-[var(--text2)] uppercase tracking-wider">
+                      Detected Browser Profiles ({browserProfiles.length})
+                    </span>
+                    <span className="text-[11px] text-[var(--text3)]">
+                      Supports Zen, Firefox, Floorp, Chrome, Edge, Brave, Opera, Vivaldi
+                    </span>
+                  </div>
+
+                  {loadingProfiles && browserProfiles.length === 0 ? (
+                    <div className="py-6 text-center text-xs text-[var(--text3)]">
+                      Scanning browser installations...
+                    </div>
+                  ) : browserProfiles.length === 0 ? (
+                    <div className="py-6 px-4 rounded-xl border border-dashed text-center flex flex-col items-center gap-2" style={{ borderColor: 'var(--border)', background: 'var(--surface)' }}>
+                      <p className="text-xs text-[var(--text2)]">
+                        No browser profiles automatically detected in standard OS locations.
+                      </p>
+                      <button
+                        type="button"
+                        className="px-3 py-1.5 rounded-lg text-xs font-medium border transition-all hover:bg-white/10"
+                        style={{ background: 'var(--surface2)', borderColor: 'var(--border)', color: 'var(--text)' }}
+                        onClick={handlePickCustomFolder}
+                      >
+                        Browse to Profile Folder...
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      {browserProfiles.map((p) => {
+                        const isSyncingThis = syncingProfileId === p.id
+                        const sessions: string[] = p.detectedAiSessions || []
+                        const hasSessions = sessions.length > 0 || p.hasGoogleAuth
+
+                        return (
+                          <div
+                            key={p.id}
+                            className="p-3.5 rounded-xl border flex flex-col justify-between gap-3 transition-all"
+                            style={{
+                              background: 'var(--surface)',
+                              borderColor: p.isLatest ? 'var(--accent)' : 'var(--border)'
+                            }}
+                          >
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="flex items-center gap-2.5 min-w-0">
+                                <span
+                                  className="w-7 h-7 rounded-lg flex items-center justify-center font-bold text-xs uppercase shrink-0"
+                                  style={{
+                                    background: p.browser === 'zen' ? '#a855f722' : p.browser === 'firefox' ? '#f9731622' : 'var(--surface2)',
+                                    color: p.browser === 'zen' ? '#c084fc' : p.browser === 'firefox' ? '#fb923c' : 'var(--accent)',
+                                    border: '1px solid currentColor'
+                                  }}
+                                >
+                                  {p.browser ? p.browser.substring(0, 2) : 'BR'}
+                                </span>
+                                <div className="min-w-0">
+                                  <div className="text-xs font-semibold text-[var(--text)] truncate flex items-center gap-1.5">
+                                    <span>{p.name}</span>
+                                    {p.isLatest && (
+                                      <span className="px-1.5 py-0.2 rounded text-[9px] font-bold uppercase bg-indigo-500/20 text-indigo-300">
+                                        Active
+                                      </span>
+                                    )}
+                                  </div>
+                                  <div className="text-[10px] text-[var(--text3)] font-mono truncate">
+                                    {p.browser} • {p.id}
+                                  </div>
                                 </div>
                               </div>
-                            </div>
 
-                            <button
-                              type="button"
-                              disabled={isSyncingThis || syncingAll}
-                              className="px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition-all cursor-pointer shrink-0 disabled:opacity-50 hover:bg-white/10 active:scale-97"
-                              style={{
-                                background: 'var(--surface2)',
-                                borderColor: 'var(--border)',
-                                color: 'var(--text)'
-                              }}
-                              onClick={() => handleSyncProfile(p.id)}
-                              title={`Import sessions from ${p.name}`}
-                            >
-                              {isSyncingThis ? (
-                                <span>Importing...</span>
-                              ) : (
-                                <span>Import</span>
-                              )}
-                            </button>
-                          </div>
-
-                          <div className="flex items-center gap-1.5 flex-wrap">
-                            {p.isLocked && (
-                              <span className="px-1.5 py-0.5 rounded text-[10px] bg-amber-500/15 text-amber-300 border border-amber-500/30">
-                                Browser Running
-                              </span>
-                            )}
-                            {sessions.map((s) => (
-                              <span
-                                key={s}
-                                className="px-1.5 py-0.5 rounded text-[10px] font-medium border"
+                              <button
+                                type="button"
+                                disabled={isSyncingThis || syncingAll}
+                                className="px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition-all cursor-pointer shrink-0 disabled:opacity-50 hover:bg-white/10 active:scale-97"
                                 style={{
                                   background: 'var(--surface2)',
                                   borderColor: 'var(--border)',
-                                  color: 'var(--text2)'
+                                  color: 'var(--text)'
                                 }}
+                                onClick={() => handleSyncProfile(p.id)}
+                                title={`Import sessions from ${p.name}`}
                               >
-                                {s === 'chatgpt' ? 'ChatGPT' : s === 'claude' ? 'Claude' : s === 'google' ? 'Google' : s === 'deepseek' ? 'DeepSeek' : s === 'perplexity' ? 'Perplexity' : s === 'grok' ? 'Grok' : s === 'mistral' ? 'Mistral' : s}
-                              </span>
-                            ))}
-                            {!hasSessions && !p.isLocked && (
-                              <span className="text-[10px] text-[var(--text3)] italic">
-                                No AI sessions detected
-                              </span>
-                            )}
+                                {isSyncingThis ? (
+                                  <span>Importing...</span>
+                                ) : (
+                                  <span>Import</span>
+                                )}
+                              </button>
+                            </div>
+
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              {p.isLocked && (
+                                <span className="px-1.5 py-0.5 rounded text-[10px] bg-amber-500/15 text-amber-300 border border-amber-500/30">
+                                  Browser Running
+                                </span>
+                              )}
+                              {sessions.map((s) => (
+                                <span
+                                  key={s}
+                                  className="px-1.5 py-0.5 rounded text-[10px] font-medium border"
+                                  style={{
+                                    background: 'var(--surface2)',
+                                    borderColor: 'var(--border)',
+                                    color: 'var(--text2)'
+                                  }}
+                                >
+                                  {s === 'chatgpt' ? 'ChatGPT' : s === 'claude' ? 'Claude' : s === 'google' ? 'Google' : s === 'deepseek' ? 'DeepSeek' : s === 'perplexity' ? 'Perplexity' : s === 'grok' ? 'Grok' : s === 'mistral' ? 'Mistral' : s}
+                                </span>
+                              ))}
+                              {!hasSessions && !p.isLocked && (
+                                <span className="text-[10px] text-[var(--text3)] italic">
+                                  No AI sessions detected
+                                </span>
+                              )}
+                            </div>
                           </div>
-                        </div>
-                      )
-                    })}
-                  </div>
-                )}
-              </div>
-            </Card>
+                        )
+                      })}
+                    </div>
+                  )}
+                </div>
+              </Card>
+            )}
 
             <SectionTitle badge={`${models.length} Providers`}>
               <IconGrid size={13} style={{ color: 'var(--accent)' }} />
@@ -3055,7 +3065,10 @@ export default function SettingsOverlay({
                 <span>Palette Collection</span>
               </SectionTitle>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3 pt-1">
+              <div
+                className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3 pt-1"
+                data-guide="settings-theme-grid"
+              >
                 {[...PRESET_THEMES, ...themeState.customs].map((t) => {
                   const isSel = t.id === themeState.activeId
                   return (
@@ -3411,8 +3424,8 @@ export default function SettingsOverlay({
               </div>
             </div>
 
-            {/* TWO-COLUMN STUDIO BODY: Canvas + Live Interactive Preview */}
-            <div className="flex-1 min-h-0 flex gap-3.5 overflow-hidden h-full">
+            {/* TWO-COLUMN STUDIO BODY: Canvas + Live Interactive Preview. Anchored for the guide. */}
+            <div className="flex-1 min-h-0 flex gap-3.5 overflow-hidden h-full" data-guide="settings-style-studio">
 
               {/* 2. CENTER COLUMN: Style Configuration & Rich Micro-Diagrams Canvas */}
               <div

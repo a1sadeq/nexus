@@ -4,7 +4,7 @@ import {
   getEffectiveProviderColor,
   getProviderGradient
 } from '../lib/modelVisuals'
-import { BrandIcon } from './BrandIcons'
+import ProviderIcon from './ProviderIcon'
 import './TitlebarModelPillar.css'
 
 export interface TitlebarModelPillarProps {
@@ -89,11 +89,19 @@ export const TitlebarModelPillar: FC<TitlebarModelPillarProps> = ({
             }
             onClick={() => onSelectModel(m.key)}
           >
-            {m.icon ? (
-              <span className="titlebar-model-icon" dangerouslySetInnerHTML={{ __html: m.icon }} />
-            ) : (
-              <BrandIcon id={m.key} size={14} className="titlebar-model-icon" />
-            )}
+            {/*
+              The same component the tabs use, on purpose: configured SVG first, then the brand path,
+              then the neutral mark. Before this, the pillar painted `m.icon` raw and the tabs painted
+              the sanitised, resolved version — two brands for one provider.
+            */}
+            <ProviderIcon
+              modelKey={m.key}
+              customSvg={m.icon}
+              color={isActive ? '#ffffff' : color}
+              size={14}
+              active={isActive}
+              className="titlebar-model-icon"
+            />
             <span className="titlebar-model-label">{m.label}</span>
             {isActive && <span className="active-core-dot" aria-hidden="true" />}
           </button>

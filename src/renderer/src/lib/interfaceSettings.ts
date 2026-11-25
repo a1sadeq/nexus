@@ -47,6 +47,15 @@ export interface InterfaceSettings {
   ambientAuraColor?: string
   /** Slow breathing motion on the aura. Off = a static glow. */
   ambientAuraLive?: boolean
+  /**
+   * How strong the container's aura ring is around the AI webview, as a percentage.
+   *
+   * 0 turns the ring (and its inset) off entirely, 100 is the ring as it always looked, and the range
+   * goes to 300 for a container that should be unmistakable at a glance. It is a *global* setting on
+   * purpose: the ring says which container a tab belongs to, so its size is a property of the window,
+   * not of a provider.
+   */
+  containerAuraStrength: number
   webviewBubbleStyle: WebviewBubbleStyle
   bubbleGradientDepth: number
   webviewCodeBlockStyle: WebviewCodeBlockStyle
@@ -100,6 +109,7 @@ export const DEFAULT_INTERFACE_SETTINGS: InterfaceSettings = {
   ambientAuraIntensity: 45,
   ambientAuraColor: '',
   ambientAuraLive: true,
+  containerAuraStrength: 100,
   webviewBubbleStyle: 'glass-slate',
   bubbleGradientDepth: 30,
   webviewCodeBlockStyle: 'oled-contrast',
@@ -245,7 +255,14 @@ export function loadInterfaceSettings(): InterfaceSettings {
     if (parsed.maskTitlebarConversationTitle !== undefined && parsed.maskTitlebarTitle === undefined) {
       parsed.maskTitlebarTitle = parsed.maskTitlebarConversationTitle
     }
-    return { ...DEFAULT_INTERFACE_SETTINGS, ...parsed }
+    const merged = { ...DEFAULT_INTERFACE_SETTINGS, ...parsed }
+    // A ring width is geometry, so a stored value outside the drawable range would be a bug that looks
+    // like a preference. Clamp on the way in rather than trusting whatever is in localStorage.
+    const strength = Number(merged.containerAuraStrength)
+    merged.containerAuraStrength = Number.isFinite(strength)
+      ? Math.max(0, Math.min(300, Math.round(strength)))
+      : DEFAULT_INTERFACE_SETTINGS.containerAuraStrength
+    return merged
   } catch {
     return DEFAULT_INTERFACE_SETTINGS
   }

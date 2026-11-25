@@ -20,7 +20,8 @@ import {
   reorderTabs,
   type Tab,
   type ModelKey,
-  type HistoryItem
+  type HistoryItem,
+  shouldAcceptReportedUrl
 } from './tabs'
 
 const urlOf: Record<ModelKey, string> = {
@@ -396,5 +397,48 @@ describe('reorderTabs (Mouse Drag and Drop)', () => {
     const list = [t1, t2, t3]
     expect(reorderTabs(list, 't2', 't2')).toBe(list)
     expect(reorderTabs(list, 't999', 't1')).toBe(list)
+  })
+})
+
+
+describe('shouldAcceptReportedUrl', () => {
+  it('keeps a deep chat link when the provider bounces to its home page', () => {
+    expect(
+      shouldAcceptReportedUrl({
+        reportedUrl: 'https://gemini.google.com/app',
+        currentUrl: 'https://gemini.google.com/app/abc123'
+      })
+    ).toBe(false)
+  })
+
+  it('accepts the same bounce when the user asked for it', () => {
+    // A restored tab sits on a chat URL; the address bar navigating it to the provider home page used
+    // to be dropped, so the tab kept its old URL — "Ctrl+L only works on new tabs".
+    expect(
+      shouldAcceptReportedUrl({
+        reportedUrl: 'https://gemini.google.com/app',
+        currentUrl: 'https://gemini.google.com/app/abc123',
+        isUserNavigation: true
+      })
+    ).toBe(true)
+  })
+
+  it('accepts a non-home URL whatever the tab was on', () => {
+    expect(
+      shouldAcceptReportedUrl({
+        reportedUrl: 'https://example.com/page',
+        currentUrl: 'https://arena.ai/agent/123'
+      })
+    ).toBe(true)
+  })
+
+  it('accepts anything when the tab has no URL yet', () => {
+    expect(
+      shouldAcceptReportedUrl({ reportedUrl: 'https://claude.ai/new', currentUrl: '' })
+    ).toBe(true)
+  })
+
+  it('ignores an empty report', () => {
+    expect(shouldAcceptReportedUrl({ reportedUrl: '', currentUrl: 'https://x.y' })).toBe(false)
   })
 })

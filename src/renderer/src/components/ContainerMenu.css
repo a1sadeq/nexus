@@ -299,8 +299,39 @@
 
 .containers-btn {
   position: relative;
+  overflow: hidden;
   transition: background 160ms ease, border-color 160ms ease, box-shadow 160ms ease,
     color 160ms ease;
+}
+
+/* A hairline of light along the top edge, the same trick the Tab Colours tile uses: the button reads as
+   a surface rather than a rectangle. It is a pseudo-element so it costs no markup. */
+.containers-btn::before {
+  content: '';
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--container-color, var(--accent)) 55%, transparent),
+    transparent
+  );
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+/* Plain (uncoloured) container: a faint sheen, so the two-wide button still looks deliberate. */
+.containers-btn:not(.is-tinted) {
+  background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0));
+}
+
+.containers-btn:not(.is-tinted)::before {
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.14), transparent);
+}
+
+.containers-btn:active {
+  transform: translateY(0.5px);
 }
 
 /* Tinted state: only exists once a container actually has a colour. The default grey container
@@ -339,9 +370,9 @@
 
 /* The little cube that carries the colour, shared by the tinted and plain states. */
 .containers-btn-swatch {
-  width: 12px;
-  height: 12px;
-  border-radius: 4px;
+  width: 13px;
+  height: 13px;
+  border-radius: 4.5px;
   flex-shrink: 0;
   transition: box-shadow 160ms ease, transform 160ms ease;
 }
@@ -354,11 +385,12 @@
   font-family: ui-monospace, monospace;
   font-size: 9px;
   line-height: 1;
-  padding: 2px 4px;
-  border-radius: 5px;
-  background: rgba(0, 0, 0, 0.22);
+  padding: 2.5px 5px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid rgba(255, 255, 255, 0.07);
   color: inherit;
-  opacity: 0.75;
+  opacity: 0.8;
   flex-shrink: 0;
 }
 

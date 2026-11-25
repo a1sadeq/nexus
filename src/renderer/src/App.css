@@ -585,3 +585,61 @@ body[data-preset='iron-man-hud'] .history-btn:hover {
   color: #00e5ff !important;
   box-shadow: 0 0 14px rgba(0, 229, 255, 0.4) !important;
 }
+
+
+/* ---------------------------------------------------------------------------------------------
+   Shortcut badges — the keys printed on the button they belong to.
+   Same shape as the Container digit chip: monospace, one step smaller than the label, never in the
+   way of the icon. `⇧` and `⌘` are used where the modifier has a symbol people already read.
+   --------------------------------------------------------------------------------------------- */
+
+.shortcut-keys {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  margin-left: auto;
+  opacity: 0.72;
+  transition: opacity 140ms ease;
+}
+
+button:hover .shortcut-keys,
+.shortcut-keys:hover {
+  opacity: 1;
+}
+
+/* Build 32: a half-width button in the 2-up grid has ~100px inside it. Three chips (Ctrl ⇧ O) plus a
+   label do not fit on one line there, and what a squeezed flex row does is shrink the chips until each
+   one shows a single letter — the "C S O" the Folder and Base buttons were showing. So the badge is now
+   given its own row under the label (`is-block`), and the chips are told never to shrink again: the
+   label truncates if anything has to, the keys stay readable. */
+.shortcut-keys.is-block {
+  margin-left: 0;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  align-self: flex-start;
+}
+
+.shortcut-key {
+  flex: 0 0 auto;
+  min-width: max-content;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 8.5px;
+  line-height: 1;
+  font-weight: 600;
+  padding: 2.5px 4px;
+  border-radius: 4px;
+  letter-spacing: 0.2px;
+  color: color-mix(in srgb, var(--text) 78%, transparent);
+  background: rgba(0, 0, 0, 0.32);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  white-space: nowrap;
+}
+
+/* A tinted button (containers, tab colours) keeps its tint readable under the chips. */
+.containers-btn.is-tinted .shortcut-key {
+  background: color-mix(in srgb, var(--container-color) 26%, rgba(0, 0, 0, 0.32));
+  border-color: color-mix(in srgb, var(--container-color) 45%, transparent);
+  color: color-mix(in srgb, var(--container-color) 30%, var(--text));
+}

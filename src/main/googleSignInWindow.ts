@@ -6,6 +6,7 @@ import {
   isGoogleSignInRejection,
   type PageSnapshot
 } from './googleSignInBlock'
+import { adoptNativeIdentity, forgetNativeIdentity } from './webIdentity'
 
 /**
  * The sign-in window Nexus opens for itself.
@@ -27,7 +28,8 @@ import {
  *     and the same string for the window's whole life.
  *  2. The AI partition's request hook rewrites `User-Agent` on every request in that partition — it
  *     switched this window's header back to the laundered UA no matter what the window said. Requests
- *     from this window are recognised and left on the Electron identity (see isInAppSignInWebContents).
+ *     from this window are recognised and left on the Electron identity (see webIdentity.ts, where that
+ *     same rule now covers every page in the app that lands on Google's sign-in).
  */
 export interface InAppSignInHandle {
   /** Closes the window, if it is still open. */
@@ -37,12 +39,6 @@ export interface InAppSignInHandle {
 }
 
 let current: BrowserWindow | null = null
-
-/** Is this request coming from the sign-in window? Used to keep its identity consistent. */
-export function isInAppSignInWebContents(webContentsId: number | undefined): boolean {
-  if (webContentsId === undefined || webContentsId < 0) return false
-  return !!current && !current.isDestroyed() && current.webContents.id === webContentsId
-}
 
 export function closeInAppSignInWindow(): void {
   if (current && !current.isDestroyed()) current.close()
@@ -98,8 +94,15 @@ export function openInAppSignInWindow(
     return { action: 'deny' }
   })
 
-  // The window's own identity, matching what the partition hook above will send.
-  win.webContents.setUserAgent(NATIVE_ELECTRON_UA)
+  // The window's own identity, matching what the partition hook above will send. Registered as a
+  // *permanent* holder: this window is the one place in the app that must keep the honest Electron
+  // identity for its whole life, and nothing that happens to its pages may hand it back.
+  //
+  // The id is taken now, not in the handler: by the time 'closed' fires the window is destroyed and
+  // reading `win.webContents` throws, so a forget that reached for it there would never run.
+  const contentsId = win.webContents.id
+  adoptNativeIdentity(win.webContents, NATIVE_ELECTRON_UA, { permanent: true })
+  win.once('closed', () => forgetNativeIdentity(contentsId))
 
   // Google's refusal page is rendered server-side and announced in the body text. Report it, but do
   // not close the window: "Try again" on that page is a real retry, and a late success still counts.

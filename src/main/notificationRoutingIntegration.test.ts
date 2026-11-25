@@ -105,7 +105,7 @@ describe('completion notifications and latest-notification shortcut', () => {
       activeViewId: 'active',
       activeViewVisible: true,
       aiViews: new Map([
-        ['active', {}],
+        ['active', { webContents: { isDestroyed: () => false } }],
         ['background', {}]
       ]),
       tabDiscardManager: { hasView: () => false, isTabEvicted: () => false },
@@ -128,7 +128,10 @@ describe('completion notifications and latest-notification shortcut', () => {
       ...overlayWatchdog,
       reconcileViewPresentation: vi.fn(),
       focusPromptInView: vi.fn(),
-      viewModelKeys: new Map()
+      viewModelKeys: new Map(),
+      // Build 33: stacking the toast over the page asks the page for one frame.
+      lastRealBounds: new Map(),
+      forceViewRepaint: vi.fn()
     })
     vm.runInContext(code, context)
   })
@@ -149,6 +152,9 @@ describe('completion notifications and latest-notification shortcut', () => {
     expect(win.contentView.removeChildView).not.toHaveBeenCalled()
     expect(win.focus).not.toHaveBeenCalled()
     expect(vm.runInContext('nativeNotificationTimers.size', context)).toBe(1)
+    // The page underneath is asked for a frame when the toast is stacked over it, so a notification
+    // arriving cannot leave the AI view blank.
+    expect(context.forceViewRepaint).toHaveBeenCalledOnce()
   })
   it('suppresses duplicate alerts when user is already viewing the finished tab', () => {
     context.showInAppToast({ ...data, tabId: 'active' })

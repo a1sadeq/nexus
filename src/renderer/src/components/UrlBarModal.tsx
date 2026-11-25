@@ -3,6 +3,7 @@ import type { ModelDef } from '../App'
 import { BrandIcon } from './BrandIcons'
 import { modelColor } from '../lib/modelVisuals'
 import { fzfMatch } from '../lib/fzf'
+import { providersOutrankSearch, rankProviders } from '../lib/omnibox'
 import { loadInterfaceSettings } from '../lib/interfaceSettings'
 import { matchesShortcut, getShortcutKeys } from '../lib/shortcuts'
 
@@ -76,6 +77,37 @@ export function normalizeInputUrl(input: string): { url: string; detectedModel?:
   return { url: finalUrl, detectedModel }
 }
 
+const SEARCH_URL_FOR_INPUT: Array<(encoded: string) => string> = [
+  (encoded) => `https://www.google.com/search?q=${encoded}`,
+  (encoded) => `https://www.perplexity.ai/search?q=${encoded}`,
+  (encoded) => `https://duckduckgo.com/?q=${encoded}`
+]
+
+/** Does the typed text look like a place to go, rather than a question to ask? */
+export function isUrlLikeInput(input: string): boolean {
+  const q = input.trim()
+  if (!q || q.includes(' ')) return false
+  if (/^https?:\/\//i.test(q)) return true
+  if (/^(localhost|127\.0\.0\.1)([:/]|$)/i.test(q)) return true
+  return /^[a-z0-9-]+(\.[a-z0-9-]+)+(\/|$|:|\?)/i.test(q)
+}
+
+/**
+ * A URL typed into the bar must never become a web search of that URL. The list offers
+ * "Search Google: <url>" rows for every query, including URL-shaped ones, and picking one used to
+ * send the user to a search result page instead of the site — which then looked like "the app
+ * turned my link into a Google search". When the input is a URL and the chosen row is only a search
+ * for that exact input, return the URL to load instead.
+ */
+export function coerceSearchSelectionToUrl(input: string, itemUrl: string): string | null {
+  if (!itemUrl || !isUrlLikeInput(input)) return null
+  const encoded = encodeURIComponent(input.trim())
+  const isSearchForThisInput = SEARCH_URL_FOR_INPUT.some((build) => build(encoded) === itemUrl)
+  if (!isSearchForThisInput) return null
+  const { url } = normalizeInputUrl(input)
+  return url === itemUrl ? null : url
+}
+
 interface OmniboxActionItem {
   kind: 'action'
   id: string
@@ -114,7 +146,12 @@ const SYSTEM_COMMANDS: Array<{ id: string; title: string; subtitle: string; shor
   { id: 'history', title: 'Chat History', subtitle: 'Search and reopen previous chat conversations', shortcutId: 'history-open' },
   { id: 'new_tab', title: 'New Tab', subtitle: 'Open a fresh AI provider chat tab', shortcutId: 'tab-new' },
   { id: 'focus_mode', title: 'Toggle Focus Mode', subtitle: 'Hide header and sidebar for clean focus' },
-  { id: 'reload', title: 'Reload Tab', subtitle: 'Refresh the active AI webview', shortcutId: 'model-reload' }
+  { id: 'reload', title: 'Reload Tab', subtitle: 'Refresh the active AI webview', shortcutId: 'model-reload' },
+  {
+    id: 'repair_view',
+    title: 'Repair AI View',
+    subtitle: 'Rebuild a blank page surface without reloading the chat'
+  }
 ]
 
 export default function UrlBarModal({
@@ -131,49 +168,66 @@ export default function UrlBarModal({
   const inputRef = useRef<HTMLInputElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
 
+  // Seed the field from the tab's URL when the bar *opens* — and only then.
+  //
+  // It used to depend on `currentUrl` as well, which meant every URL update from the page (the tab
+  // reports its own URL on every navigation) rewrote the field and threw away what had just been
+  // typed. Pressing Enter then submitted the tab's existing URL, which is why Ctrl+L felt like it
+  // "just returned to the same AI view" instead of going somewhere new. The user's text now wins for
+  // as long as the bar is open; reopening re-seeds it from wherever the tab actually is.
+  const wasOpenRef = useRef(false)
   useEffect(() => {
-    if (isOpen) {
-      setInputVal(currentUrl)
-      setSelectedIndex(0)
-      // @ts-ignore
-      window.electron?.ipcRenderer.send('claim_window_focus')
-      setTimeout(() => {
-        if (inputRef.current) {
-          inputRef.current.focus()
-          inputRef.current.select()
-        }
-      }, 10)
+    if (!isOpen) {
+      wasOpenRef.current = false
+      return
     }
+    if (wasOpenRef.current) return
+    wasOpenRef.current = true
+    setInputVal(currentUrl)
+    setSelectedIndex(0)
+    // @ts-ignore
+    window.electron?.ipcRenderer.send('claim_window_focus')
+    setTimeout(() => {
+      if (inputRef.current) {
+        inputRef.current.focus()
+        inputRef.current.select()
+      }
+    }, 10)
   }, [isOpen, currentUrl])
 
-  // Build items list with live fuzzy matching
+  // Build the suggestion list.
+  //
+  // Ordering is deliberate:
+  //   1. the URL itself, when the text is URL-shaped — never below a search of that URL;
+  //   2. the providers the query is about, when the match is confident enough to outrank searching;
+  //   3. the search engines;
+  //   4. any remaining providers;
+  //   5. system commands.
   const items = useMemo<OmniboxItem[]>(() => {
     const q = inputVal.trim()
-    const result: OmniboxItem[] = []
+    const isUrlLike =
+      q.includes('.') &&
+      !q.includes(' ') &&
+      (q.startsWith('http://') || q.startsWith('https://') || !q.includes('://'))
 
-    // 1. Actions based on query
+    const directUrlItem: OmniboxActionItem[] = []
+    if (q && isUrlLike) {
+      const fullUrl = q.startsWith('http://') || q.startsWith('https://') ? q : `https://${q}`
+      const detected = detectModelFromUrl(fullUrl)
+      directUrlItem.push({
+        kind: 'action',
+        id: 'action-direct-url',
+        title: `Navigate to ${fullUrl}`,
+        subtitle: detected ? `Detected AI: ${detected}` : 'Open website in active workspace',
+        url: fullUrl,
+        detectedModel: detected,
+        category: 'Actions'
+      })
+    }
+
+    const searchItems: OmniboxActionItem[] = []
     if (q) {
-      const isUrlLike =
-        q.includes('.') &&
-        !q.includes(' ') &&
-        (q.startsWith('http://') || q.startsWith('https://') || !q.includes('://'))
-
-      if (isUrlLike) {
-        const fullUrl = q.startsWith('http://') || q.startsWith('https://') ? q : `https://${q}`
-        const detected = detectModelFromUrl(fullUrl)
-        result.push({
-          kind: 'action',
-          id: 'action-direct-url',
-          title: `Navigate to ${fullUrl}`,
-          subtitle: detected ? `Detected AI: ${detected}` : 'Open website in active workspace',
-          url: fullUrl,
-          detectedModel: detected,
-          category: 'Actions'
-        })
-      }
-
       const defaultEngine = loadInterfaceSettings().defaultSearchEngine
-
       const searchActions: OmniboxActionItem[] = [
         {
           kind: 'action',
@@ -203,37 +257,33 @@ export default function UrlBarModal({
           category: 'Actions'
         }
       ]
-
       // Place default engine at the top of search actions
       searchActions.sort((a, b) => {
         if (a.id === `action-${defaultEngine}`) return -1
         if (b.id === `action-${defaultEngine}`) return 1
         return 0
       })
-
-      result.push(...searchActions)
+      searchItems.push(...searchActions)
     }
 
-    // 2. AI Providers
-    for (const m of models) {
-      if (!q || fzfMatch(m.label || m.key, q) || fzfMatch(m.key, q) || fzfMatch(m.url, q)) {
-        result.push({
-          kind: 'provider',
-          id: `provider-${m.key}`,
-          title: m.label || m.key,
-          subtitle: m.url,
-          url: m.url,
-          detectedModel: m.key,
-          color: m.color || modelColor(m.key),
-          category: 'AI Providers'
-        })
-      }
-    }
+    // Graded match — exact / prefix / word-start / substring / alias / host — best first. A plain
+    // substring test is why a provider used to appear only once its whole name had been typed.
+    const matchedProviders = q ? rankProviders(q, models).map((entry) => entry.provider) : models
+    const providerItems: OmniboxProviderItem[] = matchedProviders.map((m) => ({
+      kind: 'provider',
+      id: `provider-${m.key}`,
+      title: m.label || m.key,
+      subtitle: m.url,
+      url: m.url,
+      detectedModel: m.key,
+      color: m.color || modelColor(m.key),
+      category: 'AI Providers'
+    }))
 
-    // 3. System Commands
+    const commandItems: OmniboxCommandItem[] = []
     for (const cmd of SYSTEM_COMMANDS) {
       if (!q || fzfMatch(cmd.title, q) || fzfMatch(cmd.subtitle, q) || fzfMatch(cmd.id, q)) {
-        result.push({
+        commandItems.push({
           kind: 'command',
           id: cmd.id,
           title: cmd.title,
@@ -244,7 +294,13 @@ export default function UrlBarModal({
       }
     }
 
-    return result
+    const providersFirst = Boolean(q) && providersOutrankSearch(q, models) && providerItems.length > 0
+    const out: OmniboxItem[] = [...directUrlItem]
+    if (providersFirst) out.push(...providerItems)
+    out.push(...searchItems)
+    if (!providersFirst) out.push(...providerItems)
+    out.push(...commandItems)
+    return out
   }, [inputVal, models])
 
   // Keep selected index within bounds
@@ -272,6 +328,13 @@ export default function UrlBarModal({
     }
 
     if (item.kind === 'action' || item.kind === 'provider') {
+      const coerced = item.kind === 'action' ? coerceSearchSelectionToUrl(inputVal, item.url) : null
+      if (coerced) {
+        console.log(`[urlbar] "${inputVal.trim()}" is a URL — navigating there instead of searching`)
+        onNavigate(coerced, detectModelFromUrl(coerced), inNewTab)
+        onClose()
+        return
+      }
       onNavigate(item.url, item.detectedModel, inNewTab)
       onClose()
     } else if (item.kind === 'command') {
@@ -399,7 +462,12 @@ export default function UrlBarModal({
                   key={item.id}
                   data-index={idx}
                   onClick={() => handleSelect(item, false)}
-                  onMouseEnter={() => setSelectedIndex(idx)}
+                  // onMouseMove, not onMouseEnter: the modal opens with the pointer already
+                  // resting over the list, and `enter` fires as rows re-render underneath a
+                  // motionless cursor while the user types. That silently moved the highlight onto
+                  // "Search Google: <typed url>", so Enter searched for the URL instead of opening
+                  // it. A move is a real intent; a row appearing under a still pointer is not.
+                  onMouseMove={() => setSelectedIndex(idx)}
                   className="flex items-center justify-between gap-3 px-3 py-2 rounded-xl cursor-pointer transition-all text-xs"
                   style={{
                     background: isSelected ? 'var(--accent, #6366f1)' : 'transparent',

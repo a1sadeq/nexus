@@ -27,6 +27,7 @@ export interface RepaintViewLike {
   }
   setBounds?: (bounds: Rectangle) => void
   getBounds?: () => Rectangle
+  setVisible?: (visible: boolean) => void
 }
 
 export interface RepaintOptions {
@@ -43,6 +44,27 @@ export interface RepaintOptions {
   /** Why we are repainting — logged, so a recurrence is diagnosable. */
   reason?: string
   log?: (message: string) => void
+  /**
+   * Ignore the anti-burst cooldown, and ask a second time one frame later.
+   *
+   * The cooldown exists because show/focus/restore/resize all fire in bursts and one nudge is enough for
+   * them. It is the wrong behaviour for the one case that actually loses the surface: a view that was
+   * hidden and is being shown again can arrive while a nudge from a moment ago is still cooling down, and
+   * then *nothing* forces a frame. `force` is for known-lost-surface transitions only (overlay closed,
+   * window restored, surface re-attached).
+   */
+  force?: boolean
+  /**
+   * Flip the view's visibility (hide, then show one frame later) as part of the repaint.
+   *
+   * This is the strongest lever there is, because it is the one users find by hand: opening Settings
+   * hides the page and closing it shows it again, and that — not any bounds change — is what brings a
+   * discarded surface back. `setVisible(false)` makes Chromium release the surface; `setVisible(true)`
+   * makes it build a new one. Use it for transitions where the surface is *known* to be gone (coming
+   * back from an overlay, a tab that was in the background, after a re-attach), not for ordinary
+   * layout changes.
+   */
+  flipVisibility?: boolean
 }
 
 export type RepaintOutcome = 'invalidated' | 'invalidated+nudged' | 'nudged' | 'skipped'
@@ -117,7 +139,8 @@ export function forceViewRepaint(
   const now = options.now ?? Date.now()
   const minInterval = options.minIntervalMs ?? DEFAULT_MIN_INTERVAL_MS
   const previous = lastNudgeAt.get(view as object)
-  if (previous !== undefined && now - previous < minInterval) {
+  const forced = options.force === true
+  if (!forced && previous !== undefined && now - previous < minInterval) {
     // Coalesce: a nudge happened moments ago; invalidate() above is enough for this one.
     return invalidated ? 'invalidated' : 'skipped'
   }
@@ -125,6 +148,16 @@ export function forceViewRepaint(
 
   const scheduledBounds: Rectangle = bounds
   const nudgedBounds: Rectangle = { ...bounds, width: bounds.width - 1 }
+  const flip = options.flipVisibility === true && typeof view.setVisible === 'function'
+  if (flip) {
+    // Half of the workaround: the page stops being presented, so the compositor lets go of the stale
+    // surface instead of keeping it on screen as a rectangle of background.
+    try {
+      view.setVisible?.(false)
+    } catch (error) {
+      log(`visibility hide failed: ${(error as Error)?.message ?? error}`)
+    }
+  }
   const schedule =
     options.schedule ?? ((fn: () => void, ms: number) => void setTimeout(fn, ms))
 
@@ -142,6 +175,19 @@ export function forceViewRepaint(
     } catch (error) {
       log(`restore setBounds failed: ${(error as Error)?.message ?? error}`)
     }
+    if (flip) {
+      // The other half: presented again, with the new geometry already in place, so the frame is built
+      // for the surface the user is actually looking at.
+      try {
+        view.setVisible?.(true)
+      } catch (error) {
+        log(`visibility restore failed: ${(error as Error)?.message ?? error}`)
+      }
+    }
+    // A forced repaint asks once more after the geometry is back: the first invalidate() can be served
+    // from a frame that was already in flight, and on the compositor paths that lose a surface the
+    // second ask is the one that lands.
+    if (forced) invalidate(view, log)
   }
 
   try {
@@ -151,6 +197,10 @@ export function forceViewRepaint(
     restore()
   }
 
-  log(`repaint (${reason}): ${invalidated ? 'invalidate + ' : ''}1px nudge`)
+  log(
+    `repaint (${reason}): ${flip ? 'hide/show + ' : ''}${invalidated ? 'invalidate + ' : ''}1px nudge${
+      forced ? ' (forced)' : ''
+    }`
+  )
   return invalidated ? 'invalidated+nudged' : 'nudged'
 }

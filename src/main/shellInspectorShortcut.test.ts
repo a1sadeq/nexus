@@ -70,6 +70,15 @@ describe('Nexus Shell Inspector Shortcut (Ctrl+Alt+Shift+I)', () => {
       clearTimeout: vi.fn(),
       reconcileViewPresentation: vi.fn(),
       focusPromptInView: vi.fn(),
+      // The overlay handler writes one line to the navigation trace; the slice gets a stub rather than
+      // the real tracer, exactly like every other free variable of this slice.
+      traceNav: vi.fn(),
+      traceViewOp: vi.fn(),
+      // Keyboard ownership: the overlay handler remembers who had the keyboard and hands it to the
+      // shell. Both are free variables of this slice, so they arrive as stubs like everything else.
+      keyboardOwner: 'view',
+      keyboardBeforeOverlay: 'view',
+      giveKeyboardToShell: vi.fn(),
       console: console
     }
 

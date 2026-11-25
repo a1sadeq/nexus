@@ -7,12 +7,22 @@ interface Harness {
   calls: unknown[]
   scheduled: Array<{ fn: () => void; ms: number }>
   invalidations: number
+  visibility: boolean[]
 }
 
-function harness(overrides: Partial<{ width: number; height: number; noInvalidate: boolean; destroyed: boolean }> = {}): Harness {
+function harness(
+  overrides: Partial<{
+    width: number
+    height: number
+    noInvalidate: boolean
+    destroyed: boolean
+    noSetVisible: boolean
+  }> = {}
+): Harness {
   const bounds = { x: 280, y: 45, width: overrides.width ?? 1200, height: overrides.height ?? 800 }
   const calls: unknown[] = []
   const scheduled: Array<{ fn: () => void; ms: number }> = []
+  const visibility: boolean[] = []
   const state = { invalidations: 0 }
   const view: RepaintViewLike = {
     webContents: {
@@ -29,13 +39,21 @@ function harness(overrides: Partial<{ width: number; height: number; noInvalidat
       calls.push({ ...next })
       Object.assign(bounds, next)
     },
-    getBounds: () => ({ ...bounds })
+    getBounds: () => ({ ...bounds }),
+    ...(overrides.noSetVisible
+      ? {}
+      : {
+          setVisible: (visible: boolean) => {
+            visibility.push(visible)
+          }
+        })
   }
   return {
     view,
     bounds,
     calls,
     scheduled,
+    visibility,
     get invalidations() {
       return state.invalidations
     }
@@ -145,6 +163,57 @@ describe('forced repaint', () => {
 
   it('is a no-op for a null view', () => {
     expect(forceViewRepaint(null)).toBe('skipped')
+  })
+
+  it('hides and shows the view around the nudge when a flip is asked for', () => {
+    const h = harness()
+    const outcome = forceViewRepaint(h.view, {
+      schedule: schedule(h),
+      now: 1000,
+      force: true,
+      flipVisibility: true
+    })
+    expect(outcome).toBe('invalidated+nudged')
+    // Hidden immediately, so the compositor releases the stale surface…
+    expect(h.visibility).toEqual([false])
+    // …and shown again with the restored geometry, which is what makes it draw a new one.
+    runScheduled(h)
+    expect(h.visibility).toEqual([false, true])
+    expect(h.bounds).toEqual({ x: 280, y: 45, width: 1200, height: 800 })
+    expect(h.invalidations).toBe(2)
+  })
+
+  it('does not touch visibility unless the flip is asked for', () => {
+    const h = harness()
+    forceViewRepaint(h.view, { schedule: schedule(h), now: 1000 })
+    runScheduled(h)
+    expect(h.visibility).toEqual([])
+  })
+
+  it('still invalidates and nudges for a view with no setVisible', () => {
+    const h = harness({ noSetVisible: true })
+    const outcome = forceViewRepaint(h.view, {
+      schedule: schedule(h),
+      now: 1000,
+      flipVisibility: true
+    })
+    expect(outcome).toBe('invalidated+nudged')
+    runScheduled(h)
+    expect(h.visibility).toEqual([])
+    expect(h.bounds.width).toBe(1200)
+  })
+
+  it('logs a flipped repaint so a recurrence is visible in the console', () => {
+    const h = harness()
+    const log = vi.fn()
+    forceViewRepaint(h.view, {
+      schedule: schedule(h),
+      now: 1,
+      flipVisibility: true,
+      reason: 'coming back from hidden',
+      log
+    })
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('hide/show'))
   })
 
   it('logs a diagnosable reason', () => {

@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import ts from 'typescript'
 import { buildProviderMotionScript, PROVIDER_MOTION_STYLE } from './providerMotion'
+import { isThirdPartyAuthPage } from './loginWall'
 
 function page() {
   return new JSDOM('<!doctype html><html><head></head><body><div id="content">Saved chat</div><video></video></body></html>', { runScripts: 'outside-only' })
@@ -51,7 +52,10 @@ describe('opt-in provider CSS animation pause', () => {
 })
 
 describe('production provider update integration', () => {
-  it('uses each provider preference and applies a reversible script to its view', async () => {
+  // The slice is compiled and evaluated with an explicit parameter list, so every free variable of
+  // the production function has to be named here. `isThirdPartyAuthPage` is the predicate main
+  // imports, passed in as itself rather than stubbed.
+  function productionApply() {
     const main = readFileSync(join(process.cwd(), 'src/main/index.ts'), 'utf8')
     const a = main.indexOf('let providerMotionSequence = 0')
     const b = main.indexOf('function injectVirtualizationCss(', a)
@@ -65,16 +69,38 @@ describe('production provider update integration', () => {
       'arena-ai': { features: { pauseCssAnimations: true } }, gemini: { features: { pauseCssAnimations: false } }
     }
     const context: Record<string, unknown> = {}
-    new Function('providerConfig', 'getMergedProviderFeatures', 'buildProviderMotionScript', 'isThirdPartyAuthPage', 'globalThis', compiled)(
-      config, (_key: string, overrides: { features?: object }) => overrides?.features || {}, buildProviderMotionScript, () => false, context
+    new Function(
+      'providerConfig', 'getMergedProviderFeatures', 'buildProviderMotionScript', 'isThirdPartyAuthPage', 'globalThis', compiled
+    )(
+      config,
+      (_key: string, overrides: { features?: object }) => overrides?.features || {},
+      buildProviderMotionScript,
+      isThirdPartyAuthPage,
+      context
     )
     const apply = context.apply as (view: unknown, modelKey: string) => void
-    const view = { webContents: { isDestroyed: () => false, executeJavaScript: execute, getURL: () => 'https://example.com' } }
-    apply(view, 'arena-ai')
+    const view = (url = 'https://arena.ai/agent/01a1f14b') => ({
+      webContents: { getURL: () => url, isDestroyed: () => false, executeJavaScript: execute }
+    })
+    return { apply, execute, view, dom }
+  }
+
+  it('uses each provider preference and applies a reversible script to its view', () => {
+    const { apply, execute, view, dom } = productionApply()
+    apply(view(), 'arena-ai')
     expect(dom.window.document.querySelector('style[data-nexus-provider-motion]')).not.toBeNull()
-    apply(view, 'gemini')
+    apply(view(), 'gemini')
     expect(dom.window.document.querySelector('style[data-nexus-provider-motion]')).toBeNull()
     expect(execute).toHaveBeenCalledTimes(2)
+    dom.window.close()
+  })
+
+  it('leaves an identity provider page untouched', () => {
+    const { apply, execute, view, dom } = productionApply()
+    apply(view('https://accounts.google.com/v3/signin/accountchooser'), 'arena-ai')
+    apply(view('https://login.microsoftonline.com/common/oauth2'), 'arena-ai')
+    expect(execute).not.toHaveBeenCalled()
+    expect(dom.window.document.querySelector('style[data-nexus-provider-motion]')).toBeNull()
     dom.window.close()
   })
 })

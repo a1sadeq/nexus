@@ -111,6 +111,10 @@ export const StyleStudioCanvas: React.FC<Props> = ({
   const effCodeBlock = (isGlobal ? interfaceSettings.webviewCodeBlockStyle : prov.codeBlockStyle) || interfaceSettings.webviewCodeBlockStyle || 'oled-black'
   const effComposerGlow = (isGlobal ? interfaceSettings.webviewComposerGlow : prov.composerGlow) || interfaceSettings.webviewComposerGlow || 'electric-neon'
   const effMessageGap = (isGlobal ? interfaceSettings.messageGap : prov.messageGap) ?? interfaceSettings.messageGap ?? 16
+  const effContainerAuraStrength = Math.max(
+    0,
+    Math.min(300, Number(interfaceSettings.containerAuraStrength ?? 100) || 0)
+  )
   const effCustomCss = (isGlobal ? interfaceSettings.globalCustomCss : prov.customCss) || ''
   const effCustomJs = (isGlobal ? interfaceSettings.globalCustomJs : prov.features?.customInitScript) || ''
   const effThemeSelectors = (isGlobal ? undefined : prov.themeSelectors) || {}
@@ -1395,6 +1399,71 @@ export const StyleStudioCanvas: React.FC<Props> = ({
                     Honours your system&apos;s reduced-motion setting.
                   </span>
                 </div>
+
+                {/* Container aura strength — the ring the *container* draws around the native webview.
+                    It is global on purpose: the ring says which container a tab belongs to, so its width
+                    is a property of the window rather than of a provider. The value is also the inset the
+                    page is drawn at, so the slider physically moves the page edge. */}
+                {isGlobal && (
+                  <div className="flex flex-col gap-1.5 pt-2 border-t border-white/5" data-container-aura-controls="true">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-semibold text-white flex items-center gap-2">
+                        Container aura
+                        <span className="text-[9px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded bg-white/5 border border-white/10 text-(--text2)">
+                          global
+                        </span>
+                      </span>
+                      <span className="text-xs font-mono font-bold text-rose-300">
+                        {effContainerAuraStrength}%
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={300}
+                      step={5}
+                      value={effContainerAuraStrength}
+                      onChange={(e) => setVal('containerAuraStrength', Number(e.target.value))}
+                      className="vc-range"
+                      aria-label="Container aura strength"
+                      aria-valuetext={
+                        effContainerAuraStrength === 0
+                          ? 'off — the page fills the frame'
+                          : `${effContainerAuraStrength} percent`
+                      }
+                    />
+                    <div className="flex items-center gap-1.5">
+                      {[
+                        { label: 'Off', val: 0 },
+                        { label: 'Subtle', val: 60 },
+                        { label: 'Default', val: 100 },
+                        { label: 'Bold', val: 180 },
+                        { label: 'Max', val: 300 }
+                      ].map((preset) => (
+                        <button
+                          key={preset.label}
+                          type="button"
+                          onClick={() => setVal('containerAuraStrength', preset.val)}
+                          className="px-2 py-0.5 rounded text-[10px] font-mono border transition-all cursor-pointer"
+                          style={{
+                            background:
+                              effContainerAuraStrength === preset.val ? 'rgba(244, 63, 94, 0.22)' : 'rgba(255,255,255,0.04)',
+                            borderColor:
+                              effContainerAuraStrength === preset.val ? '#f43f5e' : 'rgba(255,255,255,0.1)',
+                            color: effContainerAuraStrength === preset.val ? '#fda4af' : 'var(--text2)'
+                          }}
+                        >
+                          {preset.label}
+                        </button>
+                      ))}
+                    </div>
+                    <span className="text-[10px] text-(--text2) leading-snug">
+                      The ring a coloured container draws around the AI page, and how far the page is inset to
+                      make room for it. Off means the page fills the frame edge to edge. Give a container a
+                      colour (Tabs → container) and its ring appears here at this strength.
+                    </span>
+                  </div>
+                )}
 
                 {/* Aura Custom Color Picker */}
                 <div className="flex flex-col gap-2 p-2 rounded-xl bg-black/20 border border-white/5 mt-1">

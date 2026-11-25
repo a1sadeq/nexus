@@ -245,7 +245,7 @@ export const WindowTitleBar: FC<WindowTitleBarProps> = ({
       {/* Center: Always-Expanded AI Models Pillar */}
       <div className="flex-1 flex items-center justify-center min-w-0 px-2 pointer-events-none">
         {models && models.length > 0 && onSelectModel && (
-          <div className="pointer-events-auto">
+          <div className="pointer-events-auto" data-guide="providers">
             <TitlebarModelPillar
               models={models}
               activeModelKey={activeModelKey}

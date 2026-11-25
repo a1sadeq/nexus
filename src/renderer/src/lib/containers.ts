@@ -52,6 +52,40 @@ export function findContainer(
  * Shortcut numbering: container 1 is the first in the list (the default one), and the list order is
  * what `Ctrl+Alt+N` uses. 0 is accepted as "the first container" so both habits work.
  */
+/**
+ * Moves one container up or down the list, for the containers section.
+ *
+ * The list *is* the numbering — `Ctrl+Alt+N` opens the Nth — so moving a row also changes which key
+ * reaches it, and the panel says so rather than hiding it. A move that would fall off either end
+ * returns the list unchanged, so the caller can call this without checking first.
+ */
+export function moveContainerInList(
+  containers: ContainerInfo[],
+  containerId: string,
+  delta: number
+): ContainerInfo[] {
+  const from = containers.findIndex((c) => c.id === containerId)
+  if (from < 0 || !Number.isFinite(delta) || delta === 0) return containers
+  const to = from + Math.trunc(delta)
+  if (to < 0 || to >= containers.length || to === from) return containers
+  const next = containers.slice()
+  const [moved] = next.splice(from, 1)
+  next.splice(to, 0, moved)
+  return next
+}
+
+/** Whether the row has somewhere to go, so the buttons can be disabled instead of doing nothing. */
+export function canMoveContainerInList(
+  containers: ContainerInfo[],
+  containerId: string,
+  delta: number
+): boolean {
+  const from = containers.findIndex((c) => c.id === containerId)
+  if (from < 0) return false
+  const to = from + Math.trunc(delta)
+  return Number.isFinite(to) && to >= 0 && to < containers.length && to !== from
+}
+
 export function containerForShortcutIndex(
   containers: ContainerInfo[],
   index: number
@@ -91,27 +125,77 @@ export interface Rect {
   height: number
 }
 
-export function insetRectForAura(rect: Rect, hasColor: boolean): Rect {
+/**
+ * Aura strength, as a percentage of the default ring.
+ *
+ * 0 turns the ring off entirely (the page goes flush to the window edge), 100 is the ring as it always
+ * looked, and the range keeps going to 300 so a container can be made obviously louder than the others.
+ * Above 100 the ring grows *outwards* — a wider band of colour and a longer glow — instead of only
+ * getting more opaque, because a fully opaque 6px line is still a thin line.
+ */
+export const DEFAULT_CONTAINER_AURA_STRENGTH = 100
+export const MAX_CONTAINER_AURA_STRENGTH = 300
+
+export function normaliseAuraStrength(strength: number | undefined | null): number {
+  if (typeof strength !== 'number' || !Number.isFinite(strength)) return DEFAULT_CONTAINER_AURA_STRENGTH
+  return Math.max(0, Math.min(MAX_CONTAINER_AURA_STRENGTH, Math.round(strength)))
+}
+
+/** How wide the ring is, in px, at the requested strength. 0 means "no ring at all". */
+export function auraRingWidth(strength: number | undefined | null): number {
+  const pct = normaliseAuraStrength(strength)
+  if (pct === 0) return 0
+  // 100% → the historical 6 px. Below that it thins out; above it it grows, but sub-linearly so 300%
+  // frames the page instead of eating it.
+  const scaled = pct <= 100 ? (AURA_RING_INSET * pct) / 100 : AURA_RING_INSET + (pct - 100) * 0.06
+  return Math.max(pct === 0 ? 0 : 1, Math.round(scaled))
+}
+
+/**
+ * The rect the native view gets. The ring is drawn in the space the view leaves free, so a stronger
+ * ring means a smaller view — that arithmetic stays here, in one tested place, instead of in JSX.
+ */
+export function insetRectForAura(
+  rect: Rect,
+  hasColor: boolean,
+  strength: number | undefined | null = DEFAULT_CONTAINER_AURA_STRENGTH
+): Rect {
   if (!hasColor) return rect
+  const inset = auraRingWidth(strength)
+  if (inset <= 0) return rect
   // Never produce a negative or vanishing area: a tiny window would otherwise hide the view.
-  const width = Math.max(1, rect.width - AURA_RING_INSET * 2)
-  const height = Math.max(1, rect.height - AURA_RING_INSET * 2)
+  const width = Math.max(1, rect.width - inset * 2)
+  const height = Math.max(1, rect.height - inset * 2)
   return {
-    x: rect.x + AURA_RING_INSET,
-    y: rect.y + AURA_RING_INSET,
+    x: rect.x + inset,
+    y: rect.y + inset,
     width,
     height
   }
 }
 
-/** Inline styles for the ring — a border plus a soft outer glow in the container's colour. */
-export function auraRingStyle(color: string | undefined): Record<string, string> {
+/**
+ * The ring itself: a border plus an inner glow in the container's colour.
+ *
+ * Two alphas were hardcoded here (0.34 and 0.12) and again, differently, in `App.tsx` — so the veil the
+ * user saw and the helper the tests covered were not the same thing. Both now come from this function,
+ * scaled by the same strength that decides the width.
+ */
+export function auraRingStyle(
+  color: string | undefined,
+  strength: number | undefined | null = DEFAULT_CONTAINER_AURA_STRENGTH
+): Record<string, string> {
   const hex = normaliseHexColor(color)
   if (!hex) return {}
-  const glow = hexToRgba(hex, 0.34)
-  const soft = hexToRgba(hex, 0.12)
+  const pct = normaliseAuraStrength(strength)
+  if (pct === 0) return {}
+  const width = auraRingWidth(pct)
+  const factor = pct / 100
+  const glow = hexToRgba(hex, Math.min(0.9, 0.34 * factor))
+  const soft = hexToRgba(hex, Math.min(0.6, 0.12 * factor))
+  const spread = Math.max(1, Math.round(width * 4.3))
   return {
-    boxShadow: `inset 0 0 0 1px ${glow}, inset 0 0 ${AURA_RING_INSET * 3}px ${soft}`,
+    boxShadow: `inset 0 0 0 ${Math.max(1, Math.round(width * 0.17))}px ${glow}, inset 0 0 ${spread}px ${soft}`,
     borderColor: glow,
     backgroundImage: `radial-gradient(circle at 50% 0%, ${soft}, transparent 70%)`
   }

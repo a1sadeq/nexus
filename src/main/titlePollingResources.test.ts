@@ -3,9 +3,10 @@ import { join } from 'node:path'
 import vm from 'node:vm'
 import ts from 'typescript'
 import { describe, expect, it } from 'vitest'
+import { isThirdPartyAuthPage } from './loginWall'
 
 const main = readFileSync(join(__dirname, 'index.ts'), 'utf8')
-function getScript(kind: 'runtime' | 'update', interval: number) {
+function getScript(kind: 'runtime' | 'update', interval: number, url = 'https://arena.ai/chat') {
   const name = kind === 'runtime' ? 'buildWebviewRuntimeJs' : 'updateWebviewTitlePoller'
   const start = main.indexOf(`function ${name}(`)
   const end = main.indexOf('\nfunction ', start + 1)
@@ -13,12 +14,20 @@ function getScript(kind: 'runtime' | 'update', interval: number) {
   const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
   const api: Record<string, (...args: any[]) => any> = {}
   const features = { chatTitleSelector: '.title', chatTitlePollingIntervalMs: interval, enableSlashFocus: false, enableFocusRetention: false }
-  new Function('exports', 'providerConfig', 'getMergedProviderFeatures', 'PAGE_HELPERS', compiled)(
-    api, {}, () => features, "const splitList = (s) => s.split(',');"
-  )
+  // The production function now asks webIdentity.ts whether the page is one of Google's own sign-in
+  // surfaces before injecting anything. The real predicate is handed in rather than a stub, so this
+  // harness exercises the guard that ships.
+  new Function(
+    'exports',
+    'providerConfig',
+    'getMergedProviderFeatures',
+    'PAGE_HELPERS',
+    'isThirdPartyAuthPage',
+    compiled
+  )(api, {}, () => features, "const splitList = (s) => s.split(',');", isThirdPartyAuthPage)
   if (kind === 'runtime') return api[name]('arena-ai') as string
   let script = ''
-  api[name]({ webContents: { isDestroyed: () => false, executeJavaScript: (value: string) => { script = value; return Promise.resolve() } } }, 'arena-ai')
+  api[name]({ webContents: { isDestroyed: () => false, getURL: () => url, executeJavaScript: (value: string) => { script = value; return Promise.resolve() } } }, 'arena-ai')
   return script
 }
 function page() {
@@ -65,3 +74,18 @@ for (const kind of ['runtime', 'update'] as const) {
     })
   })
 }
+
+describe('nothing is injected into an identity provider\u2019s page', () => {
+  it('produces no title poller on a Google sign-in page', () => {
+    // The title poller used to be installed on every page, including a Google account chooser opened
+    // from a tab — one of the scripts whose interval reads as a page that keeps refreshing.
+    expect(getScript('update', 1500, 'https://accounts.google.com/v3/signin/identifier')).toBe('')
+  })
+  it('produces none on another provider\u2019s login page either', () => {
+    expect(getScript('update', 1500, 'https://auth.openai.com/log-in')).toBe('')
+    expect(getScript('update', 1500, 'https://github.com/login')).toBe('')
+  })
+  it('still produces one for the provider page itself', () => {
+    expect(getScript('update', 1500, 'https://arena.ai/chat')).toContain('__nexusTitleInterval')
+  })
+})

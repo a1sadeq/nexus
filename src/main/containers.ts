@@ -100,6 +100,13 @@ interface ContainersFile {
    * because its account does would be recreated on the next list — deleting it would look broken.
    */
   ignoredAccounts?: string[]
+  /**
+   * Display order, by id, and it may include `default` — the container the user drags to the top is
+   * the one `Ctrl+Alt+1` opens, and that has to be true for Default as well or the numbering would
+   * disagree with the list the user is looking at. Absent means "never reordered": Default first,
+   * then creation order, which is exactly what every older file says.
+   */
+  order?: string[]
 }
 
 export class ContainerStore {
@@ -139,7 +146,12 @@ export class ContainerStore {
             (id): id is string => typeof id === 'string' && !!sanitiseAccountId(id)
           )
         : []
-      return { version: 1, containers: kept, ignoredAccounts: ignored }
+      const order = Array.isArray(parsed?.order)
+        ? parsed.order.filter((id): id is string => typeof id === 'string')
+        : undefined
+      const file: ContainersFile = { version: 1, containers: kept, ignoredAccounts: ignored }
+      if (order) file.order = order
+      return file
     } catch {
       // A corrupt file costs the extra containers, never the default one, and never a crash on boot.
       return { version: 1, containers: [], ignoredAccounts: [] }
@@ -162,8 +174,49 @@ export class ContainerStore {
     return { ...entry, accountId: entry.accountId ?? DEFAULT_ACCOUNT_ID }
   }
 
+  /**
+   * The stored order, completed: ids the file does not mention are appended in the order they were
+   * created, so a container added on another day can never be dropped by an older order array.
+   */
+  private normaliseOrder(order: string[] | undefined, ids: string[]): string[] {
+    const known = new Set(ids)
+    const out: string[] = []
+    for (const raw of order ?? []) {
+      const id = sanitiseAccountId(raw)
+      if (!id || !known.has(id) || out.includes(id)) continue
+      out.push(id)
+    }
+    for (const id of ids) {
+      if (!out.includes(id)) out.push(id)
+    }
+    return out
+  }
+
   list(): ContainerRecord[] {
-    return [this.loadDefault(), ...this.readFile().containers.map((c) => this.asRecord(c))]
+    const file = this.readFile()
+    const extra = file.containers.map((c) => this.asRecord(c))
+    const byId = new Map(extra.map((c) => [c.id, c]))
+    const ids = [DEFAULT_CONTAINER_ID, ...extra.map((c) => c.id)]
+    const defaultValue = this.loadDefault()
+    return this.normaliseOrder(file.order, ids).map(
+      (id) => (id === DEFAULT_CONTAINER_ID ? defaultValue : byId.get(id)!)
+    )
+  }
+
+  /**
+   * Puts the containers in the order the user chose. Only ids that exist are used and anything the
+   * caller left out keeps its place at the end, so a stale list — a panel open while a container was
+   * created elsewhere — cannot delete or hide an entry by omission.
+   */
+  reorder(orderedIds: string[]): ContainerRecord[] {
+    const file = this.readFile()
+    const ids = [DEFAULT_CONTAINER_ID, ...file.containers.map((c) => c.id)]
+    const next = this.normaliseOrder(orderedIds, ids)
+    const current = this.normaliseOrder(file.order, ids)
+    if (next.join('\u0000') !== current.join('\u0000')) {
+      this.writeFile({ ...file, order: next })
+    }
+    return this.list()
   }
 
   /** The default container can carry a colour of its own, so its overrides are persisted too. */
@@ -274,7 +327,10 @@ export class ContainerStore {
     this.writeFile({
       version: 1,
       containers: [...file.containers, created],
-      ignoredAccounts: file.ignoredAccounts ?? []
+      ignoredAccounts: file.ignoredAccounts ?? [],
+      // A new container belongs at the end of a list the user has already ordered; without the id
+      // here it would be appended by `normaliseOrder` anyway, but naming it keeps the file honest.
+      ...(file.order ? { order: [...file.order, created.id] } : {})
     })
     return { container: this.asRecord(created) }
   }
@@ -297,7 +353,12 @@ export class ContainerStore {
     if (account !== DEFAULT_ACCOUNT_ID && !next.some((c) => (c.accountId ?? '') === account)) {
       ignored.add(account)
     }
-    this.writeFile({ version: 1, containers: next, ignoredAccounts: [...ignored] })
+    this.writeFile({
+      version: 1,
+      containers: next,
+      ignoredAccounts: [...ignored],
+      ...(file.order ? { order: file.order.filter((id) => id !== containerId) } : {})
+    })
     return { removed: true }
   }
 
@@ -347,7 +408,14 @@ export class ContainerStore {
       changed = true
     }
 
-    if (changed) this.writeFile({ version: 1, containers, ignoredAccounts: [...ignored] })
+    if (changed) {
+      this.writeFile({
+        version: 1,
+        containers,
+        ignoredAccounts: [...ignored],
+        ...(file.order ? { order: [...file.order, ...created.map((c) => c.id)] } : {})
+      })
+    }
     return { containers: this.list(), created }
   }
 }

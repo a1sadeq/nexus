@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { normaliseHexColor } from '../lib/tabColors'
+import { providerColorFor } from '../lib/providerVisuals'
 import { createPortal } from 'react-dom'
 import type { Tab } from '../lib/tabs'
-import { DOT_COLOR } from '../lib/modelVisuals'
 import { IconX } from './BrandIcons'
 import ProviderIcon from './ProviderIcon'
 import './ChatTabs.css'
@@ -48,7 +48,9 @@ export default function ChatTabs({
   const hideTimerRef = useRef<NodeJS.Timeout | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
 
-  const dotColor = (key: string) => modelColors?.[key] || DOT_COLOR[key] || '#888'
+  // Same resolver as Settings → AI Providers (lib/providerVisuals): a configured colour wins, the
+  // brand colour is the fallback, and the tabs never invent a third one.
+  const dotColor = (key: string) => modelColors?.[key] || providerColorFor(key)
   // Per-tab accent, when the user gave this tab one.
   const tabColor = (tab: { accentColor?: string; model: string }): string =>
     normaliseHexColor(tab.accentColor) || dotColor(tab.model)
@@ -110,7 +112,7 @@ export default function ChatTabs({
 
   return (
     <>
-    <div className={fadeClass} ref={scrollRef} data-tab-strip>
+    <div className={fadeClass} ref={scrollRef} data-tab-strip data-guide="tabs">
       {sortedTabs.map((t) => {
         const isPinned = pinnedIds.includes(t.id)
         const isActive = activeId === t.id

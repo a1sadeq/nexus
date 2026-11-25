@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useMemo, type ReactElement } from 'react'
 import type { Tab } from '../lib/tabs'
-import { DOT_COLOR, getEffectiveProviderColor, getProviderGradient } from '../lib/modelVisuals'
+import { getProviderGradient } from '../lib/modelVisuals'
+import { providerColorFor } from '../lib/providerVisuals'
 import { IconX, IconPin } from './BrandIcons'
 import ProviderIcon from './ProviderIcon'
 import { normaliseHexColor } from '../lib/tabColors'
@@ -10,6 +11,8 @@ import { formatCollapsedTitle, type TabAiStatus } from '../lib/tabStatus'
 import './VerticalTabs.css'
 
 interface Props {
+  /** Anchor for the first-run guide: the chat list is the thing a new user has to find first. */
+  'data-guide'?: string
   tabs: Tab[]
   activeId: string | null
   pinnedIds?: string[]
@@ -43,6 +46,7 @@ interface Props {
 }
 
 export default function VerticalTabs({
+  'data-guide': dataGuide,
   tabs,
   activeId,
   pinnedIds = [],
@@ -67,8 +71,8 @@ export default function VerticalTabs({
   const hoverTimerRef = useRef<NodeJS.Timeout | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
 
-  const dotColor = (key: string): string =>
-    modelColors?.[key] || getEffectiveProviderColor(key, DOT_COLOR[key] || '#888')
+  // Same resolver as Settings → AI Providers (lib/providerVisuals): configured colour, else brand.
+  const dotColor = (key: string): string => modelColors?.[key] || providerColorFor(key)
 
   // The rule lives in lib/tabSections so the keyboard order and the rendered order cannot drift
   // apart, and so it can be tested without a DOM.
@@ -330,6 +334,7 @@ export default function VerticalTabs({
   return (
     <div
       ref={containerRef}
+      data-guide={dataGuide}
       className="flex flex-col gap-1 w-full px-2 py-1 overflow-y-auto overflow-x-hidden flex-1 select-none focus:outline-none"
       role="tablist"
       aria-label="Browser Tabs"

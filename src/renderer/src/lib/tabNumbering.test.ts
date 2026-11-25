@@ -7,7 +7,9 @@ import {
   pinnedTabForShortcutNumber,
   shortcutTabCount,
   tabForShortcutNumber,
-  tabNumberMap
+  tabForShortcutNumberInOrder,
+  tabNumberMap,
+  tabNumbersForOrder
 } from './tabNumbering'
 
 const tab = (id: string) => ({ id, title: id })
@@ -66,5 +68,41 @@ describe('tab numbering', () => {
     expect(pinnedTabForShortcutNumber(tabs, pinned, 1)?.id).toBe('a')
     expect(pinnedTabForShortcutNumber(tabs, pinned, 2)?.id).toBe('c')
     expect(pinnedTabForShortcutNumber(tabs, pinned, 3)).toBeNull()
+  })
+})
+
+describe('numbering the list as it is drawn', () => {
+  // The sidebar draws: pinned, then active sessions, then sleeping/discarded. This is that order.
+  const drawn = [tab('a'), tab('c'), tab('b'), tab('d'), tab('e')]
+
+  it('numbers downwards from one, with no gaps', () => {
+    expect(tabNumbersForOrder(drawn)).toEqual({ a: 1, c: 2, b: 3, d: 4, e: 5 })
+  })
+
+  it('re-sorts when a tab is discarded and moves to the bottom group', () => {
+    // `b` was 3rd while it was an active session; once discarded it is drawn last and takes the last
+    // number, and everything between shifts up by one — badges and digits together.
+    const before = tabNumbersForOrder([tab('a'), tab('c'), tab('b'), tab('d')])
+    expect(before.b).toBe(3)
+    const after = tabNumbersForOrder([tab('a'), tab('c'), tab('d'), tab('b')])
+    expect(after).toEqual({ a: 1, c: 2, d: 3, b: 4 })
+  })
+
+  it('resolves a digit to the tab carrying that badge', () => {
+    const numbers = tabNumbersForOrder(drawn)
+    for (const [id, number] of Object.entries(numbers)) {
+      expect(tabForShortcutNumberInOrder(drawn, number)?.id).toBe(id)
+    }
+  })
+
+  it('stops at nine and ignores digits past the list', () => {
+    const many = Array.from({ length: 12 }, (_, i) => tab(`t${i}`))
+    const numbers = tabNumbersForOrder(many)
+    expect(Object.keys(numbers)).toHaveLength(MAX_TAB_SHORTCUT_NUMBER)
+    expect(numbers.t8).toBe(9)
+    expect(numbers.t9).toBeUndefined()
+    expect(tabForShortcutNumberInOrder(many, 10)).toBeNull()
+    expect(tabForShortcutNumberInOrder(many, 0)).toBeNull()
+    expect(tabForShortcutNumberInOrder([], 1)).toBeNull()
   })
 })

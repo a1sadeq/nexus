@@ -11,6 +11,13 @@ import {
 import { spawn } from 'child_process'
 import { AutoUpdateService, type UpdateEngine } from './autoUpdateService'
 import { supportsAutomaticUpdates } from './autoUpdatePlatform'
+import { NavigationIntentTracker, sameSiteUrl } from './navigationIntent'
+import { createNavTrace, describeLoadError, describeLoadFailure } from './navTrace'
+import {
+  shouldDefend,
+  tapNavigationSurface,
+  type NavigationSurface
+} from './navigationTap'
 import type { UpdateStatus } from '../shared/updateStatus'
 import {
   app,
@@ -119,14 +126,32 @@ import {
   startGoogleSignIn,
   cancelGoogleSignIn
 } from './googleAuth'
-import {
-  closeInAppSignInWindow,
-  isInAppSignInWebContents,
-  openInAppSignInWindow
-} from './googleSignInWindow'
+import { closeInAppSignInWindow, openInAppSignInWindow } from './googleSignInWindow'
 import { NATIVE_ELECTRON_UA } from './electronIdentity'
-import { GoogleAccountStore } from './googleAccounts'
-import { ContainerStore, containerForShortcutDigit, containerPartition } from './containers'
+import {
+  adoptNativeIdentity,
+  configureProviderHosts,
+  configureUserAgents,
+  desiredIdentityFor,
+  forgetNativeIdentity,
+  hasNativeIdentity,
+  identityReason,
+  releaseNativeIdentity,
+  resolveIdentityForRequest,
+  syncIdentity
+} from './webIdentity'
+import { GoogleAccountStore, partitionForAccount } from './googleAccounts'
+import {
+  ContainerStore,
+  DEFAULT_CONTAINER_ID,
+  containerForShortcutDigit,
+  containerPartition
+} from './containers'
+import {
+  clearGoogleSessionCookies,
+  reconnectAccount,
+  reconnectTargetFor
+} from './accountReconnect'
 import { isThirdPartyAuthPage } from './loginWall'
 import {
   armWatchdog,
@@ -151,6 +176,8 @@ import {
 } from './uploadManager'
 import { cleanupAllUploadTempDirs, cleanupStaleUploadTempDirs } from './uploadAttachAll'
 import { forceViewRepaint } from './viewRepaint'
+import { classifySurfaceReturn } from './surfaceReturn'
+import { repairViewSurface, SurfaceRepairPolicy } from './viewSurface'
 import { VideoJobManager } from './videoJob'
 import { sweepStaleJobDirs } from './videoPrepare'
 import { locateMediaTools } from './videoProbe'
@@ -220,6 +247,152 @@ function sendToMainWindow(channel: string, ...args: any[]) {
   }
 }
 const aiViews = new Map<string, Electron.WebContentsView>()
+/** One navigation in flight per tab+URL — see navigationIntent.ts for why. */
+const navigationIntent = new NavigationIntentTracker()
+
+/**
+ * The navigation trace — always recording, optionally printing.
+ *
+ * Every previous round of "Ctrl+L changes the title but not the page" was diagnosed by reading the
+ * console and guessing which line caused which. A load can be aborted by a repair re-attach, a stale
+ * activation, a discard, or a second loadURL, and all of them look like `ERR_ABORTED`. Every one of
+ * those places now writes here, in order, so the answer is a list and not a guess.
+ *
+ * `NEXUS_NAV_TRACE=0` turns the printing off (recording continues, the Diagnostics panel needs it);
+ * `NEXUS_NAV_TRACE=1` forces it on in a packaged build. In development (`npm run dev`) it is on by
+ * default, which is the whole point: the failure is visible while it happens.
+ */
+const navTrace = createNavTrace({
+  verbose: () => {
+    const flag = process.env['NEXUS_NAV_TRACE']
+    if (flag === '0' || flag === 'off' || flag === 'false') return false
+    if (flag === '1' || flag === 'on' || flag === 'true') return true
+    return !app.isPackaged
+  },
+  sink: (line) => console.log(line)
+})
+
+/** Record one navigation event. Kept tiny so it can be called from hot paths and catch blocks. */
+function traceNav(
+  tabId: string,
+  kind: Parameters<typeof navTrace.record>[1],
+  message: string,
+  data?: Record<string, unknown>
+): void {
+  try {
+    navTrace.record(tabId, kind, message, data)
+  } catch {
+    // A trace must never be the reason a navigation fails.
+  }
+}
+
+/**
+ * A tab's view is about to be attached, detached, hidden or shown. All four can abort a load in flight,
+ * which is exactly the kind of thing that used to be invisible: the log said `ERR_ABORTED` and nothing
+ * said who did it. Every caller now names itself.
+ */
+function traceViewOp(tabId: string, op: string, detail?: Record<string, unknown>): void {
+  traceNav(tabId, 'view', op, detail)
+}
+
+/** Which tab owns a webContents. Used by handlers that only receive the contents (identity repair). */
+function tabIdForContents(contents: Electron.WebContents): string {
+  try {
+    for (const [id, view] of aiViews) {
+      if (view.webContents === contents) return id
+      if (view.webContents?.id && view.webContents.id === contents.id) return id
+    }
+  } catch {
+    /* the map is being mutated; the trace is not worth a throw */
+  }
+  return ''
+}
+/**
+ * Repeated repaint requests for a view that is supposed to be on screen mean the cheap repaint is not
+ * restoring the surface — the state that used to need a tab close/reopen. See viewSurface.ts.
+ */
+const surfaceRepair = new SurfaceRepairPolicy()
+/** One pending deferred surface repair per tab — a repair never runs mid-navigation. */
+const repairDeferrals = new Map<string, NodeJS.Timeout>()
+/**
+ * Whether each tab's native view is *actually presented* right now.
+ *
+ * The build-32 diagnostics showed `repaint (reconcile-presentation) {comingBackFromHidden=false}` one
+ * millisecond after an overlay had hidden the view, because "was it hidden?" was being inferred from the
+ * view's *bounds*. An overlay hides a view with `setVisible(false)` and leaves the geometry alone, so the
+ * one transition that reliably loses the frame was the one case that never asked for a strong repaint —
+ * the dark page the user sees after a notification, a toast or any popup. The flag is recorded where the
+ * visibility is actually set instead of being guessed from geometry.
+ */
+const presentedVisible = new Map<string, boolean>()
+/**
+ * When an overlay last closed.
+ *
+ * Escalating to a detach/re-attach inside this window is what turned "hidden for two seconds" into
+ * "blank until the tab is switched": the repair happened while the compositor was still bringing the
+ * surface back, and a detached view has no frame at all. Coming back from an overlay is a known
+ * transition, not a failing repaint, so it gets the strong-but-safe path and no escalation.
+ */
+let lastOverlayCloseAt = 0
+/**
+ * Tabs that `activate_tab` has just shown again over a surface that was not on screen.
+ *
+ * `activate_tab` sets visibility itself and — correctly — records it, so the `reconcileViewPresentation`
+ * that runs two lines later used to see `presentedVisible === true` and take the cheap repaint path for a
+ * tab that had just come back from the background. That is the tab switch to a discarded surface: the
+ * page area stays window-coloured until the user hides and shows it again by hand (Settings open/close,
+ * another tab switch, restarting the app). The state is captured here, before activation overwrites it,
+ * and consumed by the reconcile that follows.
+ */
+const shownFromHidden = new Set<string>()
+
+/** Record what the view was actually told to do, so "was it hidden?" is a fact and not a guess. */
+function markViewVisibility(tabId: string, visible: boolean): void {
+  if (!tabId) return
+  presentedVisible.set(tabId, visible)
+}
+
+/** True when this tab's view was hidden the last time its visibility was set. */
+function viewWasHidden(tabId: string, view?: Electron.WebContentsView | null): boolean {
+  const recorded = presentedVisible.get(tabId)
+  if (recorded !== undefined) return recorded === false
+  try {
+    const live = (view as unknown as { getVisible?: () => boolean } | null)?.getVisible?.()
+    if (typeof live === 'boolean') return live === false
+  } catch {
+    /* older builds expose no getter; absence of evidence is not evidence of a hidden view */
+  }
+  return false
+}
+
+/**
+ * Keep the app's own native overlays on top.
+ *
+ * A `WebContentsView` is a child of the window, so `addChildView` stacks it *above* whatever was added
+ * before it — including the in-app notification toast. Every surface repair and every tab activation
+ * that re-attaches a tab view therefore put the toast behind a full-window page, which is why a
+ * notification "disappeared" the moment anything touched the layout. Re-raising is two cheap calls.
+ */
+function raiseNativeOverlays(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  // Only a toast that is on screen needs putting back on top, and only then is removing-then-adding it
+  // worth it: the pair is itself a detach, and a detach is the one thing that can leave a native view
+  // frameless. A hidden toast is re-stacked by its own resume()/show() path, which raises it anyway.
+  const toastOnScreen = Boolean(aiToastManager?.getIsVisible?.())
+  try {
+    if (toastOnScreen && aiNotificationView && !aiNotificationView.webContents.isDestroyed()) {
+      mainWindow.contentView.removeChildView(aiNotificationView)
+      mainWindow.contentView.addChildView(aiNotificationView)
+    }
+  } catch {
+    /* the window may be mid-teardown, or the manager is not constructed yet; the next raise catches up */
+  }
+  try {
+    downloadNotificationOverlay?.raiseToFront()
+  } catch {
+    /* same */
+  }
+}
 let activeViewId: string | null = null
 let activeViewVisible = true
 const viewTitles = new Map<string, string>()
@@ -768,7 +941,7 @@ function showInAppToast(data: DesktopNotificationInput & { id: string }) {
   // The HUD is shown when Nexus is in front on another tab, and — importantly — whenever the
   // OS could not show anything, so a platform without a notification daemon is not silent.
   if (!isAppActiveAndVisible && nativeShown) return
-  if (overlaysOpen || !aiNotificationView) {
+  if (!aiNotificationView) {
     if (!nativeShown) {
       console.warn('[Notification] No native notification and the in-app toast is unavailable.')
     }
@@ -787,7 +960,22 @@ function showInAppToast(data: DesktopNotificationInput & { id: string }) {
   })
   currentNotificationData = aiToastManager.getCurrentData()
   isAiNotificationVisible = aiToastManager.getIsVisible()
+  // An overlay covers the page, and a native view cannot be drawn above it — but "cannot be seen yet"
+  // is not "do not tell me". The toast is armed now and suspended; closing the panel resumes it with
+  // the time it had left (see `resume()` in aiToastManager.ts).
+  if (overlaysOpen) aiToastManager.suspend()
   downloadNotificationOverlay?.raiseToFront()
+  // Stacking a new native child over the page makes the compositor rebuild the window's surface order,
+  // and the page underneath can come back with no frame — "the AI view went blank when a notification
+  // came". Asking the page for one frame at that exact moment is cheap; discovering it later is not.
+  const activeView = activeViewId ? aiViews.get(activeViewId) : null
+  if (activeView?.webContents && !activeView.webContents.isDestroyed()) {
+    forceViewRepaint(activeView, {
+      bounds: activeViewId ? lastRealBounds.get(activeViewId) ?? null : null,
+      reason: 'a notification was stacked over the page',
+      log: (message) => console.log(`[viewRepaint] ${message}`)
+    })
+  }
 }
 
 function dismissInAppToast(immediate = false) {
@@ -801,6 +989,88 @@ function dismissInAppToast(immediate = false) {
 // and accepts Electron's own identity, so the sign-in window presents NATIVE_ELECTRON_UA instead.
 const AI_UA = chromeCompatibleUserAgent(process.platform, process.arch, process.versions.chrome)
 app.userAgentFallback = AI_UA
+// The identity registry needs both strings and neither module may import the other, so they are handed
+// over here, once, before any window or view exists.
+configureUserAgents({ ai: AI_UA, native: NATIVE_ELECTRON_UA })
+
+// The hosts that keep the Chrome-shaped identity even though Google owns them: the AI products
+// themselves. Every other company host — google.com, accounts.google.com, the consent pages — presents
+// the honest Electron identity, because those are the pages that refuse a browser which contradicts
+// itself, and a sign-in flow hops between all of them.
+configureProviderHosts([
+  ...Object.values(PROVIDER_THEMES).flatMap((theme) => (theme && theme.hosts) || []),
+  'gemini.google.com',
+  'aistudio.google.com',
+  'notebooklm.google.com',
+  'labs.google.com'
+])
+
+// Every webContents in the app — windows, views and popups alike — is watched here rather than at each
+// creation site. The identity is a pure function of the URL (webIdentity.ts), so this is a sync, not a
+// policy of its own: a page that navigates to a Google property takes the honest identity before it
+// loads, a page that navigates to a provider gets the Chrome-shaped one back, and a destroyed page is
+// forgotten so ids cannot pile up. The sign-in window keeps its identity until it closes.
+app.on('web-contents-created', (_event, contents) => {
+  const settle = (url: string) => {
+    if (contents.isDestroyed()) return
+    const before = hasNativeIdentity(contents.id)
+    const after = syncIdentity(contents, url)
+    if (before !== (after === 'native')) {
+      console.log(
+        `[identity] ${after === 'native' ? 'native' : 'Chrome-shaped'} identity — ${identityReason(url)}`
+      )
+    }
+  }
+  contents.on('did-navigate', (_e, url) => settle(url))
+  contents.on('did-navigate-in-page', (_e, url) => settle(url))
+  contents.on('destroyed', () => forgetNativeIdentity(contents.id))
+
+  // A page that had to be switched mid-flight — a provider's "Sign in with Google" popup, or a tab
+  // navigated to accounts.google.com — can in principle commit with the header already switched and
+  // `navigator.userAgent` not yet switched. Google refuses exactly that state, so it is verified after
+  // each load and repaired by loading the same URL again with the identity stated up front.
+  //
+  // Bounded, hard: at most two repairs for a page's whole life. An identity mismatch that survives
+  // two reloads is not a mismatch this can fix, and a page that reloads itself forever is worse than a
+  // page that is wrong — that is the failure the user reported as "it just keeps refreshing".
+  let repairs = 0
+  let repairedThisLoad = false
+  contents.on('did-start-navigation', (_e, _url, _inPlace, isMainFrame) => {
+    if (isMainFrame) repairedThisLoad = false
+  })
+  contents.on('did-finish-load', () => {
+    if (repairedThisLoad || repairs >= 2) return
+    // Never start the identity reload while a navigation is in flight for the tab that owns this
+    // page: that reload aborts the load the user just asked for and the tab stays on the previous
+    // document. The identity is re-checked on the next load anyway.
+    const ownerTab = tabIdForContents(contents)
+    if (ownerTab && navigationIntent.pendingUrl(ownerTab)) {
+      traceNav(ownerTab, 'note', 'identity repair skipped — a navigation is in flight', {
+        url: contents.getURL()
+      })
+      return
+    }
+    const url = contents.getURL()
+    if (!url || !/^https?:/i.test(url)) return
+    if (desiredIdentityFor(url) !== 'native' || !hasNativeIdentity(contents.id)) return
+    repairedThisLoad = true
+    contents
+      .executeJavaScript('navigator.userAgent', true)
+      .then((ua: unknown) => {
+        if (typeof ua !== 'string' || /Electron\//i.test(ua)) return
+        if (contents.isDestroyed()) return
+        repairs += 1
+        console.warn(
+          `[identity] ${url} loaded with a user agent that disagrees with its header — reloading once (repair ${repairs} of 2)`
+        )
+        // This reload is a real navigation: it aborts anything else loading in that tab. It says so in
+        // the trace, because an anonymous loadURL here looked like a page reloading itself.
+        traceNav(tabIdForContents(contents), 'load', 'identity repair reload', { url, repairs, userAgent: 'native' })
+        void contents.loadURL(url, { userAgent: NATIVE_ELECTRON_UA })
+      })
+      .catch(() => {})
+  })
+})
 
 /**
  * Everything the AI partition needs to behave: telemetry blocked, the Chrome-shaped user agent (with
@@ -817,6 +1087,127 @@ app.userAgentFallback = AI_UA
 const webContentsPartitions = new Map<number, string>()
 
 /** Main-frame navigations per tab, used only to report a loop that survives every guard. */
+/**
+ * Who owns the keyboard, the shell or the AI view?
+ *
+ * The build-28 report was "the keyboard keeps getting unfocused, I have to click Nexus before shortcuts
+ * work — but with the Diagnostics panel open it was fine". The trace says why: every `did-stop-loading`
+ * on the active tab called `view.webContents.focus()`. A page that reloads itself every couple of
+ * seconds (chat.deepseek.com does, and it is not the only one) therefore took the keyboard from the
+ * shell twice a second. Ctrl+L still *reached* the app — the view forwards accelerators — but the
+ * overlay it opened could not receive a keystroke, because the shell renderer did not have focus. With
+ * the Diagnostics overlay open the same handler bails out on `overlaysOpen`, which is exactly why the
+ * keyboard behaved while the user was reading the logs.
+ *
+ * So the keyboard is now remembered, not assumed: a load finishing never moves it, and only an explicit
+ * request (tab activation, the URL bar, a click into the page) gives it to the view.
+ */
+type KeyboardOwner = 'shell' | 'view'
+let keyboardOwner: KeyboardOwner = 'view'
+let keyboardBeforeOverlay: KeyboardOwner = 'view'
+
+function setKeyboardOwner(owner: KeyboardOwner, reason: string, tabId?: string): void {
+  const previous = keyboardOwner
+  keyboardOwner = owner
+  if (previous === owner) return
+  try {
+    traceNav(tabId || activeViewId || '', 'view', `keyboard → ${owner} (${reason})`, {})
+  } catch {
+    /* the trace is not worth a throw on a focus path */
+  }
+}
+
+/** Give the AI view the keyboard. Only call this when the user asked for it. */
+function giveKeyboardToView(view: Electron.WebContentsView | null | undefined, reason: string, tabId?: string): void {
+  try {
+    if (!view || !view.webContents || view.webContents.isDestroyed()) return
+    if (overlaysOpen) return
+    setKeyboardOwner('view', reason, tabId)
+    view.webContents.focus()
+  } catch {
+    /* the contents went away between the check and the call */
+  }
+}
+
+/** Give the shell the keyboard, so overlays (Ctrl+L, menus) can be typed into. */
+function giveKeyboardToShell(reason: string): void {
+  setKeyboardOwner('shell', reason)
+  try {
+    if (!mainWindow || mainWindow.isDestroyed()) return
+    if (!mainWindow.webContents || mainWindow.webContents.isDestroyed()) return
+    mainWindow.webContents.focus()
+  } catch {
+    /* nothing here is worth a throw: focus is best-effort by nature */
+  }
+}
+
+/** True when a page-initiated load must be allowed to keep the keyboard it already has. */
+function keyboardStaysWithView(view: Electron.WebContentsView, tabId: string): boolean {
+  try {
+    if (keyboardOwner !== 'view') return false
+    if (activeViewId !== tabId || !activeViewVisible) return false
+    return view.webContents.isFocused()
+  } catch {
+    return false
+  }
+}
+
+/**
+ * How many times we will take a frame back from a navigation that is not the user's. The old page
+ * getting restored after a restart is a one-shot event, so five is generous; the budget exists only so
+ * a page that insists cannot turn the app into a load loop.
+ */
+const NAV_DEFENCE_BUDGET = 5
+
+/**
+ * Take a frame back, from outside the navigation event.
+ *
+ * Every step here touches native navigation state, and doing that from inside `did-start-navigation` is
+ * what closed the app in build 29. One `setTimeout` is the whole fix: the handler schedules, this runs on
+ * the next turn of the loop, and Electron is happy to be asked then.
+ */
+function scheduleDefence(view: Electron.WebContentsView, tabId: string, wantedUrl: string): void {
+  // One `setTimeout`, nothing else. Every call that touched navigation state from inside
+  // `did-start-navigation` has hurt: build 28's `loadURL` aborted its own request, and build 29's
+  // `stop()` closed the app. Questions are asked from outside the event.
+  setTimeout(() => {
+    if (view.webContents.isDestroyed()) return
+    if (navWanted.get(tabId)?.url !== wantedUrl) return
+    try {
+      traceNav(tabId, 'load', 're-issue — this load cancels the intruder', { url: wantedUrl })
+      view.webContents.loadURL(wantedUrl).catch(() => {})
+    } catch {
+      /* the request loop still owns the give-up decision */
+    }
+  }, 70)
+}
+
+/**
+ * Tabs that have already been caught re-navigating themselves during a load.
+ *
+ * For those the history is cleared *before* the next navigation starts — at a quiet moment, with nothing
+ * in flight, which is the only moment it is safe to touch. A page that restores itself with
+ * `history.back()` then has nowhere to go, so the bounce never happens instead of being undone.
+ * Everything else keeps its back/forward entries, which is why this is a set and not a blanket rule.
+ */
+const navBouncedTabs = new Set<string>()
+
+/** Per tab: how many times we have re-issued the user's URL, when, and for which URL. */
+const navDefences = new Map<string, { used: number; at: number; url: string }>()
+
+/** Per tab: the URL the view was on when the user's load started — the page we are leaving. */
+const navLeaveFrom = new Map<string, string>()
+
+/**
+ * The URL the user actually asked for, per tab, and the request token that asked for it.
+ *
+ * The defence below cannot use the navigation-intent tracker for this: every `did-fail-load` clears it,
+ * including the `ERR_ABORTED` that *is* the abort being judged — which is why the build-27 trace showed
+ * `pending=(none)` on our own load. Only a newer `navigate_tab` moves this map, so "is this still what
+ * the user wants" has an answer that events cannot rewrite.
+ */
+const navWanted = new Map<string, { url: string; token: number; at: number }>()
+
 const navigationCounters = new Map<string, { count: number; since: number }>()
 
 function partitionOfOpener(contents: Electron.WebContents | undefined | null): string {
@@ -832,6 +1223,32 @@ function partitionOfOpener(contents: Electron.WebContents | undefined | null): s
 }
 
 const aiPolicyInstalled = new Set<string>()
+
+/**
+ * The part of the AI session policy the identity depends on, for a partition that is only used for
+ * signing in: the request hook (so the header can never disagree with the page) and the cookie flush
+ * (so the session survives a quit). Deliberately *not* the header stripping — that exists so provider
+ * pages can be embedded and styled, and a brand-new account's partition should behave exactly like a
+ * browser tab on Google's pages, not like an embedded provider view.
+ */
+const identityHookInstalled = new Set<string>()
+function installIdentityHeaderHookOnce(partition: string): void {
+  if (identityHookInstalled.has(partition)) return
+  identityHookInstalled.add(partition)
+  installIdentityHeaderHook(session.fromPartition(partition))
+}
+
+function installSignInSessionPolicy(partition: string): void {
+  // Not recorded in aiPolicyInstalled: a sign-in partition that later becomes a tab partition must
+  // still be able to take the full policy. Only the hook and the cookie flush are installed here.
+  try {
+    installIdentityHeaderHookOnce(partition)
+    installGoogleSessionPersistence(session.fromPartition(partition))
+  } catch (err) {
+    console.error('[identity] Sign-in session policy failed for partition', partition, err)
+  }
+}
+
 function installAiSessionPolicy(partition: string): void {
   if (aiPolicyInstalled.has(partition)) return
   aiPolicyInstalled.add(partition)
@@ -842,6 +1259,44 @@ function installAiSessionPolicy(partition: string): void {
   } catch (err) {
     console.error('[containers] Session policy failed for partition', partition, err)
   }
+}
+
+/**
+   * The one place a request's user agent is decided, shared by every policy above so a partition can be
+   * given the identity without the rest of the AI treatment.
+   */
+function installIdentityHeaderHook(ses: Electron.Session): void {
+  ses.webRequest.onBeforeSendHeaders((details, callback) => {
+    const requestHeaders = { ...details.requestHeaders }
+    const extra = details as unknown as { webContentsId?: number; resourceType?: string }
+    // One decision, in webIdentity.ts, and the same one the navigation watcher makes: Google's own
+    // properties get the honest Electron identity, an AI provider's page keeps the Chrome-shaped one,
+    // and every request of a document inherits that document's identity. The switch happens *here*,
+    // before the response becomes a document, because a header that disagrees with
+    // navigator.userAgent is exactly what Google refuses.
+    const decision = resolveIdentityForRequest({
+      url: details.url,
+      isMainFrame: extra.resourceType === 'mainFrame',
+      webContentsId: extra.webContentsId
+    })
+    if (decision.adopt || decision.release) {
+      const contents =
+        extra.webContentsId === undefined
+          ? null
+          : electronWebContents.fromId(extra.webContentsId)
+      if (decision.adopt) adoptNativeIdentity(contents, NATIVE_ELECTRON_UA)
+      else releaseNativeIdentity(contents)
+    }
+    const userAgent = decision.identity === 'native' ? NATIVE_ELECTRON_UA : AI_UA
+
+    for (const key of Object.keys(requestHeaders)) {
+      if (key.toLowerCase() === 'user-agent') {
+        requestHeaders[key] = userAgent
+      }
+    }
+
+    callback({ requestHeaders })
+  })
 }
 
 function installAiSessionPolicySteps(partition: string): void {
@@ -864,24 +1319,7 @@ function installAiSessionPolicySteps(partition: string): void {
     }
   )
 
-  ses.webRequest.onBeforeSendHeaders((details, callback) => {
-    const requestHeaders = { ...details.requestHeaders }
-    // The sign-in window shares the default partition but not this identity: it has to keep the
-    // Electron user agent it presents to the page, or the header contradicts navigator.userAgent and
-    // Google refuses the sign-in.
-    const fromSignInWindow = isInAppSignInWebContents(
-      (details as unknown as { webContentsId?: number }).webContentsId
-    )
-    const userAgent = fromSignInWindow ? NATIVE_ELECTRON_UA : AI_UA
-
-    for (const key of Object.keys(requestHeaders)) {
-      if (key.toLowerCase() === 'user-agent') {
-        requestHeaders[key] = userAgent
-      }
-    }
-
-    callback({ requestHeaders })
-  })
+  installIdentityHeaderHookOnce(partition)
 
   ses.webRequest.onHeadersReceived((details, callback) => {
     const responseHeaders = { ...details.responseHeaders }
@@ -1110,6 +1548,12 @@ export const tabDiscardManager = new TabDiscardManager({
   },
   retentionGraceMs: 15 * 60 * 1000,
   onTeardown: async (tabId, view, contents) => {
+    surfaceRepair.forget(tabId)
+    const pendingRepair = repairDeferrals.get(tabId)
+    if (pendingRepair) {
+      clearTimeout(pendingRepair)
+      repairDeferrals.delete(tabId)
+    }
     await closeWebContents(contents)
     if (mainWindow && !mainWindow.isDestroyed()) {
       try {
@@ -1121,6 +1565,7 @@ export const tabDiscardManager = new TabDiscardManager({
     viewModelKeys.delete(tabId)
     viewTabColors.delete(tabId)
     lastRealBounds.delete(tabId)
+    presentedVisible.delete(tabId)
     viewTitles.delete(tabId)
     const timer = aiLifecycleTimers.get(tabId)
     if (timer) {
@@ -1210,7 +1655,135 @@ ipcMain.handle('capture_diagnostics', async (event, samplingMs?: number) => {
     typeof samplingMs === 'number' ? samplingMs : 2000
   )
 
-  return { success: true, report }
+  // The navigation trace travels with the report: an export that explains the CPU but not the
+  // navigation is the export that made us guess last time.
+  return {
+    success: true,
+    report: {
+      ...report,
+      navigationTrace: {
+        verbose: navTrace.isVerbose(),
+        events: navTrace.events(200),
+        text: navTrace.formatAll(200)
+      }
+    }
+  }
+})
+
+/**
+ * The navigation trace, for the Diagnostics panel.
+ *
+ * Same data the console prints in development, so the panel and `npm run dev` describe the same story:
+ * a request, the load it started, every view operation in between, the abort, and who gave up.
+ */
+ipcMain.handle(
+  'nav_trace_get',
+  (event, options?: { tabId?: string; limit?: number; includeText?: boolean }) => {
+    if (!mainWindow || event.sender !== mainWindow.webContents) {
+      return { success: false, reason: 'untrusted_sender' }
+    }
+    const limit = typeof options?.limit === 'number' && options.limit > 0 ? Math.min(options.limit, 2000) : 400
+    const tabId = typeof options?.tabId === 'string' ? options.tabId : ''
+    const events = tabId ? navTrace.forTab(tabId, limit) : navTrace.events(limit)
+
+    const tabs = Array.from(aiViews.entries()).map(([id, view]) => {
+      let url = ''
+      let loading = false
+      try {
+        url = view.webContents.getURL() || ''
+        loading = view.webContents.isLoading()
+      } catch {
+        url = ''
+      }
+      const lastEvent = navTrace.forTab(id, 1)[0]
+      return {
+        tabId: id,
+        url,
+        modelKey: viewModelKeys.get(id) || '',
+        title: viewTitles.get(id) || '',
+        active: id === activeViewId,
+        loading,
+        evicted: (() => {
+          try {
+            return tabDiscardManager.isTabEvicted(id)
+          } catch {
+            return false
+          }
+        })(),
+        pendingNavigation: navigationIntent.pendingUrl(id) || '',
+        listeners: (() => {
+          try {
+            return {
+              stopLoading: view.webContents.listenerCount('did-stop-loading'),
+              failLoad: view.webContents.listenerCount('did-fail-load'),
+              startNavigation: view.webContents.listenerCount('did-start-navigation')
+            }
+          } catch {
+            return null
+          }
+        })(),
+        lastEvent: lastEvent
+          ? { seq: lastEvent.seq, kind: lastEvent.kind, message: lastEvent.message, t: lastEvent.t }
+          : null
+      }
+    })
+
+    return {
+      success: true,
+      verbose: navTrace.isVerbose(),
+      lastSeq: navTrace.lastSeq(),
+      tabId,
+      events,
+      tabs,
+      ...(options?.includeText
+        ? {
+            text:
+              (tabId ? navTrace.formatForTab(tabId, limit, viewTitles.get(tabId) || tabId) : navTrace.formatAll(limit)) +
+              '\n\n' +
+              tabs
+                .map(
+                  (t) =>
+                    `${t.active ? '*' : ' '} ${t.tabId} ${t.modelKey || '?'} loading=${t.loading} evicted=${t.evicted} pending=${t.pendingNavigation || '—'} ${t.url || '(empty)'}`
+                )
+                .join('\n')
+          }
+        : {})
+    }
+  }
+)
+
+/**
+ * A note from the renderer, into the same trace.
+ *
+ * The renderer decides two things main cannot see: which URL the address bar asked for, and whether a
+ * URL the page reported about itself is written onto the tab (`shouldAcceptReportedUrl`). Both are part
+ * of "why did this tab not move", so they belong in the same list as the loads and the aborts.
+ */
+ipcMain.on(
+  'nav_trace_note',
+  (event, tabId: string, message: string, data?: Record<string, unknown>) => {
+    if (!isValidMainWindowSender(event)) return
+    traceNav(String(tabId || ''), 'request', `renderer: ${String(message || '')}`, data)
+  }
+)
+
+ipcMain.handle('nav_trace_set_verbose', (event, verbose: boolean) => {
+  if (!mainWindow || event.sender !== mainWindow.webContents) {
+    return { success: false, reason: 'untrusted_sender' }
+  }
+  navTrace.setVerbose(Boolean(verbose))
+  // Printing is per session on purpose: the next launch decides again from NEXUS_NAV_TRACE/dev mode,
+  // so nobody is left with a noisy console and no idea how it got that way.
+  traceNav('', 'note', `verbose tracing ${navTrace.isVerbose() ? 'on' : 'off'}`)
+  return { success: true, verbose: navTrace.isVerbose() }
+})
+
+ipcMain.handle('nav_trace_clear', (event) => {
+  if (!mainWindow || event.sender !== mainWindow.webContents) {
+    return { success: false, reason: 'untrusted_sender' }
+  }
+  navTrace.clear()
+  return { success: true }
 })
 
 ipcMain.handle('export_diagnostics_file', async (event, report) => {
@@ -2779,6 +3352,7 @@ const DEFAULT_ACTION_KEYS: Record<string, string[]> = {
   // pushes its own keymap from Settings, so this table is only the fallback before that arrives.
   'stop-generation': ['Ctrl', 'Shift', '.'],
   'containers-picker': ['Ctrl', '.'],
+  'tab-colours': ['Ctrl', 'Shift', 'C'],
   'site-new-chat': ['Ctrl', 'Shift', 'N'],
   'tab-prev': ['Ctrl', 'K'],
   'tab-next': ['Ctrl', 'J'],
@@ -2831,12 +3405,102 @@ function requestOverlayClose(reason: string): void {
 /** Put the native view back and give the keyboard to the shell-or-view that should have it. */
 function restoreWorkspaceAfterOverlay(): void {
   reconcileViewPresentation()
+  if (overlaysOpen) return
   const view = activeViewId ? aiViews.get(activeViewId) : null
-  if (view && !view.webContents.isDestroyed() && activeViewVisible && !overlaysOpen) {
-    view.webContents.focus()
+  // Put the keyboard back where it was before the overlay opened. It used to always go to the view,
+  // so pressing Escape in the address bar silently moved the keyboard into the page.
+  if (keyboardBeforeOverlay === 'shell') {
+    giveKeyboardToShell('overlay closed')
+    return
+  }
+  if (view && !view.webContents.isDestroyed() && activeViewVisible) {
+    giveKeyboardToView(view, 'overlay closed', activeViewId || undefined)
     focusPromptInView(view)
-  } else if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents) {
-    mainWindow.webContents.focus()
+  } else {
+    giveKeyboardToShell('overlay closed, no view')
+  }
+}
+
+/** Rebuild one tab's surface in place, keeping its page. Never recreates the WebContents. */
+function repairTabSurface(tabId: string, reason: string, visible = true, deferred = false): void {
+  const view = aiViews.get(tabId)
+  if (!view || view.webContents.isDestroyed()) return
+
+  // Never rebuild a surface in the middle of a navigation. Detaching the child view aborts the load in
+  // flight, and the tab is then left showing the page it had a moment ago — which the user sees as
+  // "the tab title changed to the provider I picked, but the page did not move". That is exactly what
+  // happened when a repair raced a navigation from the URL bar. Wait for the load to settle, once.
+  let loading = false
+  try {
+    loading = view.webContents.isLoading()
+  } catch {
+    loading = false
+  }
+  if (loading || navigationIntent.pendingUrl(tabId)) {
+    if (deferred) {
+      console.log(`[viewRepair] not repairing tab ${tabId} (${reason}): a navigation is still in flight`)
+      traceNav(tabId, 'repair', 'repair skipped — navigation in flight', { reason })
+      return
+    }
+    console.log(`[viewRepair] postponed (${reason}) for tab ${tabId}: a navigation is in flight`)
+    traceNav(tabId, 'repair', 'repair postponed — navigation in flight', { reason })
+    const timer = setTimeout(() => {
+      repairDeferrals.delete(tabId)
+      repairTabSurface(tabId, `${reason} (deferred)`, visible, true)
+    }, 600)
+    repairDeferrals.set(tabId, timer)
+    return
+  }
+
+  traceNav(tabId, 'repair', `repair running — ${reason}`, { visible })
+  surfaceRepair.noteRepair(tabId)
+  const bounds = lastRealBounds.get(tabId) ?? null
+  // Adapter rather than a cast on the window: `contentView` is typed against Electron's `View`, and the
+  // repair helper deliberately knows nothing about Electron's class hierarchy.
+  const host = mainWindow && !mainWindow.isDestroyed()
+    ? {
+        contentView: {
+          addChildView: (target: unknown) => {
+            traceViewOp(tabId, 'attach (repair)', { reason })
+            mainWindow?.contentView.addChildView(target as Electron.WebContentsView)
+          },
+          removeChildView: (target: unknown) => {
+            traceViewOp(tabId, 'detach (repair) — aborts any load in flight', { reason })
+            mainWindow?.contentView.removeChildView(target as Electron.WebContentsView)
+          }
+        }
+      }
+    : null
+  const outcome = repairViewSurface(host, view, {
+    bounds: bounds && bounds.width > 0 && bounds.height > 0 ? bounds : null,
+    visible,
+    // Belt and braces: the guard above already deferred when a load was in flight.
+    navigationInFlight: Boolean(view.webContents.isLoading?.()) || Boolean(navigationIntent.pendingUrl(tabId)),
+    reason: `tab ${tabId} ${reason}`,
+    log: (message) => console.log(`[viewRepair] ${message}`)
+  })
+  if (outcome === 'repaired') {
+    activeViewVisible = visible
+    markViewVisibility(tabId, visible)
+    // The re-attach got us a fresh surface; it does not by itself produce a frame, and it also stacked
+    // the page above the app's native toasts. Both are fixed here rather than left to the user.
+    forceViewRepaint(view, {
+      bounds: bounds && bounds.width > 0 && bounds.height > 0 ? bounds : null,
+      reason: 'after re-attach',
+      force: true,
+      // A re-attached view has no surface of its own to redraw: it has to be presented again.
+      flipVisibility: true,
+      log: (message) => console.log(`[viewRepaint] ${message}`)
+    })
+    raiseNativeOverlays()
+    try {
+      if (visible && keyboardOwner === 'view') {
+        view.webContents.focus()
+        focusPromptInView(view)
+      }
+    } catch {
+      /* the surface is the part that matters */
+    }
   }
 }
 
@@ -2883,7 +3547,10 @@ function reconcileViewPresentation(): void {
       }
       activeViewVisible = shouldShow
       try {
-        if (typeof view.setVisible === 'function') view.setVisible(shouldShow)
+        if (typeof view.setVisible === 'function') {
+          traceViewOp(activeViewId, 'setVisible (reconcile-presentation)', { visible: shouldShow })
+          view.setVisible(shouldShow)
+        }
       } catch {}
       if (!view.webContents.isDestroyed()) {
         view.webContents.setBackgroundThrottling?.(!shouldShow)
@@ -2905,13 +3572,72 @@ function reconcileViewPresentation(): void {
       // WebContentsView does not by itself make Chromium produce a new frame, so the surface can
       // stay blank until something flips visibility — which is exactly why hiding and re-showing
       // the window "fixes" it by hand. Repaint in that case too.
-      const comingBackFromHidden = !previousBounds || previousBounds.width <= 0 || previousBounds.height <= 0
-      if (shouldShow && (!geometryChanged || comingBackFromHidden)) {
-        forceViewRepaint(view, {
-          bounds: realBounds && realBounds.width > 0 && realBounds.height > 0 ? realBounds : null,
-          reason: 'reconcile-presentation',
-          log: (message) => console.log(`[viewRepaint] ${message}`)
+      // Geometry is not visibility. An overlay hides a view with `setVisible(false)` and never touches
+      // its bounds, so the bounds-based guess reported `comingBackFromHidden=false` for exactly the
+      // transition that loses the surface (build-32 diagnostics, +1439989ms). Ask what was recorded.
+      // Consumed once, here: the activation recorded it before it overwrote the flag.
+      const resumedByActivation = shownFromHidden.delete(activeViewId)
+      const recordedHidden = viewWasHidden(activeViewId, view)
+      const wasHidden = recordedHidden || resumedByActivation
+      const boundsUsable = Boolean(realBounds && realBounds.width > 0 && realBounds.height > 0)
+      const comingBackFromHidden = wasHidden || !previousBounds || !boundsUsable
+      markViewVisibility(activeViewId, shouldShow)
+      // One place decides how hard to ask for a frame — see surfaceReturn.ts.
+      const surfaceReturn = classifySurfaceReturn({
+        shouldShow,
+        geometryChanged,
+        recordedHidden,
+        resumedByActivation,
+        boundsUsable
+      })
+      if (surfaceReturn !== 'none') {
+        traceViewOp(activeViewId, 'repaint (reconcile-presentation)', {
+          geometryChanged,
+          comingBackFromHidden,
+          wasHidden,
+          resumedByActivation,
+          loading: (() => {
+            try {
+              return view.webContents.isLoading()
+            } catch {
+              return null
+            }
+          })()
         })
+        const repaintBounds = boundsUsable ? realBounds : null
+        if (surfaceReturn === 'strong') {
+          // Back from an overlay / a hidden window / another tab. This is a *known* transition, so it
+          // does not count towards escalation — it gets the strongest safe repaint instead (invalidate,
+          // a real 1 px geometry change, and a second invalidate once a frame could have been produced).
+          surfaceRepair.forget(activeViewId)
+          // Hide/show as well as invalidate+nudge. The nudge alone is what users defeat by hand:
+          // opening Settings and closing it works because of the visibility flip, not the geometry.
+          const outcome = forceViewRepaint(view, {
+            bounds: repaintBounds,
+            reason: 'coming back from hidden (overlay / tab switch)',
+            force: true,
+            flipVisibility: true,
+            log: (message) => console.log(`[viewRepaint] ${message}`)
+          })
+          traceViewOp(activeViewId, 'repaint forced — the view was hidden, geometry tells us nothing', {
+            outcome
+          })
+        } else {
+          surfaceRepair.noteRepaint(activeViewId)
+          forceViewRepaint(view, {
+            bounds: repaintBounds,
+            reason: 'reconcile-presentation',
+            log: (message) => console.log(`[viewRepaint] ${message}`)
+          })
+          // Asking twice in a row for the same tab to repaint means the cheap path is not working. That
+          // is the user's "it went blank and only closing the tab brought it back" — but a detach/attach
+          // in the half-second after an overlay closed is what *created* the blank surface, so it waits.
+          if (surfaceRepair.shouldRepair(activeViewId) && Date.now() - lastOverlayCloseAt > 600) {
+            repairTabSurface(activeViewId, 'reconciled twice without a frame', true)
+          } else if (surfaceRepair.shouldRepair(activeViewId)) {
+            traceViewOp(activeViewId, 'repair held back — an overlay just closed, the strong repaint runs first', {})
+          }
+        }
         try {
           if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
             mainWindow.webContents.invalidate?.()
@@ -2960,14 +3686,41 @@ ipcMain.on('set_overlays_open', (_event, open: boolean) => {
       overlayWatchdogTimer = null
     }
     boundsWhileOverlay = 0
+    lastOverlayCloseAt = Date.now()
+    // A notification that arrived while a panel was open resumes here, and one that was merely hidden
+    // for the duration of the panel comes back with the time it had left. Neither is thrown away.
+    try {
+      if (aiToastManager.isSuspended()) {
+        aiToastManager.resume()
+        currentNotificationData = aiToastManager.getCurrentData()
+        isAiNotificationVisible = aiToastManager.getIsVisible()
+        raiseNativeOverlays()
+        traceViewOp(activeViewId || '', 'notification toast resumed — the overlay closed', {})
+      }
+    } catch {
+      /* same */
+    }
   }
 
   if (overlaysOpen) {
-    if (typeof dismissInAppToast === 'function') dismissInAppToast()
-    for (const [, view] of aiViews) {
+    // The toast is suspended, not dismissed: opening the address bar is not the user saying "forget
+    // that notification". It comes back when the overlay closes, with its remaining time intact.
+    try {
+      if (aiToastManager.getIsVisible()) {
+        aiToastManager.suspend()
+        currentNotificationData = aiToastManager.getCurrentData()
+        isAiNotificationVisible = aiToastManager.getIsVisible()
+        traceViewOp(activeViewId || '', 'notification toast suspended — an overlay is open', {})
+      }
+    } catch {
+      /* the toast is never worth failing an overlay for */
+    }
+    for (const [id, view] of aiViews) {
       try {
         if (typeof view?.setVisible === 'function') {
+          traceViewOp(id, 'setVisible (overlay open)', { visible: false, active: id === activeViewId })
           view.setVisible(false)
+          markViewVisibility(id, false)
         }
         if (view?.webContents && !view.webContents.isDestroyed?.()) {
           view.webContents.setBackgroundThrottling?.(true)
@@ -2976,15 +3729,21 @@ ipcMain.on('set_overlays_open', (_event, open: boolean) => {
       } catch {}
     }
     // The overlay owns the keyboard, so the shell has to own it too. Leaving it in a hidden native
-    // view is how Escape stops reaching anything at all.
+    // view is how Escape stops reaching anything at all. Who had it before is remembered, so closing
+    // the overlay does not silently move the keyboard into the page.
+    keyboardBeforeOverlay = keyboardOwner
     try {
-      if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
-        mainWindow.focus()
-        mainWindow.webContents.focus()
-      }
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.focus()
     } catch {}
+    try {
+      giveKeyboardToShell('overlay open')
+    } catch {
+      /* focus stays where it was; the overlay still owns the shortcuts */
+    }
+    traceNav(activeViewId || '', 'overlay', 'overlay open — AI view hidden', {})
     console.log('[overlay] open — the shell has the keyboard, the AI view is hidden')
   } else {
+    traceNav(activeViewId || '', 'overlay', 'overlay closed — restoring the workspace', {})
     console.log('[overlay] closed — restoring the workspace')
     restoreWorkspaceAfterOverlay()
   }
@@ -3172,7 +3931,8 @@ export function routeGlobalShortcut(
         )
         sendToMainWindow('execute-global-action', {
           action: 'open_container',
-          // Container 1 is the default one, so the numbering matches the list the user sees.
+          // Position in an order the user chose, not creation order: the containers section writes it
+          // down, the switcher lists it, and 0 has always meant "the first one".
           index: digit === '0' ? 1 : Number(digit),
           containerId: container?.id ?? null,
           total: containers.length
@@ -3204,6 +3964,9 @@ export function routeGlobalShortcut(
     event.preventDefault()
     const view = activeViewId ? aiViews.get(activeViewId) : null
     if (view && !view.webContents.isDestroyed()) {
+      // A reload is a navigation: it aborts anything still loading in that tab. Say so, so a reload
+      // the user did not intend is distinguishable from a page reloading itself.
+      traceNav(activeViewId || '', 'load', 'reload (Ctrl+R)', {})
       view.webContents.reload()
     }
     return true
@@ -3271,6 +4034,7 @@ export function routeGlobalShortcut(
     ['guide-open', 'guide_open'],
     ['export-context', 'toggle_export'],
     ['stop-generation', 'stop_generation'],
+    ['tab-colours', 'toggle_tab_colours'],
     ['site-new-chat', 'site_new_chat']
   ]
   for (const [id, action] of keymapActions) {
@@ -3494,7 +4258,12 @@ function createWindow() {
   mainWindow.on('focus', () => {
     if (!mainWindow || mainWindow.isDestroyed()) return
     sendToMainWindow('window-focus-changed', true)
-    if (activeViewVisible && !overlaysOpen && activeViewId) {
+    // The keyboard goes back to whoever had it. Coming back to Nexus after alt-tabbing should not drop
+    // the caret into the AI page when the user was last typing in the shell.
+    if (overlaysOpen || keyboardOwner === 'shell') {
+      giveKeyboardToShell('window focused')
+    }
+    if (activeViewVisible && !overlaysOpen && activeViewId && keyboardOwner === 'view') {
       const view = aiViews.get(activeViewId)
       if (view && !view.webContents.isDestroyed()) {
         view.webContents.focus()
@@ -3546,7 +4315,28 @@ function createWindow() {
     }
   })
 
+  mainWindow.webContents.on('focus', () => {
+    setKeyboardOwner('shell', 'shell focused')
+  })
+
   mainWindow.webContents.on('before-input-event', (event, input) => {
+    // Ctrl+V typed while the shell owns the keyboard. The shell has no composer, so the keystroke is
+    // the user asking for the prompt — route it before it becomes a paste into nothing. Skipped when an
+    // overlay is open (those do have fields of their own) and when the tab already owns the keyboard,
+    // where the page's own paste is the correct one.
+    if (
+      input.type === 'keyDown' &&
+      (input.control || input.meta) &&
+      !input.alt &&
+      !input.shift &&
+      (input.key || '').toLowerCase() === 'v' &&
+      !overlaysOpen &&
+      !activeViewHasKeyboard()
+    ) {
+      event.preventDefault()
+      if (!input.isAutoRepeat) pasteIntoActiveView('shell key')
+      return
+    }
     routeGlobalShortcut(event, input, 'window')
   })
 
@@ -3573,6 +4363,11 @@ function createWindow() {
   const resumeActiveView = () => {
     restartActiveArenaTitleSync()
     reconcileViewPresentation()
+    // Coming back from hidden/minimised/sleep is where the compositor drops a surface, and where a
+    // plain repaint request is known to be too weak. Rebuild the surface, keep the page.
+    if (activeViewId && activeViewVisible && !overlaysOpen) {
+      repairTabSurface(activeViewId, 'window resumed', true)
+    }
     try {
       if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
         mainWindow.webContents.invalidate?.()
@@ -3689,6 +4484,50 @@ protocol.registerSchemesAsPrivileged([
     privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true }
   }
 ])
+
+/**
+ * Crash diagnostics.
+ *
+ * Build 29 closed the window when a URL-bar navigation ran into a page that re-navigates itself, and the
+ * only evidence was a log that stopped mid-line — no exception, no reason. Nothing in the app was
+ * listening. Anything that kills a process, throws from a timer or rejects an unhandled promise now says
+ * so, in the log the user can send and in the trace the Logs tab shows.
+ *
+ * The handler deliberately does not re-throw: a diagnostic that then exits tells nobody anything, and
+ * this app is more useful with one broken navigation than with no window.
+ */
+function reportFatal(kind: string, detail: unknown): void {
+  let message = ''
+  try {
+    message =
+      detail instanceof Error
+        ? `${detail.name}: ${detail.message}\n${String(detail.stack || '').split('\n').slice(0, 6).join('\n')}`
+        : typeof detail === 'object'
+          ? JSON.stringify(detail)
+          : String(detail)
+  } catch {
+    message = '(unprintable)'
+  }
+  try {
+    console.error(`[fatal] ${kind} — ${message}`)
+  } catch {
+    /* a console that throws is not worth a second throw */
+  }
+  try {
+    traceNav(activeViewId || '', 'note', `FATAL: ${kind}`, { detail: message.slice(0, 300) })
+  } catch {
+    /* ignore */
+  }
+}
+
+process.on('uncaughtException', (error) => reportFatal('uncaughtException', error))
+process.on('unhandledRejection', (reason) => reportFatal('unhandledRejection', reason))
+app.on('child-process-gone', (_event, details) => {
+  reportFatal('child-process-gone', `${details.type} · ${details.reason} · exit ${details.exitCode}`)
+})
+app.on('render-process-gone', (_event, _contents, details) => {
+  reportFatal('render-process-gone', `${details.reason} · exit ${details.exitCode}`)
+})
 
 app.whenReady().then(() => {
   electronApp.setAppUserModelId('com.nexus.app')
@@ -3887,6 +4726,11 @@ function focusPromptInView(
   modelKey?: string
 ): void {
   if (!view || view.webContents.isDestroyed()) return
+  // A sign-in page is not an AI page. The callers of this function check for a provider login wall
+  // (see loginWall.ts) but not all of them do, so the one guard that covers every caller lives here —
+  // and it uses the same predicate as every other injection site, which is broader than the identity
+  // one on purpose: nothing of ours goes into any identity provider's page.
+  if (isThirdPartyAuthPage(view.webContents.getURL())) return
   let keyToUse = modelKey
   if (!keyToUse && activeViewId) {
     keyToUse = viewModelKeys.get(activeViewId)
@@ -3942,7 +4786,18 @@ function focusPromptInView(
         for (const sel of selectors) {
           const el = document.querySelector(sel);
           if (el && el.offsetParent !== null && !el.disabled) {
+            // Already the focused element: touching the caret here is this function's own doing, and
+            // the browser has not lost the position. Doing nothing is what keeps a half-written prompt
+            // where the user left it (build 35 — the caret used to be thrown to the end on every call).
+            if (document.activeElement === el) return true;
+            const empty =
+              typeof el.value === 'string'
+                ? el.value.length === 0
+                : (el.textContent || '').length === 0;
             el.focus({ preventScroll: false });
+            // Only place the caret when there is nothing to preserve. A composer with text in it keeps
+            // whatever selection it had: pressing Ctrl+V or Alt+J must not move the caret to the end.
+            if (!empty) return true;
             if (typeof el.selectionStart === 'number') {
               el.selectionStart = el.selectionEnd = el.value.length;
             } else if (window.getSelection && document.createRange) {
@@ -4313,6 +5168,17 @@ function ensureAiView(tabId: string, containerId?: unknown): Electron.WebContent
   view.webContents.setMaxListeners(50)
   webContentsPartitions.set(view.webContents.id, partition)
 
+  // Own the navigation surface. From here on, every programmatic load, reload, stop or history move on
+  // this view records itself with the file and line that called it, so "the tab went back on its own"
+  // stops being a theory and becomes a stack frame.
+  tapNavigationSurface(view.webContents as unknown as NavigationSurface, (event) => {
+    traceNav(tabId, 'prog', event.action, {
+      ...(event.url ? { url: event.url } : {}),
+      ...(event.caller ? { caller: event.caller } : {}),
+      wc: view.webContents.id
+    })
+  })
+
   view.webContents.userAgent = AI_UA
   view.webContents.setZoomFactor(currentWebviewZoom)
   setViewBackground(view)
@@ -4338,7 +5204,13 @@ function ensureAiView(tabId: string, containerId?: unknown): Electron.WebContent
           if (view.webContents.canGoBack()) view.webContents.goBack()
         }
       },
-      { label: 'Reload Page', click: () => view.webContents.reload() },
+      {
+        label: 'Reload Page',
+        click: () => {
+          traceNav(tabId, 'load', 'reload (context menu)', {})
+          view.webContents.reload()
+        }
+      },
       { type: 'separator' },
       { label: 'Inspect Element', click: () => view.webContents.inspectElement(params.x, params.y) }
     ]
@@ -4347,6 +5219,7 @@ function ensureAiView(tabId: string, containerId?: unknown): Electron.WebContent
   })
 
   view.webContents.on('render-process-gone', (_e, details) => {
+    traceNav(tabId, 'event', 'render-process-gone — reloading', { reason: details.reason })
     console.warn(`[Lifecycle] Tab ${tabId} renderer gone (${details.reason}); reloading it.`)
     try {
       view.webContents.reload()
@@ -4364,8 +5237,17 @@ function ensureAiView(tabId: string, containerId?: unknown): Electron.WebContent
     'did-fail-load',
     (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
       if (!isMainFrame) return
+      traceNav(tabId, 'event', 'did-fail-load', {
+        code: describeLoadFailure(errorCode, errorDescription),
+        url: validatedURL,
+        pending: navigationIntent.pendingUrl(tabId) || '(none)'
+      })
       // ERR_ABORTED is a navigation we replaced on purpose (a redirect or a second load), not a failure.
+      // It must NOT drop the intent either: this event fires for the abort that `navigate_tab` is about
+      // to judge, and clearing the intent here made the retry conclude "superseded" and give up while
+      // the request was still exactly what the user asked for. The load's own callbacks clear it.
       if (errorCode === -3) return
+      navigationIntent.forget(tabId)
       console.warn(`[view] ${tabId} load failed: ${errorCode} ${errorDescription} — ${validatedURL}`)
       if (!validatedURL || !/^https?:/i.test(validatedURL)) return
       const key = `retry:${validatedURL}`
@@ -4509,6 +5391,12 @@ function ensureAiView(tabId: string, containerId?: unknown): Electron.WebContent
 
   // Forward keyboard events (like global shortcuts) from the inner view back to the main window,
   // handling all global shortcuts through unified native IPC routing.
+  // Clicking into the page is the clearest statement of intent there is: from then on the keyboard
+  // belongs to the view until the shell asks for it back.
+  view.webContents.on('focus', () => {
+    setKeyboardOwner('view', 'view focused', tabId)
+  })
+
   view.webContents.on('before-input-event', (event, input) => {
     if (routeGlobalShortcut(event, input, 'view')) {
       return
@@ -4578,7 +5466,156 @@ function ensureAiView(tabId: string, containerId?: unknown): Electron.WebContent
     }
   })
 
+  // The first and most trustworthy signal that a load actually started. Everything else (promise
+  // rejections, did-fail-load, repairs) is downstream of this line, so the trace always begins here.
+  view.webContents.on('did-start-navigation', (_event, url, isInPlace, isMainFrame) => {
+    // `wc` is the webContents id. If a tab ever reports two of them, there are two views alive for one
+    // tab — the failure mode the trace in build 26 could not rule out, because it printed neither.
+    traceNav(tabId, 'event', 'did-start-navigation', {
+      url,
+      inPlace: isInPlace,
+      mainFrame: isMainFrame,
+      pending: navigationIntent.pendingUrl(tabId) || '(none)',
+      wc: view.webContents.id
+    })
+
+    // The user's URL is in flight and the page we left is starting to navigate the frame back. The
+    // last six builds waited for that navigation to finish and retried afterwards, which meant the
+    // page had already re-committed to its old URL and our retry was, from Chromium's point of view,
+    // the interloper. So we take the frame back instead: starting our load cancels theirs. Bounded by
+    // NAV_DEFENCE_BUDGET, and only for the page we were leaving — a redirect to another host during
+    // the load is a normal load and is left alone.
+    const wanted = navWanted.get(tabId)
+    const pendingUrl = wanted?.url
+    const leaving = navLeaveFrom.get(tabId) || ''
+    const defence = navDefences.get(tabId)
+    const now = Date.now()
+    if (
+      shouldDefend({
+        isMainFrame,
+        incomingUrl: url,
+        pendingUrl: leaving && sameSiteUrl(url, leaving) ? pendingUrl || null : null,
+        sameUrl: sameSiteUrl,
+        defencesUsed: defence && defence.url === pendingUrl ? defence.used : 0,
+        budget: NAV_DEFENCE_BUDGET,
+        lastDefenceAt: defence && defence.url === pendingUrl ? defence.at : 0,
+        now
+      }) &&
+      pendingUrl
+    ) {
+      const used = (defence && defence.url === pendingUrl ? defence.used : 0) + 1
+      navDefences.set(tabId, { used, at: now, url: pendingUrl })
+      traceNav(tabId, 'abort', 'taking the frame back from the old page', {
+        intruder: url,
+        keeping: pendingUrl,
+        defence: `${used}/${NAV_DEFENCE_BUDGET}`,
+        wc: view.webContents.id
+      })
+
+      // Build 28 called `loadURL` from inside this handler; build 29 called `stop()`. Both are
+      // re-entrant native calls made while Chromium is *starting* a navigation, and both behaved as
+      // badly as that sounds: 28 aborted its own load (`ERR_FAILED -2`), 29 closed the app — the trace
+      // ends on the `stop` line, which is the last thing that ran. So the handler now does nothing but
+      // schedule: it returns immediately and the actual work happens outside the event dispatch.
+      //
+      // No `stop()` either. Asking for the user's URL after the intruder has been left alone for a
+      // moment cancels it anyway, and cancelling is not worth a crash.
+      navBouncedTabs.add(tabId)
+      scheduleDefence(view, tabId, pendingUrl)
+      return
+    }
+  })
+
+  // Electron only emits these for a navigation the *page* started (a link, a script, a meta refresh,
+  // a redirect chain). A load we started through `loadURL` never reaches them. So a `will-navigate`
+  // naming a URL we did not ask for is the page changing itself — the one thing the trace could not
+  // distinguish from a load of ours before.
+  /**
+   * The page is holding the document hostage.
+   *
+   * This is the answer to the whole Ctrl+L saga. Electron says it plainly in the `loadURL` docs: *"If the
+   * existing page has a beforeUnload handler, did-fail-load will be called unless will-prevent-unload is
+   * handled."* Every one of these chat apps registers `beforeunload` — draft protection, unsaved prompt,
+   * an open composer — and by default Electron honours it. So the load we asked for was cancelled by the
+   * page, Chromium re-committed the document it was already on, and the trace showed a main-frame
+   * `did-start-navigation` to the *current* URL a few milliseconds after ours: not an intruder, not a
+   * restore, just a page that refused to unload. `will-navigate` never fired because nothing navigated.
+   *
+   * Six builds tried to out-wait, out-retry, out-stop and out-clear that. None of it could work: the
+   * navigation was never blocked by another navigation.
+   *
+   * Calling `event.preventDefault()` here means "ignore the beforeunload handler and let the page go",
+   * which is what a URL bar means. It is only done when the user actually asked for a different page, so
+   * a page's own guard still applies when nothing of ours is in flight.
+   */
+  view.webContents.on('will-prevent-unload', (event: Electron.Event) => {
+    const wanted = navWanted.get(tabId)?.url
+    let current = ''
+    try {
+      current = view.webContents.getURL() || ''
+    } catch {
+      current = ''
+    }
+    traceNav(tabId, 'event', 'will-prevent-unload — the page tried to keep itself', {
+      current,
+      wanted: wanted || '(none)',
+      wc: view.webContents.id
+    })
+    if (!wanted) return
+    try {
+      event.preventDefault()
+      traceNav(tabId, 'note', 'leaving anyway — the user asked for another page', { url: wanted })
+    } catch {
+      /* if Electron ever refuses, the request loop still reports the failure */
+    }
+  })
+
+  /**
+   * The page navigating *itself* — and, while the user's request is in flight, the one thing we can
+   * refuse out loud.
+   *
+   * `will-navigate` is emitted before a page-initiated main-frame navigation starts, which is the moment
+   * the build-31 trace kept naming (`asked=no`) five milliseconds after each of our loads. Cancelling it
+   * here is not a retry and cannot abort our own load: the intruder never gets to start, so there is
+   * nothing for ours to lose against.
+   *
+   * It is deliberately narrow. Only a navigation back to the site we are leaving, and only while a URL
+   * the user asked for is still pending, is refused — a redirect *during* the load (a sign-in hop, a
+   * canonical host, a deepseek conversation URL under the new site) is a normal part of loading and is
+   * left alone. A page's own link clicks are untouched when nothing of ours is in flight.
+   */
+  view.webContents.on('will-navigate', (event, url) => {
+    const pending = navigationIntent.pendingUrl(tabId)
+    const wanted = navWanted.get(tabId)?.url
+    const leaving = navLeaveFrom.get(tabId) || ''
+    const asked = !!(pending && sameSiteUrl(url, pending))
+    const goingBackToItself = !!(wanted && leaving && sameSiteUrl(url, leaving) && !sameSiteUrl(url, wanted))
+    traceNav(tabId, 'event', 'will-navigate — the page is navigating itself', {
+      url,
+      pending: pending || '(none)',
+      asked: asked ? 'yes' : 'no',
+      self: goingBackToItself ? 'yes' : 'no',
+      wc: view.webContents.id
+    })
+    if (!wanted || asked || !goingBackToItself) return
+    try {
+      event.preventDefault()
+      traceNav(tabId, 'abort', 'refused — the page may not navigate itself back while a URL is pending', {
+        refused: url,
+        keeping: wanted,
+        wc: view.webContents.id
+      })
+    } catch {
+      /* if the event cannot be cancelled, the defence and the rebuild still apply */
+    }
+  })
+
   view.webContents.on('did-navigate', (_event, url) => {
+    traceNav(tabId, 'event', 'did-navigate (committed)', {
+      url,
+      pending: navigationIntent.pendingUrl(tabId) || '(none)',
+      wc: view.webContents.id
+    })
     // Evidence, not behaviour: if a tab is being navigated by something we have not found yet, this
     // says so once, with the URL, instead of leaving a page that appears to refresh forever.
     const now = Date.now()
@@ -4618,21 +5655,25 @@ function ensureAiView(tabId: string, containerId?: unknown): Electron.WebContent
     sendToMainWindow('ai-loading', tabId, true)
   })
   view.webContents.on('did-stop-loading', () => {
+    traceNav(tabId, 'event', 'did-stop-loading', {
+      url: (() => {
+        try {
+          return view.webContents.getURL() || '(empty)'
+        } catch {
+          return '(gone)'
+        }
+      })(),
+      pending: navigationIntent.pendingUrl(tabId) || '(none)'
+    })
+    navigationIntent.forget(tabId)
     tabDiscardManager.reconcileCapacity()
     sendToMainWindow('ai-loading', tabId, false)
-    // Never steal focus from an open renderer overlay (popups/modals): a
-    // background load finishing a few seconds later would otherwise yank
-    // keyboard focus out of the overlay's input.
-    if (
-      !overlaysOpen &&
-      activeViewId === tabId &&
-      activeViewVisible &&
-      mainWindow &&
-      !mainWindow.isDestroyed() &&
-      !view.webContents.isDestroyed()
-    ) {
-      view.webContents.focus()
-      focusPromptInView(view)
+    // A load finishing never takes the keyboard. It used to, and a page that reloads itself (deepseek,
+    // and any SPA that restores its route) pulled focus out of the shell twice a second — after which
+    // Ctrl+L opened an address bar that could not be typed into. The keyboard stays wherever the user
+    // put it; `did-stop-loading` may only keep it, never move it.
+    if (keyboardStaysWithView(view, tabId)) {
+      focusPromptInView(view, viewModelKeys.get(tabId))
     }
   })
 
@@ -4673,6 +5714,7 @@ function ensureAiView(tabId: string, containerId?: unknown): Electron.WebContent
 
   if (mainWindow && !mainWindow.isDestroyed()) {
     try {
+      traceViewOp(tabId, 'attach (ensureAiView)', {})
       mainWindow.contentView.addChildView(view)
       if (aiNotificationView) {
         mainWindow.contentView.removeChildView(aiNotificationView)
@@ -4685,6 +5727,8 @@ function ensureAiView(tabId: string, containerId?: unknown): Electron.WebContent
   }
 
   aiViews.set(tabId, view)
+  // A freshly attached page is stacked above the in-app toast; put the toast back on top.
+  raiseNativeOverlays()
   return view
 }
 
@@ -4712,6 +5756,7 @@ ipcMain.on('navigate_to_url', async (_event, tabId, url, bounds, modelKey, conta
   if (bounds.width > 0) lastRealBounds.set(tabId, bounds)
   const currentUrl = view.webContents.getURL()
   if (currentUrl !== url && !view.webContents.isLoading()) {
+    traceNav(tabId, 'load', 'loadURL (ensureAiView)', { url })
     void view.webContents.loadURL(url).catch((err) => {
       if (err?.code === 'ERR_ABORTED' || err?.errno === -3) return
       console.warn(`[navigate_to_url] Failed to load URL for ${tabId}:`, err)
@@ -4956,6 +6001,8 @@ function persistProviderConfig() {
 
 function updateWebviewTitlePoller(view: Electron.WebContentsView, modelKey: string): void {
   if (view.webContents.isDestroyed()) return
+  // Same rule as focusPromptInView: nothing is injected into an identity provider's page.
+  if (isThirdPartyAuthPage(view.webContents.getURL())) return
   // Keep live reconfiguration consistent with buildWebviewRuntimeJs.
   const globalOv = providerConfig['ALL'] || providerConfig['global'] || {}
   const feats = getMergedProviderFeatures(modelKey, providerConfig[modelKey], globalOv)
@@ -6306,6 +7353,24 @@ ipcMain.on('activate_tab', async (_event, tabId, url, bounds, modelKey, containe
   }
 
   console.log('[activate_tab]', tabId, 'url=', url, 'current=', view.webContents?.getURL?.())
+  traceNav(tabId, 'request', 'activate_tab', {
+    url: url || '(none)',
+    current: (() => {
+      try {
+        return view.webContents?.getURL?.() || '(empty)'
+      } catch {
+        return '(gone)'
+      }
+    })(),
+    loading: (() => {
+      try {
+        return view.webContents?.isLoading?.() ?? null
+      } catch {
+        return null
+      }
+    })(),
+    overlaysOpen
+  })
   resolveModelKey(tabId, url, modelKey)
 
   try {
@@ -6334,6 +7399,8 @@ ipcMain.on('activate_tab', async (_event, tabId, url, bounds, modelKey, containe
     if (id !== tabId) {
       try {
         if (!v.webContents?.isDestroyed?.()) {
+          traceViewOp(id, 'setVisible (activate_tab, background)', { visible: false })
+          markViewVisibility(id, false)
           v.setVisible(false)
           v.webContents.setBackgroundThrottling(true)
           v.webContents.setAudioMuted(true)
@@ -6374,9 +7441,10 @@ ipcMain.on('activate_tab', async (_event, tabId, url, bounds, modelKey, containe
     }, VISITED_DONE_LINGER_MS)
     aiLifecycleTimers.set(tabId, timer)
   }
-  if (currentNotificationData?.tabId === tabId) {
-    dismissInAppToast()
-  }
+  // The toast about this tab used to be dismissed the moment the tab was activated. Two things were
+  // wrong with that: it also fired for the *other* tabs (which is why notifications vanished on any tab
+  // switch), and a notification the user never got to read is not improved by hiding it. The toast now
+  // lives out its timer and can be clicked or closed; the lifecycle status is what says "seen".
   activeViewVisible = !isHidden
   try {
     if (bounds) {
@@ -6384,7 +7452,15 @@ ipcMain.on('activate_tab', async (_event, tabId, url, bounds, modelKey, containe
       if (!isHidden) lastRealBounds.set(tabId, bounds)
     }
     const shouldBeVisible = !isHidden && !overlaysOpen
-    if (typeof view?.setVisible === 'function') view.setVisible(shouldBeVisible)
+    // Asked *before* the view is shown: afterwards this always answers "not hidden", which is exactly
+    // how the strong repaint used to be skipped for a tab coming back from the background.
+    const returningFromHidden = shouldBeVisible && viewWasHidden(tabId, view)
+    if (typeof view?.setVisible === 'function') {
+      traceViewOp(tabId, 'setVisible (activate_tab, active)', { visible: shouldBeVisible })
+      view.setVisible(shouldBeVisible)
+      markViewVisibility(tabId, shouldBeVisible)
+      if (returningFromHidden) shownFromHidden.add(tabId)
+    }
     if (view?.webContents && !view.webContents.isDestroyed?.()) {
       view.webContents.setBackgroundThrottling?.(!shouldBeVisible)
       view.webContents.setAudioMuted?.(!shouldBeVisible)
@@ -6401,6 +7477,20 @@ ipcMain.on('activate_tab', async (_event, tabId, url, bounds, modelKey, containe
   const savedState = tabDiscardManager.getEvictedTabState(tabId)
   const currentUrl = view.webContents?.getURL?.() || ''
 
+  // A URL the user asked for outranks the URL an activation carries.
+  //
+  // An activation carries the tab's *stored* URL, and on a restored (evicted) tab the wake path below
+  // loads the URL saved with the discarded tab. If the user navigated from the address bar a moment
+  // earlier, that wake would load the old page over the new one: the user's navigation is aborted and
+  // the tab looks like it ignored it — "it only works on new tabs, not on the ones I had before I
+  // restarted". While a user navigation is in flight for this tab, the activation defers to it.
+  const userNavigation = navigationIntent.pendingUrl(tabId)
+  if (userNavigation) {
+    console.log(
+      `[activate_tab] ${tabId} deferring to the navigation the user asked for: ${userNavigation}`
+    )
+  }
+
   // Determine restore target URL: use valid saved URL, falling back to tab's supplied URL
   let targetRestoreUrl: string | null = null
   if (wasEvicted && savedState) {
@@ -6410,6 +7500,8 @@ ipcMain.on('activate_tab', async (_event, tabId, url, bounds, modelKey, containe
       targetRestoreUrl = url
     }
   }
+  // The user's own request wins over the tab's restore state.
+  if (userNavigation) targetRestoreUrl = userNavigation
 
   if (wasEvicted && targetRestoreUrl) {
     const existingWake = activeWakeOperations.get(tabId)
@@ -6433,6 +7525,7 @@ ipcMain.on('activate_tab', async (_event, tabId, url, bounds, modelKey, containe
 
       void (async () => {
         try {
+          traceNav(tabId, 'load', 'loadURL (wake / restore)', { url: targetRestoreUrl, evicted: wasEvicted })
           await view.webContents.loadURL(targetRestoreUrl!)
 
           // Verify this wake is still the current navigation attempt and view wasn't destroyed
@@ -6485,7 +7578,30 @@ ipcMain.on('activate_tab', async (_event, tabId, url, bounds, modelKey, containe
         }
       })()
     }
-  } else if (url && !currentUrl && isUsableRestoreUrl(url)) {
+  } else if (userNavigation && !currentUrl) {
+    // The view is empty and the user has already asked for a page: that page is the one to load. Doing
+    // nothing here would leave an empty view until the app is reopened.
+    const existingWake = activeWakeOperations.get(tabId)
+    if (existingWake && existingWake.targetUrl === userNavigation) {
+      console.log('[activate_tab] In-flight load already in progress for empty view:', tabId)
+    } else if (!view.webContents.isLoading()) {
+      console.log('[activate_tab] LOADING the page the user asked for:', userNavigation)
+      const myWakeToken = (wakeTokens.get(tabId) || 0) + 1
+      wakeTokens.set(tabId, myWakeToken)
+      activeWakeOperations.set(tabId, { token: myWakeToken, targetUrl: userNavigation })
+      void view.webContents
+        .loadURL(userNavigation)
+        .catch((err) => {
+          if (err?.code === 'ERR_ABORTED' || err?.errno === -3) return
+          console.warn(`[activate_tab] Failed to load the user's page for ${tabId}:`, err)
+        })
+        .finally(() => {
+          if (activeWakeOperations.get(tabId)?.token === myWakeToken) {
+            activeWakeOperations.delete(tabId)
+          }
+        })
+    }
+  } else if (url && !currentUrl && isUsableRestoreUrl(url) && !userNavigation) {
     const existingWake = activeWakeOperations.get(tabId)
     if (existingWake && existingWake.targetUrl === url) {
       console.log('[activate_tab] In-flight load already in progress for empty view:', tabId)
@@ -6493,6 +7609,7 @@ ipcMain.on('activate_tab', async (_event, tabId, url, bounds, modelKey, containe
       console.log('[activate_tab] View is already loading, skipping duplicate loadURL:', tabId)
     } else {
       console.log('[activate_tab] LOADING empty view:', url)
+      traceNav(tabId, 'load', 'loadURL (empty view)', { url })
       const myWakeToken = (wakeTokens.get(tabId) || 0) + 1
       wakeTokens.set(tabId, myWakeToken)
       activeWakeOperations.set(tabId, {
@@ -6527,19 +7644,425 @@ ipcMain.on('activate_tab', async (_event, tabId, url, bounds, modelKey, containe
   }
 })
 
+// "This tab has gone blank" without closing it. Same repairs the reconcile path runs, on demand.
+ipcMain.handle('repair_view', (_event, tabId?: string) => {
+  const target = tabId || activeViewId
+  if (!target) return { repaired: false, reason: 'no active tab' }
+  const view = aiViews.get(target)
+  if (!view || view.webContents.isDestroyed()) return { repaired: false, reason: 'no view' }
+  repairTabSurface(target, 'requested from the app', activeViewId === target && activeViewVisible)
+  return { repaired: true }
+})
+
+/**
+ * Which request for a tab is the current one.
+ *
+ * The retry below has to answer "did something newer replace this load, or did we abort it ourselves?".
+ * It used to ask the navigation-intent tracker, and that was the bug: every `did-fail-load` for the tab
+ * cleared the tracker — including the `ERR_ABORTED` that *is* the abort being judged — so the retry
+ * concluded "superseded" and gave up while the request was still exactly what the user wanted. This
+ * counter cannot be cleared by an event: only a newer `navigate_tab` moves it.
+ */
+const navRequestSeq = new Map<string, number>()
+/**
+ * Attempts per navigation request, and the pause between them.
+ *
+ * Four attempts rather than three, and — much more importantly — each one waits for the tab to go quiet
+ * first (see `settle()` in the handler). Retrying on a fixed 150 ms timer was retrying into the middle
+ * of Chromium restoring the previous page, which aborted the new load again, every time.
+ */
+const NAV_LOAD_ATTEMPTS = 4
+/**
+ * One last ask, four seconds after the attempts are spent.
+ *
+ * A page that reloads itself takes a moment to settle, and every attempt so far has been inside that
+ * window (see the build-28 trace: four attempts, all aborted within 300 ms, then the old page committed
+ * and stopped loading). Rather than leave the tab showing a page the user did not ask for, the request
+ * gets one unhurried retry once the noise has died down.
+ */
+const NAV_LAST_RESORT_DELAY_MS = 4000
+const NAV_SETTLE_TIMEOUT_MS = 2500
+/** How long a navigation waits for the address-bar overlay to close before loading anyway. */
+const OVERLAY_CLOSE_TIMEOUT_MS = 1200
+const NAV_RETRY_DELAY_MS = [120, 250, 500]
+/** How long to let an aborted load unwind before the tab is rebuilt around a new page. */
+const NAV_REBUILD_DELAY_MS = 250
+
+/**
+ * Give the tab a different *page*, not just a different URL.
+ *
+ * The build-31 trace ends the way every previous one did: four loads, four `did-start-navigation` lines
+ * naming the page we were leaving five milliseconds later, four `ERR_ABORTED (-3)`, a `history.clear()`
+ * and a last `loadURL` on the *same* webContents — which the old document aborted as well. The one thing
+ * none of those attempts changed was the document doing the aborting. Every retry, every defence and
+ * every history wipe still ran inside the renderer process that had already proved it would not let go.
+ *
+ * So the last resort is no longer another request to the same contents. The contents is closed (a real
+ * unload, with `waitForBeforeUnload: false` — the same teardown the discard manager uses) and the tab is
+ * rebuilt through `ensureAiView`, which installs a fresh renderer with the same container partition (the
+ * cookies that matter are in the partition, not in the document) and re-wires every listener: trace tap,
+ * navigation defence, `will-navigate` guard, status observer. Then the user's URL is loaded there.
+ *
+ * A page cannot abort a navigation in a process that no longer exists. That is not a theory about what
+ * deepseek does — it is a statement about what is left running.
+ */
+async function rebuildTabView(
+  tabId: string,
+  reason: string
+): Promise<Electron.WebContentsView | null> {
+  const old = aiViews.get(tabId)
+  let leaving = ''
+  let oldWc = 0
+  try {
+    leaving = old?.webContents?.getURL() || ''
+    oldWc = old?.webContents?.id ?? 0
+  } catch {
+    leaving = ''
+  }
+  traceNav(tabId, 'load', 'rebuilding the tab — the old page would not let go', {
+    reason,
+    leaving,
+    wc: oldWc
+  })
+
+  // Same order the discard teardown uses: stop the repair machinery first, so nothing re-attaches the
+  // view while it is being closed, then detach, then close the contents.
+  surfaceRepair.forget(tabId)
+  const pendingRepair = repairDeferrals.get(tabId)
+  if (pendingRepair) {
+    clearTimeout(pendingRepair)
+    repairDeferrals.delete(tabId)
+  }
+  aiViews.delete(tabId)
+  presentedVisible.delete(tabId)
+  if (mainWindow && !mainWindow.isDestroyed() && old) {
+    try {
+      mainWindow.contentView.removeChildView(old)
+    } catch {
+      /* already detached */
+    }
+  }
+  if (old) {
+    try {
+      await closeWebContents(old.webContents as unknown as Parameters<typeof closeWebContents>[0])
+      traceNav(tabId, 'note', 'the old page is gone', { wc: oldWc })
+    } catch (err) {
+      // A close that timed out has still been requested; the rebuild continues either way.
+      traceNav(tabId, 'note', 'the old page did not confirm the close', { error: describeLoadError(err) })
+    }
+  }
+
+  const container = tabContainers.get(tabId)
+  let fresh: Electron.WebContentsView | null = null
+  try {
+    fresh = ensureAiView(tabId, container ?? undefined)
+  } catch (err) {
+    // `registerView` refuses to replace a live view, so a close that timed out lands here rather than
+    // half-way through a rebuild: the request then gives up honestly instead of breaking the loop.
+    traceNav(tabId, 'abort', 'the rebuild could not register a new view', {
+      error: describeLoadError(err)
+    })
+    return null
+  }
+  if (!fresh || fresh.webContents.isDestroyed()) {
+    traceNav(tabId, 'abort', 'the rebuild produced no usable view', {})
+    return null
+  }
+  const bounds = lastRealBounds.get(tabId)
+  if (bounds) {
+    try {
+      fresh.setBounds(bounds)
+    } catch {
+      /* bounds are re-sent by the renderer on the next resize */
+    }
+  }
+  try {
+    const shouldShow = activeViewId === tabId && activeViewVisible && !overlaysOpen
+    fresh.setVisible(shouldShow)
+  } catch {
+    /* visibility is reconciled by the next reveal */
+  }
+  traceNav(tabId, 'note', 'fresh page ready — loading the request in it', {
+    wc: fresh.webContents.id,
+    url: leaving
+  })
+  return fresh
+}
+
 ipcMain.on('navigate_tab', async (_event, tabId: string, url: string, modelKey?: string, containerId?: string) => {
   rememberTabContainer(tabId, containerId)
   await tabDiscardManager.waitForClose(tabId)
   wakeTokens.set(tabId, (wakeTokens.get(tabId) || 0) + 1)
   activeWakeOperations.delete(tabId)
   tabDiscardManager.onExplicitNavigation(tabId)
-  const view = ensureAiView(tabId, containerId)
+  let view = ensureAiView(tabId, containerId)
+  // `let`, because the last resort (see `rebuildTabView`) can put a different renderer behind this
+  // tab mid-request, and every helper below must then look at the new one.
   resolveModelKey(tabId, url, modelKey)
   applyWebviewTheme(view, viewModelKeys.get(tabId))
-  console.log('[navigate_tab]', tabId, 'url=', url)
-  void view.webContents.loadURL(url).catch((err) => {
-    console.warn(`[navigate_tab] Failed to load URL for ${tabId}:`, err)
+
+  const token = (navRequestSeq.get(tabId) ?? 0) + 1
+  navRequestSeq.set(tabId, token)
+  traceNav(tabId, 'request', 'navigate_tab', {
+    url,
+    model: viewModelKeys.get(tabId),
+    token,
+    current: (() => {
+      try {
+        return view.webContents.getURL() || '(empty)'
+      } catch {
+        return '(gone)'
+      }
+    })()
   })
+
+  // The user's request, recorded where no event can clear it, plus the page we are leaving.
+  navWanted.set(tabId, { url, token, at: Date.now() })
+  try {
+    const leaving = view.webContents.getURL()
+    if (leaving) navLeaveFrom.set(tabId, leaving)
+  } catch {
+    /* ignore */
+  }
+  navDefences.delete(tabId)
+
+  // A tab that has already been caught re-navigating itself gets its history cleared *before* the load,
+  // while nothing is in flight. That is the difference between undoing a bounce and preventing one: with
+  // no previous entry, `history.back()` from the page cannot resurrect the old URL.
+  if (navBouncedTabs.has(tabId)) {
+    try {
+      let leaving = ''
+      try {
+        leaving = view.webContents.getURL() || ''
+      } catch {
+        leaving = ''
+      }
+      const history = view.webContents.navigationHistory as unknown as { clear?: () => void } | undefined
+      if (leaving && !sameSiteUrl(leaving, url) && history && typeof history.clear === 'function') {
+        history.clear()
+        traceNav(tabId, 'prog', 'history cleared before the load — this tab re-navigates itself', {
+          from: leaving,
+          wc: view.webContents.id
+        })
+      }
+    } catch (err) {
+      traceNav(tabId, 'note', 'history clear skipped', { error: describeLoadError(err) })
+    }
+  }
+
+  if (!navigationIntent.claim(tabId, url)) {
+    traceNav(tabId, 'request', 'duplicate request ignored', { url })
+    console.log(`[navigate_tab] ${tabId} is already loading ${url} — duplicate request ignored`)
+    return
+  }
+  console.log('[navigate_tab]', tabId, 'url=', url)
+
+  const isStillWanted = (): boolean => navRequestSeq.get(tabId) === token
+  const committedUrl = (): string => {
+    try {
+      return view.webContents.getURL() || ''
+    } catch {
+      return ''
+    }
+  }
+
+  /**
+   * Wait until the tab stops loading, or `timeoutMs`, whichever comes first.
+   *
+   * This is the fix the trace pointed at. Every retry used to start 150-450 ms after the previous abort
+   * — which is *during* the restore of the page the tab was already on. The trace shows the pattern
+   * exactly: `loadURL google.com` → `did-start-navigation google.com` → 130 ms later
+   * `did-start-navigation <the old page>` → `load aborted`, three times, then "giving up". Asking again
+   * while Chromium is still putting the old document back loses every time. Ask after it has finished.
+   */
+  const settle = (timeoutMs: number): Promise<void> =>
+    new Promise<void>((resolve) => {
+      let done = false
+      const finish = (): void => {
+        if (done) return
+        done = true
+        clearTimeout(timer)
+        try {
+          view.webContents.off('did-stop-loading', finish)
+        } catch {
+          /* the contents is gone; nothing to detach */
+        }
+        resolve()
+      }
+      const timer = setTimeout(finish, timeoutMs)
+      try {
+        view.webContents.once('did-stop-loading', finish)
+      } catch {
+        finish()
+      }
+    })
+
+  const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+
+  /**
+   * Wait for the shell overlay to close.
+   *
+   * Ctrl+L *is* an overlay: the address bar owns the keyboard, and the AI view is hidden while it is up.
+   * `navigate_tab` arrives before the overlay closes, so every navigation from the URL bar started on a
+   * hidden view and was then made visible ~6 ms later. The trace shows the consequence — the load is
+   * cancelled right after that flip and the previous page is restored. Starting the load once the view
+   * is on screen again removes the race instead of retrying into it.
+   */
+  const waitForOverlayClosed = async (timeoutMs: number): Promise<boolean> => {
+    const startedAt = Date.now()
+    while (overlaysOpen && Date.now() - startedAt < timeoutMs) {
+      await wait(25)
+    }
+    return !overlaysOpen
+  }
+
+  const run = async (): Promise<void> => {
+    if (overlaysOpen) {
+      traceNav(tabId, 'note', 'waiting for the address bar overlay to close', { url })
+      const closed = await waitForOverlayClosed(OVERLAY_CLOSE_TIMEOUT_MS)
+      traceNav(tabId, 'note', closed ? 'overlay closed — starting the load' : 'overlay still open — starting the load anyway', {
+        url
+      })
+    }
+
+    // Set when the navigation defence saw the old page take the frame back during this request. It
+    // short-circuits the retry loop: the trace has already answered "will this page let go?".
+    let foughtBack = false
+
+    for (let attempt = 1; attempt <= NAV_LOAD_ATTEMPTS; attempt += 1) {
+      if (!isStillWanted()) {
+        traceNav(tabId, 'abort', 'stopped — a newer request took over', { url, attempt })
+        return
+      }
+      if (view.webContents.isDestroyed()) {
+        traceNav(tabId, 'abort', 'view was destroyed before the load started', { url, attempt })
+        return
+      }
+
+      traceNav(tabId, 'load', 'loadURL', { url, attempt, token, from: committedUrl() })
+      let failed = false
+      let failureReason = ''
+
+      try {
+        await view.webContents.loadURL(url)
+      } catch (err) {
+        failed = true
+        const aborted =
+          (err as { code?: string })?.code === 'ERR_ABORTED' || (err as { errno?: number })?.errno === -3
+        failureReason = aborted ? 'aborted' : describeLoadError(err)
+        traceNav(tabId, 'abort', aborted ? 'load aborted' : 'load failed', {
+          url,
+          attempt,
+          error: failureReason,
+          stillWanted: isStillWanted(),
+          committed: committedUrl()
+        })
+      }
+
+      // The load either finished or was aborted — but "finished" is not the same as "arrived". The
+      // commit is what the user sees, so that is what is checked.
+      if (!failed && sameSiteUrl(committedUrl(), url)) {
+        navigationIntent.forget(tabId)
+        if (navWanted.get(tabId)?.token === token) navWanted.delete(tabId)
+        traceNav(tabId, 'settle', 'landed on the requested page', {
+          url,
+          attempt,
+          committed: committedUrl()
+        })
+        return
+      }
+      if (!failed) {
+        traceNav(tabId, 'abort', 'load finished, but the tab is on another page', {
+          url,
+          attempt,
+          committed: committedUrl()
+        })
+      }
+
+      if (!isStillWanted()) {
+        traceNav(tabId, 'abort', 'stopped — a newer request took over', { url, attempt })
+        return
+      }
+
+      // Let the tab finish restoring whatever it restored, then ask again.
+      await settle(NAV_SETTLE_TIMEOUT_MS)
+      if (!isStillWanted()) return
+      if (sameSiteUrl(committedUrl(), url)) {
+        navigationIntent.forget(tabId)
+        if (navWanted.get(tabId)?.token === token) navWanted.delete(tabId)
+        traceNav(tabId, 'settle', 'the tab arrived at the requested page while waiting', {
+          url,
+          attempt,
+          committed: committedUrl()
+        })
+        return
+      }
+      // The defence already caught this page taking the frame back. Retrying the same contents is
+      // the loop builds 27-31 were stuck in — one renderer, four refusals — so stop asking it and
+      // go straight to the rebuild below instead of spending three more attempts and four seconds.
+      if (navBouncedTabs.has(tabId)) {
+        traceNav(tabId, 'note', 'the page took the frame back — this tab gets a fresh renderer, not another retry', {
+          url,
+          attempt
+        })
+        foughtBack = true
+        break
+      }
+
+      await wait(NAV_RETRY_DELAY_MS[Math.min(attempt - 1, NAV_RETRY_DELAY_MS.length - 1)])
+    }
+
+    if (isStillWanted() && !sameSiteUrl(committedUrl(), url)) {
+      if (!foughtBack) {
+        traceNav(tabId, 'note', 'waiting out the noise before the last resort', { url })
+        await wait(NAV_LAST_RESORT_DELAY_MS)
+      } else {
+        // The page is already known to refuse; the only thing a longer wait buys is a longer wait.
+        await wait(NAV_REBUILD_DELAY_MS)
+      }
+      if (!isStillWanted()) return
+      if (!view.webContents.isDestroyed() && sameSiteUrl(committedUrl(), url)) return
+
+      const rebuilt = await rebuildTabView(tabId, foughtBack ? 'the page fought every load' : 'attempts exhausted')
+      if (!rebuilt) {
+        /* fall through to the give-up line */
+      } else {
+        view = rebuilt
+        traceNav(tabId, 'load', 'last resort — the request, in the rebuilt tab', {
+          url,
+          committed: committedUrl(),
+          wc: view.webContents.id
+        })
+        try {
+          await view.webContents.loadURL(url)
+        } catch (err) {
+          traceNav(tabId, 'abort', 'the rebuilt tab refused too', {
+            url,
+            error: describeLoadError(err),
+            committed: committedUrl()
+          })
+        }
+        if (isStillWanted() && sameSiteUrl(committedUrl(), url)) {
+          navigationIntent.forget(tabId)
+          if (navWanted.get(tabId)?.token === token) navWanted.delete(tabId)
+          traceNav(tabId, 'settle', 'landed in the rebuilt tab', { url, committed: committedUrl() })
+          return
+        }
+      }
+    }
+
+    navigationIntent.forget(tabId)
+    if (navWanted.get(tabId)?.token === token) navWanted.delete(tabId)
+    traceNav(tabId, 'abort', 'giving up on this load', {
+      url,
+      attempt: NAV_LOAD_ATTEMPTS,
+      reason: 'attempts exhausted',
+      committed: committedUrl()
+    })
+    console.log(`[navigate_tab] ${tabId} gave up after ${NAV_LOAD_ATTEMPTS} attempts: ${url}`)
+  }
+
+  void run()
 })
 
 ipcMain.handle('history_go_back', () => {
@@ -6586,7 +8109,10 @@ ipcMain.on('destroy_tab_view', async (_event, tabId: string) => {
 // Ctrl+R: full reload of the active AI view (like a browser reload)
 ipcMain.on('reload_active_view', () => {
   const view = activeViewId ? aiViews.get(activeViewId) : null
-  if (view) view.webContents.reload()
+  if (view) {
+    traceNav(activeViewId || '', 'load', 'reload (reload_active_view)', {})
+    view.webContents.reload()
+  }
 })
 
 ipcMain.handle(
@@ -6615,6 +8141,7 @@ ipcMain.handle(
       // Reload open view for this provider to reflect signed-out state
       for (const [tabId, view] of aiViews.entries()) {
         if (viewModelKeys.get(tabId) === providerKey && !view.webContents.isDestroyed()) {
+          traceNav(tabId, 'load', 'reload (provider_clear_session)', { provider: providerKey })
           view.webContents.reload()
         }
       }
@@ -6644,6 +8171,13 @@ const googleAccountStore = new GoogleAccountStore(
 )
 
 const containerStore = new ContainerStore(joinPath(app.getPath('userData'), 'containers.json'))
+
+/** Where Google's sign-in page keeps local state; cleared when a profile signs in again. */
+const GOOGLE_ACCOUNT_ORIGINS = [
+  'https://accounts.google.com',
+  'https://myaccount.google.com',
+  'https://gemini.google.com'
+]
 
 /**
  * Which container each tab belongs to. The renderer owns the durable tab records; main only needs
@@ -6719,6 +8253,110 @@ ipcMain.handle('containers_delete', (_event, containerId: string) => {
   return result
 })
 
+/**
+ * The order the user chose for the containers.
+ *
+ * Order is not cosmetic: the switcher lists them in this order and `Ctrl+Alt+N` opens the Nth, so the
+ * list is written down rather than derived from creation time.
+ */
+ipcMain.handle('containers_reorder', (_event, orderedIds: unknown) => {
+  if (!Array.isArray(orderedIds)) return { error: 'Expected the containers in their new order.' }
+  const list = containerStore.reorder(
+    orderedIds.filter((id): id is string => typeof id === 'string')
+  )
+  sendToMainWindow('containers-changed', list)
+  return { containers: list }
+})
+
+/**
+ * Sign one profile in again from the beginning: wipe that account's store, reload its tabs so the
+ * sign-out is visible, then open Google's account chooser on the same partition. The chooser is also
+ * where "Use another account" lives, which is how a profile gets a different account than before.
+ *
+ * One partition per account is what makes the wipe safe: nothing else lives in it.
+ */
+ipcMain.handle('containers_reconnect', async (_event, containerId: unknown) => {
+  const id = typeof containerId === 'string' && containerId ? containerId : DEFAULT_CONTAINER_ID
+  const container = containerStore.get(id)
+  if (!container) return { ok: false, error: 'No such container.' }
+
+  // Every tab on that account, not just this container's: two containers may share one Google
+  // account, and clearing the store signs both of them out whether they are reloaded or not.
+  const tabIds = [...tabContainers.entries()]
+    .filter(([, containerOfTab]) => {
+      const owner = containerStore.get(containerOfTab)
+      return (owner?.accountId ?? 'default') === container.accountId
+    })
+    .map(([tabId]) => tabId)
+  const reloadContainer = (): void => {
+    for (const tabId of tabIds) {
+      const view = aiViews.get(tabId)
+      if (view && !view.webContents.isDestroyed()) {
+        // This reloads every tab in the container — including one the user just navigated. It is
+        // named in the trace so "the page reloaded itself" has an owner.
+        traceNav(tabId, 'load', 'reload (account reconnect)', {})
+        view.webContents.reload()
+      }
+    }
+  }
+
+  return reconnectAccount(
+    reconnectTargetFor(container),
+    {
+      clearSession: async (accountId) => {
+        const sess = session.fromPartition(partitionForAccount(accountId))
+        // Google only. The same partition holds this profile's Gemini, ChatGPT and Claude sessions,
+        // and choosing a different Google account is not a reason to sign out of those.
+        const removed = await clearGoogleSessionCookies(sess.cookies)
+        // accounts.google.com keeps a little storage of its own; a stale copy reopens the chooser
+        // already signed in.
+        for (const origin of GOOGLE_ACCOUNT_ORIGINS) {
+          try {
+            await sess.clearStorageData({
+              origin,
+              storages: ['localstorage', 'indexdb', 'serviceworkers', 'cachestorage']
+            })
+          } catch (err) {
+            console.warn('[containers] Could not clear %s for %s:', origin, accountId, err)
+          }
+        }
+        try {
+          await sess.cookies.flushStore()
+        } catch (err) {
+          console.warn('[containers] Could not flush the cleared cookie store:', err)
+        }
+        console.log(`[containers] Signed Google out of ${accountId}: ${removed} cookie(s) removed`)
+      },
+      reloadContainer,
+      startSignIn: async (accountId, url) => {
+        await startGoogleSignIn(url, {
+          accountId,
+          onEvent: (ev) => {
+            forwardGoogleSignInEvent(ev)
+            // The new account is in the store now: the tabs have to load again to see it.
+            if (ev.stage === 'success') reloadContainer()
+            sendToMainWindow('container-reconnect-event', {
+              containerId: container.id,
+              containerName: container.name,
+              stage: ev.stage,
+              ...('message' in ev && ev.message ? { message: ev.message } : {})
+            })
+          },
+          openAuthWindow: (target, partition, onBlocked) =>
+            openInAppSignInWindow(target, { partition, parent: mainWindow, onBlocked })
+        })
+      },
+      report: (ev) =>
+        sendToMainWindow('container-reconnect-event', {
+          containerId: container.id,
+          containerName: container.name,
+          ...ev
+        })
+    },
+    GEMINI_LOGIN_URL
+  )
+})
+
 /** Bulk sync from the renderer: the tab list is the source of truth for who belongs where. */
 ipcMain.on('set_tab_containers', (_event, map: unknown) => {
   if (!map || typeof map !== 'object') return
@@ -6748,8 +8386,16 @@ ipcMain.handle('google_signin_start', (_event, accountId?: string) => {
   void startGoogleSignIn(GEMINI_LOGIN_URL, {
     accountId: accountId || 'default',
     onEvent: forwardGoogleSignInEvent,
-    openAuthWindow: (url, partition, onBlocked) =>
-      openInAppSignInWindow(url, { partition, parent: mainWindow, onBlocked })
+    openAuthWindow: (url, partition, onBlocked) => {
+      // The window signs in on the same partition its tabs will use, so that partition needs the
+      // identity hook — otherwise the header could disagree with the page inside the one window where
+      // it matters most. It deliberately does *not* get the rest of the AI treatment: a partition used
+      // to sign in should behave like a browser on Google's pages. Where the partition is already a
+      // tab partition (the default account's, a container's) the full policy is already installed and
+      // this is a no-op.
+      installSignInSessionPolicy(partition)
+      return openInAppSignInWindow(url, { partition, parent: mainWindow, onBlocked })
+    }
   })
 })
 ipcMain.handle('google_signin_pick_profile', (_event, profileId: string) => {
@@ -6873,9 +8519,12 @@ ipcMain.on('resize_view', (_event, bounds) => {
   if (wasViewVisible !== activeViewVisible) restartActiveArenaTitleSync()
 
   if (hidden) {
-    for (const [, view] of aiViews) {
+    for (const [id, view] of aiViews) {
       if (!view.webContents.isDestroyed()) {
         view.setVisible(false)
+        // Recorded so the next reconcile treats the return as "coming back from hidden" and asks for
+        // a strong repaint, instead of trusting geometry that never changed.
+        markViewVisibility(id, false)
         view.webContents.setBackgroundThrottling(true)
         view.webContents.setAudioMuted(true)
       }
@@ -6932,6 +8581,7 @@ ipcMain.on('resize_view', (_event, bounds) => {
   for (const [tabId, view] of aiViews) {
     if (tabId !== activeViewId && !view.webContents.isDestroyed()) {
       view.setVisible(false)
+      markViewVisibility(tabId, false)
       view.webContents.setBackgroundThrottling(true)
       view.webContents.setAudioMuted(true)
     }
@@ -6972,6 +8622,72 @@ ipcMain.on('toggle_focus_mode', (_event, enabled) => {
 })
 
 const lastThumbnailFiles = new Map<string, string>()
+
+/**
+ * Ctrl+V typed into the shell, routed to the prompt.
+ *
+ * The composer is not in this window: it lives in the tab's `WebContentsView`, which only receives
+ * keystrokes while it owns the keyboard. So with the sidebar, a panel or the tab strip focused, Ctrl+V
+ * did nothing at all — the clipboard event was delivered to a renderer with no editable target, and the
+ * AI page never heard about it. The renderer forwards that event here (see the capture-phase `paste`
+ * listener in App.tsx) and this handler does the three things a paste into the page actually needs:
+ * hand the keyboard over, put the caret back in the composer without moving it, then paste.
+ */
+let lastPasteRouteAt = 0
+
+/**
+ * Paste the clipboard into the active tab's composer.
+ *
+ * Two callers, because a paste can be reported twice: the shell's `before-input-event` (the keystroke
+ * itself, which is what happens when nothing in the shell is focused enough to produce a DOM paste
+ * event) and the renderer's capture-phase `paste` listener (the DOM event, when there is one). One
+ * function with a 300 ms debounce, so whichever arrives first wins and the other is a no-op — a double
+ * paste would be worse than the bug.
+ */
+/**
+ * Is the active tab's page the thing that currently has the keyboard?
+ *
+ * Asked of the webContents rather than of the remembered `keyboardOwner`: the flag records intent, and
+ * the intent that matters for a paste is where the keystroke is actually going. Clicking the sidebar does
+ * not necessarily flip the flag, but it does take the keyboard away from the page, and that is exactly
+ * the case a Ctrl+V has to be intercepted in.
+ */
+function activeViewHasKeyboard(): boolean {
+  const view = activeViewId ? aiViews.get(activeViewId) : null
+  try {
+    return Boolean(view && view.webContents && !view.webContents.isDestroyed() && view.webContents.isFocused())
+  } catch {
+    return false
+  }
+}
+
+function pasteIntoActiveView(source: string): void {
+  const now = Date.now()
+  if (now - lastPasteRouteAt < 300) {
+    traceNav(activeViewId || '', 'view', `paste ignored (${source}, duplicate)`, {})
+    return
+  }
+  // An overlay is on screen and has the keyboard on purpose; its own paste is the right one.
+  if (overlaysOpen) return
+  const tabId = activeViewId
+  const view = tabId ? aiViews.get(tabId) : null
+  if (!tabId || !view || view.webContents.isDestroyed()) return
+  lastPasteRouteAt = now
+  traceNav(tabId, 'view', `paste → composer (${source})`, {})
+  giveKeyboardToView(view, 'paste', tabId)
+  focusPromptInView(view, viewModelKeys.get(tabId))
+  // The page focuses its composer inside `executeJavaScript`, which resolves a frame later. Pasting in
+  // the same tick would land nowhere; 60 ms is well under a frame of human perception.
+  setTimeout(() => {
+    try {
+      if (!view.webContents.isDestroyed() && !overlaysOpen) view.webContents.paste()
+    } catch {
+      /* the view went away between the focus and the paste */
+    }
+  }, 60)
+}
+
+ipcMain.on('paste_to_active_view', () => pasteIntoActiveView('renderer'))
 
 ipcMain.handle('clipboard_write', (_, text) => {
   try {
@@ -7172,6 +8888,7 @@ ipcMain.handle('start_webview_preview', (_event, providerKey: string | null) => 
     previewRestoreBounds = { x: b.x, y: b.y, width: b.width, height: b.height }
     view.setBounds(lastRealBounds.get(tabId) ?? { x: 0, y: 0, width: 900, height: 700 })
     view.setVisible(false)
+    markViewVisibility(tabId, false)
   } else {
     previewRestoreBounds = null
   }
