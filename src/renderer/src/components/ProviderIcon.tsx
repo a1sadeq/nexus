@@ -10,11 +10,17 @@ import { BRAND_IDS } from '../lib/modelVisuals'
  *
  *   1. the SVG you configured for that provider in Settings → AI Providers;
  *   2. otherwise the built-in brand path for the key;
- *   3. otherwise the neutral mark.
+ *   3. otherwise the provider's own initial, drawn in the provider's colour;
+ *   4. otherwise the neutral mark.
  *
  * Step 1 is the point. The configured markup was being ignored in exactly the three places tabs
  * are drawn, so a custom icon appeared in the settings list, the model pills and the URL bar —
  * everywhere except the tab.
+ *
+ * Step 3 is what the tab row needed for providers added by hand. Steps 1 and 2 need something
+ * configured or a known brand, so a custom provider fell through to the neutral ring — the same ring
+ * for every one of them, which is why a freshly added provider looked like "the sparkle icon".
+ * The initial is different for each provider, carries the provider's colour, and needs no artwork.
  *
  * The markup is sanitised in `lib/providerIcon` before it reaches `dangerouslySetInnerHTML`.
  */
@@ -25,6 +31,11 @@ export interface ProviderIconProps {
   customSvg?: string
   color: string
   size?: number
+  /**
+   * The provider's name, used for the letter shown when there is no configured or brand icon — so a
+   * hand-added provider is identifiable rather than generic.
+   */
+  fallbackLabel?: string
   /** Selected tab: brighter, with a slightly stronger glow on the neutral fallback. */
   active?: boolean
   className?: string
@@ -35,6 +46,7 @@ export default function ProviderIcon({
   customSvg,
   color,
   size = 16,
+  fallbackLabel,
   active = false,
   className
 }: ProviderIconProps): ReactElement {
@@ -62,6 +74,28 @@ export default function ProviderIcon({
         data-provider-icon="brand"
       >
         <BrandIcon id={modelKey} size={size} />
+      </span>
+    )
+  }
+
+  const initial = (fallbackLabel || '').trim().charAt(0).toUpperCase()
+  if (initial) {
+    return (
+      <span
+        className={`provider-tab-icon provider-tab-initial ${className ?? ''}`.trim()}
+        style={{
+          width: size,
+          height: size,
+          color,
+          // Sized relative to the box so the letter scales with the slot it is given.
+          fontSize: Math.round(size * 0.68),
+          lineHeight: `${size}px`,
+          borderColor: color
+        }}
+        aria-hidden="true"
+        data-provider-icon="initial"
+      >
+        {initial}
       </span>
     )
   }

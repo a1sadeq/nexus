@@ -9,31 +9,63 @@
  *
  * `--provider-color` is set inline per row from the resolved provider colour; everything here is derived
  * from it, so adding a provider with any accent needs no CSS.
+ *
+ * Strength comes from `--tab-tint-scale` — the same Settings → Style Studio control as the tab rows
+ * (`lib/interfaceSettings`), so the two surfaces cannot be configured into disagreeing about how loud
+ * the colour should be. At 0 the rows are plain; the selected row still shows its accent border, because
+ * that is navigation state rather than decoration.
  */
 
 .newtab-provider {
   position: relative;
+  /* The scale is registered (as a <number>) in VerticalTabs.css; the fallback keeps this file
+     self-contained if it is ever imported on its own. */
   border-left: 3px solid transparent;
-  background: color-mix(in srgb, var(--provider-color, #8899aa) 5%, transparent);
+  background: color-mix(
+    in srgb,
+    var(--provider-color, #8899aa) calc(5% * var(--tab-tint-scale, 1)),
+    transparent
+  );
 }
 
 .newtab-provider:hover {
-  border-left-color: color-mix(in srgb, var(--provider-color, #8899aa) 70%, transparent);
-  background: color-mix(in srgb, var(--provider-color, #8899aa) 13%, transparent);
+  border-left-color: color-mix(
+    in srgb,
+    var(--provider-color, #8899aa) calc(70% * var(--tab-tint-scale, 1)),
+    transparent
+  );
+  background: color-mix(
+    in srgb,
+    var(--provider-color, #8899aa) calc(13% * var(--tab-tint-scale, 1)),
+    transparent
+  );
 }
 
 /* The provider the history pane is showing, while the list has focus. */
 .newtab-provider[data-selected='passive'] {
-  border-left-color: color-mix(in srgb, var(--provider-color, #8899aa) 80%, transparent);
-  background: color-mix(in srgb, var(--provider-color, #8899aa) 11%, transparent);
+  border-left-color: color-mix(
+    in srgb,
+    var(--provider-color, #8899aa) calc(80% * var(--tab-tint-scale, 1)),
+    transparent
+  );
+  background: color-mix(
+    in srgb,
+    var(--provider-color, #8899aa) calc(11% * var(--tab-tint-scale, 1)),
+    transparent
+  );
 }
 
 /* Press Enter here: the accent is the strongest thing on the screen. */
 .newtab-provider[data-selected='true'] {
   border-left-color: var(--provider-color, #8899aa);
-  background: color-mix(in srgb, var(--provider-color, #8899aa) 20%, transparent);
+  background: color-mix(
+    in srgb,
+    var(--provider-color, #8899aa) calc(20% * var(--tab-tint-scale, 1)),
+    transparent
+  );
   box-shadow:
-    inset 0 0 0 1px color-mix(in srgb, var(--provider-color, #8899aa) 45%, transparent),
+    inset 0 0 0 1px
+      color-mix(in srgb, var(--provider-color, #8899aa) calc(45% * var(--tab-tint-scale, 1)), transparent),
     inset 12px 0 22px -18px var(--provider-color, #8899aa);
 }
 

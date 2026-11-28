@@ -17,6 +17,8 @@ interface Props {
   modelColors?: Record<string, string>
   /** Configured per-provider SVG markup, keyed by provider key. */
   modelIcons?: Record<string, string>
+  /** Per-provider labels, for the initial shown when a provider has no configured/brand icon. */
+  modelNames?: Record<string, string>
   alwaysShowTitles?: boolean
   /** Per-tab container mark, so horizontal tabs identify their container too. */
   containerMarks?: Record<string, { color?: string; name: string; isDefault: boolean }>
@@ -36,6 +38,7 @@ export default function ChatTabs({
   onTogglePin,
   modelColors,
   modelIcons,
+  modelNames,
   containerMarks,
   tabNumbers,
   alwaysShowTitles = false
@@ -181,6 +184,7 @@ export default function ChatTabs({
               <ProviderIcon
                 modelKey={t.model}
                 customSvg={modelIcons?.[t.model]}
+                fallbackLabel={modelNames?.[t.model] || t.model}
                 color={tabColor(t)}
                 size={14}
                 active={isActive}
@@ -264,6 +268,7 @@ export default function ChatTabs({
                   <ProviderIcon
                     modelKey={t.model}
                     customSvg={modelIcons?.[t.model]}
+                    fallbackLabel={modelNames?.[t.model] || t.model}
                     color={tabColor(t)}
                     size={14}
                     active={activeId === t.id}

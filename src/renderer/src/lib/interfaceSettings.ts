@@ -10,6 +10,14 @@ export type MotionSpeed = 'smooth' | 'snappy' | 'reduced'
 export type OmniboxMode = 'live' | 'enter'
 export type DefaultSearchEngine = 'perplexity' | 'google' | 'duckduckgo'
 export type TabGlowStyle = 'pill-glow' | 'laser-line' | 'badge-neon' | 'subtle-dot' | 'brand-dot' | 'gradient-pill' | 'clean-border'
+/**
+ * How much of the provider's colour the tab rows carry.
+ *
+ * The rows are tinted per provider so a column of six tabs is not six identical grey bars. That
+ * treatment is taste, not a fact, so it is a setting: `off` is plain rows, `subtle`/`standard` are the
+ * build-42 look at two strengths, `vivid` is for people who want the colour to lead.
+ */
+export type TabRowTint = 'off' | 'subtle' | 'standard' | 'vivid'
 export type WebviewFocusPolicy = 'auto-hover' | 'standard'
 export type FontVibe = 'sans' | 'mono' | 'tech'
 export type ThemeAdaptation = 'smart' | 'preset-palette'
@@ -30,6 +38,8 @@ export interface InterfaceSettings {
   omniboxMode: OmniboxMode
   defaultSearchEngine: DefaultSearchEngine
   tabGlowStyle: TabGlowStyle
+  /** Strength of the per-provider tint on the tab rows. See `TabRowTint`. */
+  tabRowTint?: TabRowTint
   webviewFocusPolicy: WebviewFocusPolicy
   fontVibe: FontVibe
   cornerRadius: number
@@ -95,6 +105,7 @@ export const DEFAULT_INTERFACE_SETTINGS: InterfaceSettings = {
   omniboxMode: 'live',
   defaultSearchEngine: 'perplexity',
   tabGlowStyle: 'brand-dot',
+  tabRowTint: 'standard',
   webviewFocusPolicy: 'auto-hover',
   fontVibe: 'sans',
   cornerRadius: 14,
@@ -588,6 +599,12 @@ export function applyInterfaceCssVariables(settings: InterfaceSettings, activeTh
   document.body.dataset.iconStroke = settings.iconStrokeWeight || 'standard'
   document.body.dataset.iconGlow = settings.iconGlowEffect ? 'true' : 'false'
   document.body.dataset.tabGlow = settings.tabGlowStyle
+
+  // Provider tint on the tab rows. Multiplier consumed by VerticalTabs.css / NewTabOverlay.css, so
+  // one number moves every tinted surface (row gradient, border, hover glow, sleeping row, number
+  // badge, accent bar) together instead of each one being adjusted separately.
+  root.style.setProperty('--tab-tint-scale', String(tabRowTintScale(settings.tabRowTint)))
+  document.body.dataset.tabRowTint = settings.tabRowTint || 'standard'
   document.body.dataset.glassmorphism = settings.glassmorphism
   document.body.dataset.motionSpeed = settings.motionSpeed
   document.body.dataset.fontVibe = settings.fontVibe || 'sans'
@@ -605,4 +622,18 @@ export function applyInterfaceCssVariables(settings: InterfaceSettings, activeTh
   } else if (globalStyleEl) {
     globalStyleEl.remove()
   }
+}
+
+/** Tint multipliers behind `TabRowTint`. 1 is the build-42 look, so `standard` is the default. */
+export const TAB_ROW_TINT_SCALE: Record<TabRowTint, number> = {
+  off: 0,
+  subtle: 0.55,
+  standard: 1,
+  vivid: 1.7
+}
+
+/** The number `--tab-tint-scale` is set to. Unknown/absent values fall back to `standard`. */
+export function tabRowTintScale(tint?: TabRowTint | null): number {
+  if (!tint) return TAB_ROW_TINT_SCALE.standard
+  return TAB_ROW_TINT_SCALE[tint] ?? TAB_ROW_TINT_SCALE.standard
 }

@@ -35,7 +35,7 @@ import ContainerManager from './components/ContainerManager'
 import VerticalTabs from './components/VerticalTabs'
 import type { TabAiStatus } from './lib/tabStatus'
 import { BRAND_IDS, modelLabel } from './lib/modelVisuals'
-import { providerColorFor, providerColorMap, providerIconFor } from './lib/providerVisuals'
+import { providerColorFor, providerColorMap, providerIconFor, providerLabelFor } from './lib/providerVisuals'
 import { BrandIcon, IconPanelLeft, IconPanelLeftClose, IconSearch, IconPlus } from './components/BrandIcons'
 import { pushClosedTab, reopenClosedTab, type ClosedTabEntry } from './lib/tabs'
 import type { SkillDef } from '../../shared/skills'
@@ -90,7 +90,7 @@ import './App.css'
 
 /** Bumped whenever this file's UI changes, so a stale bundle is obvious at a glance
  *  (`document.querySelector('[data-nexus-build]')` in devtools). */
-const NEXUS_UI_BUILD = '16'
+const NEXUS_UI_BUILD = '17'
 
 /** Where the "the guide has been seen" state lives. Set on close, cleared by "Tour again". */
 const GUIDE_SEEN_KEY = 'vicinae.guide.seen.v1'
@@ -671,6 +671,13 @@ function App() {
       const icon = providerIconFor(m.key, models)
       if (icon) map[m.key] = icon
     }
+    return map
+  }, [models])
+  // Provider names for the tab rows: the configured icon comes from `modelIcons`, the brand icon from
+  // the key, and the initial (the last resort before the neutral mark) from the provider's label.
+  const modelNames = useMemo(() => {
+    const map: Record<string, string> = {}
+    for (const m of models) map[m.key] = providerLabelFor(m.key, models)
     return map
   }, [models])
   const colorFor = (key: string) => providerColorFor(key, models)
@@ -2632,6 +2639,7 @@ Acknowledge these skills with a concise confirmation in this exact format:
               }}
               modelColors={modelColors}
               modelIcons={modelIcons}
+              modelNames={modelNames}
               pinnedSection={interfaceSettings.pinnedPosition === 'section'}
             />
           ) : (
@@ -3190,6 +3198,7 @@ Acknowledge these skills with a concise confirmation in this exact format:
                 containerMarks={containerMarks}
                 modelColors={modelColors}
                 modelIcons={modelIcons}
+                modelNames={modelNames}
                 onSelect={(id: string) => {
                   const t = tabs.find((x) => x.id === id)
                   if (t && t.url) switchToTab(t.id, t.url)
@@ -3403,6 +3412,7 @@ Acknowledge these skills with a concise confirmation in this exact format:
                 pinnedIds={pinnedIds}
                 modelColors={modelColors}
                 modelIcons={modelIcons}
+                modelNames={modelNames}
                 onSelect={(id: string) => {
                   const t = tabs.find((x) => x.id === id)
                   if (t && t.url) switchToTab(t.id, t.url)

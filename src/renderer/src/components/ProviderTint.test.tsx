@@ -170,3 +170,55 @@ describe('the new-tab provider list is coloured by the configured accent', () =>
     expect(css).toContain('border-left-color: var(--provider-color')
   })
 })
+
+describe('a tab row draws the provider’s own icon (build 43)', () => {
+  const renderWithIcons = async (
+    modelIcons?: Record<string, string>,
+    modelNames?: Record<string, string>
+  ) => {
+    await act(async () => {
+      root.render(
+        <VerticalTabs
+          tabs={tabs}
+          activeId="tab-1"
+          sidebarCollapsed={false}
+          onSelect={vi.fn()}
+          onClose={vi.fn()}
+          onTogglePin={vi.fn()}
+          modelColors={{ gemini: '#123456', mine: '#ff8800' }}
+          modelIcons={modelIcons}
+          modelNames={modelNames}
+        />
+      )
+    })
+  }
+
+  it('renders the SVG configured in Settings → AI Providers, on the row itself', async () => {
+    await renderWithIcons(
+      { mine: '<svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" /></svg>' },
+      { mine: 'Mine' }
+    )
+    const row = rowOf('tab-2')
+    expect(row.querySelector('[data-provider-icon="custom"]')).not.toBeNull()
+    expect(row.querySelector('rect')).not.toBeNull()
+    expect(row.querySelector('[data-tab-provider-mark]')).toBeNull()
+  })
+
+  it('never falls back to a shared generic mark for a hand-added provider', async () => {
+    await renderWithIcons(undefined, { mine: 'Mine' })
+    const row = rowOf('tab-2')
+    const initial = row.querySelector('[data-provider-icon="initial"]')
+    expect(initial?.textContent).toBe('M')
+    expect(row.querySelector('[data-tab-provider-mark]')).toBeNull()
+  })
+
+  it('still prefers the configured icon over the initial', async () => {
+    await renderWithIcons(
+      { mine: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" /></svg>' },
+      { mine: 'Mine' }
+    )
+    const row = rowOf('tab-2')
+    expect(row.querySelector('[data-provider-icon="custom"]')).not.toBeNull()
+    expect(row.querySelector('[data-provider-icon="initial"]')).toBeNull()
+  })
+})

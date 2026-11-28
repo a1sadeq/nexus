@@ -4,6 +4,8 @@ import {
   deduplicateModels,
   modelLabel,
   modelColor,
+  deriveProviderColor,
+  PROVIDER_COLOR_PALETTE,
   getProviderGradient,
   getEffectiveProviderColor,
   deriveSecondaryGradientColor,
@@ -49,7 +51,21 @@ describe('modelVisuals', () => {
     expect(modelLabel('gemini')).toBe('Gemini')
     expect(modelLabel('chatgpt')).toBe('ChatGPT')
     expect(modelColor('gemini')).toBe('#22d3ee')
-    expect(modelColor('unknown-custom')).toBe('#818cf8')
+    // A provider nobody gave a colour to is no longer flat indigo: it gets a stable palette colour.
+    expect(modelColor('unknown-custom')).toBe(deriveProviderColor('unknown-custom'))
+    expect(modelColor('unknown-custom')).not.toBe('#818cf8')
+  })
+
+  it('gives an unconfigured provider its own stable colour instead of a shared blue', () => {
+    // Stable: the same key is the same colour in any session.
+    expect(deriveProviderColor('my-custom')).toBe(deriveProviderColor('MY-CUSTOM '))
+    // Distinguishable: two custom providers do not land on the same colour.
+    expect(deriveProviderColor('my-custom')).not.toBe(deriveProviderColor('other-custom'))
+    // On-palette, and never the old flat indigo.
+    expect(PROVIDER_COLOR_PALETTE).toContain(deriveProviderColor('my-custom'))
+    expect(deriveProviderColor('my-custom')).not.toBe('#818cf8')
+    // Brand providers keep their brand colour.
+    expect(modelColor('gemini')).toBe('#22d3ee')
   })
 
   it('provides signature dual-tone gradients and respects custom user colors', () => {

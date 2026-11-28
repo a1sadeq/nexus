@@ -1,5 +1,15 @@
 /* VerticalTabs — Spatial Cockpit Arc-Reactor & Session Separation Styling */
 
+/* How much provider colour the tab rows carry, set from Settings → Style Studio (Tab Row Colour) as a
+   plain number: 0 = plain rows, 1 = the standard tint, >1 = stronger. Registered as a <number> so the
+   `calc()` percentages below are typed rather than parsed as an opaque token, and inheriting so the
+   rows, their badges and the new-tab list all read the same value. */
+@property --tab-tint-scale {
+  syntax: '<number>';
+  inherits: true;
+  initial-value: 1;
+}
+
 .vertical-tab-active-core-dot {
   position: relative;
   width: 6px;
@@ -140,22 +150,50 @@
 .vertical-tab-provider {
   background: linear-gradient(
     135deg,
-    color-mix(in srgb, var(--provider-gradient-start, var(--provider-color, #00e5ff)) 14%, var(--surface2, #0f3460)),
-    color-mix(in srgb, var(--provider-gradient-end, var(--provider-color, #00e5ff)) 8%, var(--surface, #16213e))
+    color-mix(
+      in srgb,
+      var(--provider-gradient-start, var(--provider-color, #00e5ff)) calc(14% * var(--tab-tint-scale, 1)),
+      var(--surface2, #0f3460)
+    ),
+    color-mix(
+      in srgb,
+      var(--provider-gradient-end, var(--provider-color, #00e5ff)) calc(8% * var(--tab-tint-scale, 1)),
+      var(--surface, #16213e)
+    )
   ) !important;
-  border-color: color-mix(in srgb, var(--provider-color, #00e5ff) 32%, transparent) !important;
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--provider-color, #00e5ff) 8%, transparent);
+  /* Mixed into the neutral border rather than into `transparent`, so a tint strength of 0 gives an
+     ordinary grey row instead of a row with no border at all. */
+  border-color: color-mix(
+    in srgb,
+    var(--provider-color, #00e5ff) calc(32% * var(--tab-tint-scale, 1)),
+    var(--border, #2a3555)
+  ) !important;
+  box-shadow: inset 0 0 0 1px
+    color-mix(in srgb, var(--provider-color, #00e5ff) calc(8% * var(--tab-tint-scale, 1)), transparent);
 }
 
 .vertical-tab-provider:hover {
   background: linear-gradient(
     135deg,
-    color-mix(in srgb, var(--provider-gradient-start, var(--provider-color, #00e5ff)) 22%, var(--surface2, #0f3460)),
-    color-mix(in srgb, var(--provider-gradient-end, var(--provider-color, #00e5ff)) 14%, var(--surface, #16213e))
+    color-mix(
+      in srgb,
+      var(--provider-gradient-start, var(--provider-color, #00e5ff)) calc(22% * var(--tab-tint-scale, 1)),
+      var(--surface2, #0f3460)
+    ),
+    color-mix(
+      in srgb,
+      var(--provider-gradient-end, var(--provider-color, #00e5ff)) calc(14% * var(--tab-tint-scale, 1)),
+      var(--surface, #16213e)
+    )
   ) !important;
-  border-color: color-mix(in srgb, var(--provider-color, #00e5ff) 58%, transparent) !important;
+  border-color: color-mix(
+    in srgb,
+    var(--provider-color, #00e5ff) calc(58% * var(--tab-tint-scale, 1)),
+    var(--border, #2a3555)
+  ) !important;
   box-shadow:
-    0 0 12px color-mix(in srgb, var(--provider-color, #00e5ff) 20%, transparent),
+    0 0 calc(12px * var(--tab-tint-scale, 1))
+      color-mix(in srgb, var(--provider-color, #00e5ff) calc(20% * var(--tab-tint-scale, 1)), transparent),
     inset 0 1px 0 rgba(255, 255, 255, 0.06);
 }
 
@@ -163,14 +201,34 @@
 .vertical-tab-provider.vertical-tab-sleeping {
   background: linear-gradient(
     135deg,
-    color-mix(in srgb, var(--provider-color, #00e5ff) 7%, var(--surface, #16213e)),
-    color-mix(in srgb, var(--provider-color, #00e5ff) 4%, var(--bg, #1a1a2e))
+    color-mix(
+      in srgb,
+      var(--provider-color, #00e5ff) calc(7% * var(--tab-tint-scale, 1)),
+      var(--surface, #16213e)
+    ),
+    color-mix(
+      in srgb,
+      var(--provider-color, #00e5ff) calc(4% * var(--tab-tint-scale, 1)),
+      var(--bg, #1a1a2e)
+    )
   ) !important;
-  border-color: color-mix(in srgb, var(--provider-color, #00e5ff) 18%, transparent) !important;
+  border-color: color-mix(
+    in srgb,
+    var(--provider-color, #00e5ff) calc(18% * var(--tab-tint-scale, 1)),
+    var(--border, #2a3555)
+  ) !important;
 }
 
 .vertical-tab-provider .vertical-tab-number {
-  color: color-mix(in srgb, var(--provider-color, #00e5ff) 70%, #ffffff);
-  border-color: color-mix(in srgb, var(--provider-color, #00e5ff) 40%, transparent);
-  background: color-mix(in srgb, var(--provider-color, #00e5ff) 12%, rgba(0, 0, 0, 0.35));
+  color: color-mix(in srgb, var(--provider-color, #00e5ff) calc(70% * var(--tab-tint-scale, 1)), #ffffff);
+  border-color: color-mix(
+    in srgb,
+    var(--provider-color, #00e5ff) calc(40% * var(--tab-tint-scale, 1)),
+    var(--border, #2a3555)
+  );
+  background: color-mix(
+    in srgb,
+    var(--provider-color, #00e5ff) calc(12% * var(--tab-tint-scale, 1)),
+    rgba(0, 0, 0, 0.35)
+  );
 }

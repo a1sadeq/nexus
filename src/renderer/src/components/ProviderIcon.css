@@ -17,3 +17,16 @@
      icon follow the provider colour without editing the user's SVG. */
   color: inherit;
 }
+
+/* Step 3 of the ProviderIcon order: no configured SVG, no brand path — show the provider's own
+   initial in its own colour, so two hand-added providers never look like the same provider. */
+.provider-tab-initial {
+  border-radius: 5px;
+  border: 1px solid currentColor;
+  font-weight: 700;
+  text-align: center;
+  letter-spacing: 0;
+  text-transform: uppercase;
+  box-sizing: border-box;
+  background: color-mix(in srgb, currentColor 14%, transparent);
+}

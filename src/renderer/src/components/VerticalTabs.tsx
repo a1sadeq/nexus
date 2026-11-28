@@ -28,6 +28,12 @@ interface Props {
   /** Configured per-provider SVG markup, keyed by provider key. */
   modelIcons?: Record<string, string>
   /**
+   * Per-provider labels, keyed by provider key. The row shows the provider's initial when it has
+   * neither a configured icon nor a brand icon, so the letter has to come from the provider's own
+   * name rather than from the tab title (a chat's title says nothing about the provider).
+   */
+  modelNames?: Record<string, string>
+  /**
    * Render pinned tabs as their own section above Active Sessions instead of sorting them to
    * the top of that list. The caller decides, because the same list is also drawn at the bottom
    * of the window and in the pinned sidebar.
@@ -60,6 +66,7 @@ export default function VerticalTabs({
   onReorder,
   modelColors,
   modelIcons,
+  modelNames,
   pinnedSection = false,
   containerMarks,
   tabNumbers
@@ -224,6 +231,7 @@ export default function VerticalTabs({
           <ProviderIcon
             modelKey={t.model}
             customSvg={modelIcons?.[t.model]}
+            fallbackLabel={modelNames?.[t.model] || t.model}
             color={color}
             size={16}
             active={isActive}

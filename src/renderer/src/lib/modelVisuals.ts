@@ -148,8 +148,46 @@ export function modelLabel(model: string): string {
   return model.charAt(0).toUpperCase() + model.slice(1)
 }
 
+/**
+ * Colours for providers that have neither a configured colour nor a known brand colour.
+ *
+ * Every one of them used to get the same indigo (`#818cf8`), so a provider you added yourself — and
+ * every tab belonging to it — arrived blue. With several custom providers the list became a column of
+ * identical blue rows, which is the opposite of what the colour is for. Picking from this palette by a
+ * hash of the key keeps a provider's colour stable across restarts, keeps two providers apart, and
+ * still keeps each one legible on the dark surfaces.
+ */
+export const PROVIDER_COLOR_PALETTE: readonly string[] = [
+  '#f59e0b',
+  '#22d3ee',
+  '#a78bfa',
+  '#34d399',
+  '#fb7185',
+  '#38bdf8',
+  '#f472b6',
+  '#c084fc',
+  '#2dd4bf',
+  '#fbbf24',
+  '#f97316',
+  '#4ade80'
+]
+
+/**
+ * A stable colour for a provider nobody gave one to. Same key in, same colour out, in every session
+ * and on every surface; no randomness, no ordering dependence.
+ */
+export function deriveProviderColor(key: string): string {
+  const normalised = (key || '').toLowerCase().trim()
+  if (!normalised) return PROVIDER_COLOR_PALETTE[0]
+  let hash = 0
+  for (let i = 0; i < normalised.length; i++) {
+    hash = (hash * 31 + normalised.charCodeAt(i)) >>> 0
+  }
+  return PROVIDER_COLOR_PALETTE[hash % PROVIDER_COLOR_PALETTE.length]
+}
+
 export function modelColor(model: string): string {
-  return DOT_COLOR[model.toLowerCase()] || '#818cf8'
+  return DOT_COLOR[model.toLowerCase()] || deriveProviderColor(model)
 }
 
 export function generateProviderKey(label: string, existingKeys: string[] = []): string {
@@ -208,4 +246,3 @@ export function deduplicateModels(models: ModelDef[]): ModelDef[] {
 
   return result
 }
-

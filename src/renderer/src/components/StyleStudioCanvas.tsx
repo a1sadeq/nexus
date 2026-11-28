@@ -18,8 +18,10 @@ import {
 import {
   type InterfaceSettings,
   type AestheticPreset,
+  type TabRowTint,
   isPresetModified,
-  computeSurfaceColors
+  computeSurfaceColors,
+  TAB_ROW_TINT_SCALE
 } from '../lib/interfaceSettings'
 import { IconConfigProvider, type IconPack } from '../lib/iconContext'
 import { modelColor, modelLabel } from '../lib/modelVisuals'
@@ -98,6 +100,10 @@ export const StyleStudioCanvas: React.FC<Props> = ({
   const effIconGlow = (isGlobal ? interfaceSettings.iconGlowEffect : prov.iconGlowEffect) ?? interfaceSettings.iconGlowEffect
 
   const effTabGlow = (isGlobal ? interfaceSettings.tabGlowStyle : prov.tabGlowStyle) || interfaceSettings.tabGlowStyle || 'pill-glow'
+  // Window-wide on purpose: the tint is what tells a column of tabs apart, so it is a property of the
+  // tab list, not of any one provider. A per-provider tint strength would give two rows in the same
+  // list different weights of the same idea.
+  const effTabRowTint: TabRowTint = interfaceSettings.tabRowTint || 'standard'
 
   const effAura = (isGlobal ? interfaceSettings.webviewAmbientAura : prov.ambientAura) ?? interfaceSettings.webviewAmbientAura
   const effAuraMode = (isGlobal ? interfaceSettings.ambientAuraMode : prov.ambientAuraMode) || interfaceSettings.ambientAuraMode || 'viewport-frame'
@@ -1250,6 +1256,95 @@ export const StyleStudioCanvas: React.FC<Props> = ({
               )
             })}
           </div>
+        </div>
+      )}
+
+      {/* 6b. Provider Colour on the Tab Rows (Emerald Theme) */}
+      {matchFilter('layout', ['tab', 'row', 'provider', 'tint', 'colour', 'color', 'accent', 'row colour']) && (
+        <div
+          className="col-span-1 xl:col-span-2 p-4 sm:p-5 rounded-2xl border flex flex-col gap-4 relative overflow-hidden transition-all shadow-lg"
+          style={{
+            background: 'linear-gradient(145deg, rgba(16, 185, 129, 0.08) 0%, rgba(15, 17, 26, 0.95) 100%)',
+            borderColor: 'rgba(16, 185, 129, 0.28)',
+            boxShadow: '0 8px 30px rgba(0, 0, 0, 0.4), 0 0 25px rgba(16, 185, 129, 0.12)'
+          }}
+        >
+          <div className="flex items-center justify-between border-b pb-3" style={{ borderColor: 'rgba(16, 185, 129, 0.18)' }}>
+            <div className="flex items-center gap-3">
+              <div className="w-8 h-8 rounded-xl flex items-center justify-center bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shrink-0">
+                <IconLayers size={16} />
+              </div>
+              <div>
+                <h3 className="font-bold text-sm sm:text-base text-white">Provider Colour on Tab Rows</h3>
+                <p className="text-xs text-emerald-200/75 mt-0.5">
+                  How strongly each tab row, its number badge and the new-tab list carry the provider's colour
+                </p>
+              </div>
+            </div>
+            <span className="text-[10px] font-mono font-bold px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 uppercase tracking-wider">
+              Window-wide
+            </span>
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            {([
+              { id: 'off' as TabRowTint, label: 'Off', desc: 'Plain rows, no tint' },
+              { id: 'subtle' as TabRowTint, label: 'Subtle', desc: 'A hint of colour' },
+              { id: 'standard' as TabRowTint, label: 'Standard', desc: 'Default balance' },
+              { id: 'vivid' as TabRowTint, label: 'Vivid', desc: 'Colour leads the row' }
+            ]).map((t) => {
+              const isSel = effTabRowTint === t.id
+              const scale = TAB_ROW_TINT_SCALE[t.id]
+              return (
+                <button
+                  key={t.id}
+                  type="button"
+                  onClick={() => updateInterfaceSetting('tabRowTint', t.id)}
+                  className="p-2.5 rounded-xl border flex flex-col items-stretch gap-2 transition-all cursor-pointer text-left"
+                  style={{
+                    background: isSel ? 'rgba(16, 185, 129, 0.18)' : 'rgba(0,0,0,0.3)',
+                    borderColor: isSel ? '#10b981' : 'rgba(255,255,255,0.08)',
+                    boxShadow: isSel ? '0 0 14px rgba(16, 185, 129, 0.3)' : 'none'
+                  }}
+                  aria-pressed={isSel}
+                >
+                  {/* Miniature of the actual row treatment, so the choice is visible before it is made. */}
+                  <span
+                    className="flex items-center gap-2 px-2 py-1.5 rounded-md"
+                    style={{
+                      background: `linear-gradient(135deg, color-mix(in srgb, ${effAccent} ${Math.round(14 * scale)}%, var(--surface2)), color-mix(in srgb, ${effAccent} ${Math.round(8 * scale)}%, var(--surface)))`,
+                      border: `1px solid color-mix(in srgb, ${effAccent} ${Math.round(32 * scale)}%, var(--border, #2a3555))`
+                    }}
+                  >
+                    <span
+                      className="flex items-center justify-center font-bold shrink-0"
+                      style={{
+                        width: 14,
+                        height: 14,
+                        borderRadius: 4,
+                        fontSize: 9,
+                        lineHeight: '14px',
+                        color: `color-mix(in srgb, ${effAccent} ${Math.round(70 * scale)}%, #ffffff)`,
+                        border: `1px solid color-mix(in srgb, ${effAccent} ${Math.round(40 * scale)}%, var(--border, #2a3555))`,
+                        background: `color-mix(in srgb, ${effAccent} ${Math.round(12 * scale)}%, rgba(0,0,0,0.35))`,
+                        textAlign: 'center'
+                      }}
+                    >
+                      1
+                    </span>
+                    <span className="text-[10px] font-semibold text-white/90 truncate">Session</span>
+                  </span>
+                  <span className="font-bold text-xs text-white">{t.label}</span>
+                  <span className="text-[10px] opacity-70">{t.desc}</span>
+                </button>
+              )
+            })}
+          </div>
+
+          <p className="text-[11px] leading-relaxed opacity-70 text-(--text2)">
+            The colour itself comes from each provider — Settings → AI Providers, or the provider's brand colour —
+            so this only decides how much of it the rows carry. It applies to every tab list at once.
+          </p>
         </div>
       )}
 
