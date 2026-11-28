@@ -91,7 +91,7 @@ import './App.css'
 
 /** Bumped whenever this file's UI changes, so a stale bundle is obvious at a glance
  *  (`document.querySelector('[data-nexus-build]')` in devtools). */
-const NEXUS_UI_BUILD = '23'
+const NEXUS_UI_BUILD = '24'
 
 /** Where the "the guide has been seen" state lives. Set on close, cleared by "Tour again". */
 /**
@@ -892,6 +892,39 @@ Acknowledge these skills with a concise confirmation in this exact format:
     }
   })
   useEffect(() => { pinnedIdsRef.current = pinnedIds }, [pinnedIds])
+
+  /**
+   * Tell the stylesheet whether this window is in the foreground.
+   *
+   * The sidebar is full of loops that never end on purpose — a breathing arc on the active tab, a
+   * ripple on the container ring, a slow shimmer across the label. Each one is cheap; together, on five
+   * rows, they keep the compositor awake at 60 frames a second for a window that is behind an editor.
+   * `App.css` pauses every animation and transition under
+   * `html[data-window-focus='blurred']`, and this is what sets it.
+   *
+   * Both signals are used: the DOM's own focus/blur (which follows what the compositor thinks) and the
+   * main process's verdict (which follows the real OS window, and is the only one that is right when
+   * the window is covered rather than unfocused).
+   */
+  useEffect(() => {
+    const apply = (focused: boolean): void => {
+      document.documentElement.dataset.windowFocus = focused ? 'focused' : 'blurred'
+    }
+    const onFocus = (): void => apply(true)
+    const onBlur = (): void => apply(false)
+    window.addEventListener('focus', onFocus)
+    window.addEventListener('blur', onBlur)
+    apply(typeof document.hasFocus === 'function' ? document.hasFocus() : true)
+    const off = window.electron?.ipcRenderer?.on(
+      'window-focus-changed',
+      (_event: unknown, focused: boolean): void => apply(Boolean(focused))
+    )
+    return () => {
+      window.removeEventListener('focus', onFocus)
+      window.removeEventListener('blur', onBlur)
+      if (typeof off === 'function') off()
+    }
+  }, [])
 
   // What each address was the last time it was open: pinned or not, its two colours, its place in the
   // list. Kept here rather than on the tab because the tab row is the wrong lifetime — closing a tab and

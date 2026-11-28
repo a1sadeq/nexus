@@ -543,6 +543,8 @@ function probeSurfaceState(
  * paint, no navigation in flight, a cooldown, and a hard cap per tab per run.
  */
 const surfaceRestartBudget = new Map<string, RestartBudget>()
+/** Tabs that have produced a blank frame at least once this run. Only these pay for a probe on a switch. */
+const surfaceSuspects = new Set<string>()
 const lastSurfaceProbe = new Map<string, number>()
 /** The shortest gap between two pixel probes for the same tab. */
 const SURFACE_PROBE_COOLDOWN_MS = 1500
@@ -598,6 +600,16 @@ async function readSurfaceSample(view: Electron.WebContentsView): Promise<{
 function probePaintedSurface(tabId: string, view: Electron.WebContentsView, reason: string): void {
   if (!tabId || !view || view.webContents.isDestroyed()) return
   if (tabId !== activeViewId || !activeViewVisible || overlaysOpen) return
+  // Nobody is looking at a hidden or minimised window, and reading a frame back is the most expensive
+  // thing in this file (it is a GPU readback). The one case that must still be checked is a window that
+  // is on screen but has lost focus — the user is watching it from another window.
+  try {
+    if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible() || mainWindow.isMinimized()) {
+      return
+    }
+  } catch {
+    return
+  }
   const now = Date.now()
   const lastProbe = lastSurfaceProbe.get(tabId) ?? 0
   if (now - lastProbe < SURFACE_PROBE_COOLDOWN_MS) return
@@ -622,6 +634,8 @@ function probePaintedSurface(tabId: string, view: Electron.WebContentsView, reas
       loading: sample.loading
     })
     if (verdict !== 'blank-surface') return
+    // Watch this tab from now on: it has produced a frame that was not there.
+    surfaceSuspects.add(tabId)
 
     const decision = mayRestartSurface(surfaceRestartBudget.get(tabId), Date.now())
     if (!decision.allowed) {
@@ -709,10 +723,12 @@ function ensureActiveViewPresented(reason: string, mode: PresentMode = 'suspect'
     if (mode !== 'cheap') {
       setTimeout(() => probeSurfaceState(tabId, view, `${reason} / settle probe`, true), 300)
     }
-    // Then the only witness that cannot be fooled. A wedged tab looks exactly like a healthy one to
-    // every check above, and the user finds out by looking at it — so look at the pixels, once the
-    // repaint has had time to land, throttled per tab.
-    scheduleSurfaceProbe(tabId, view, `${reason} / after repaint`)
+    // Then the only witness that cannot be fooled — but only for a tab that has been caught blank
+    // before. Reading a frame back on every tab switch was costing a GPU readback per switch to prove
+    // that five healthy pages were healthy; the tab that went blank once is the one worth watching.
+    if (surfaceSuspects.has(tabId)) {
+      scheduleSurfaceProbe(tabId, view, `${reason} / after repaint`)
+    }
     return
   }
 
@@ -788,6 +804,56 @@ const shownFromHidden = new Set<string>()
 function markViewVisibility(tabId: string, visible: boolean): void {
   if (!tabId) return
   presentedVisible.set(tabId, visible)
+  scheduleFrameBudgets()
+}
+
+/**
+ * A frame budget per view: 60/s for the one on screen, 1/s for everything else.
+ *
+ * Five AI pages are resident at once, and — this is the part that costs the CPU — a hidden
+ * `WebContentsView` is not a hidden *page*. The window is visible, so every page still believes it is
+ * on screen: its timers keep their full rate, its CSS keeps animating, its charts keep redrawing. That
+ * is four pages' worth of work per second drawn for nobody, and it is invisible in the diagnostics
+ * because Electron reports 0% CPU on Linux (see `cpuSampler.ts`).
+ *
+ * `setFrameRate` is the one lever that is about frames rather than timers: a view budgeted to one frame
+ * per second still runs its JavaScript, but it stops producing sixty frames a second of nothing. It is
+ * applied from the single place that records visibility, so activation, an overlay opening, a window
+ * losing focus and a discard all reach it without any of them having to remember to.
+ *
+ * Guarded on every call: a destroyed view, an Electron without the method, or a view that never became
+ * visible must never throw here. The failure mode of this being wrong is a dropped frame in a tab
+ * nobody is looking at, which is the whole point.
+ */
+const VIEW_FRAME_RATE_ACTIVE = 60
+const VIEW_FRAME_RATE_BACKGROUND = 1
+let frameBudgetTimer: NodeJS.Timeout | null = null
+
+function applyFrameBudgets(): void {
+  const windowVisible = Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() && !mainWindow.isMinimized())
+  for (const [tabId, view] of aiViews) {
+    let target = VIEW_FRAME_RATE_BACKGROUND
+    if (windowVisible && tabId === activeViewId && activeViewVisible && !overlaysOpen) {
+      target = VIEW_FRAME_RATE_ACTIVE
+    }
+    try {
+      const contents = view.webContents as unknown as { setFrameRate?: (fps: number) => void; isDestroyed?: () => boolean }
+      if (!contents || (contents.isDestroyed && contents.isDestroyed())) continue
+      contents.setFrameRate?.(target)
+    } catch {
+      /* the platform does not honour a frame budget: nothing is painted wrong, only unmetered */
+    }
+  }
+}
+
+/** Coalesced: visibility for five views changes inside one tick, and this must not run five times. */
+function scheduleFrameBudgets(): void {
+  if (frameBudgetTimer) return
+  frameBudgetTimer = setTimeout(() => {
+    frameBudgetTimer = null
+    applyFrameBudgets()
+  }, 0)
+  if (typeof frameBudgetTimer.unref === 'function') frameBudgetTimer.unref()
 }
 
 /** True when this tab's view was hidden the last time its visibility was set. */
@@ -4996,8 +5062,14 @@ function createWindow() {
   }
 
   // Stop screenshot capture and throttle background webviews when hidden/minimized
-  mainWindow.on('hide', suspendAllViews)
-  mainWindow.on('minimize', suspendAllViews)
+  mainWindow.on('hide', () => {
+    suspendAllViews()
+    scheduleFrameBudgets()
+  })
+  mainWindow.on('minimize', () => {
+    suspendAllViews()
+    scheduleFrameBudgets()
+  })
   mainWindow.on('maximize', () => {
     sendToMainWindow('window_maximized_changed', true)
   })
@@ -5022,8 +5094,14 @@ function createWindow() {
       /* window tearing down — nothing to repaint */
     }
   }
-  mainWindow.on('show', resumeActiveView)
-  mainWindow.on('restore', resumeActiveView)
+  mainWindow.on('show', () => {
+    resumeActiveView()
+    scheduleFrameBudgets()
+  })
+  mainWindow.on('restore', () => {
+    resumeActiveView()
+    scheduleFrameBudgets()
+  })
   // Waking from sleep is another way to come back to a surface the compositor dropped.
   // Registered once per app, not per window, and only touches the visible view.
   if (!powerResumeHookRegistered) {

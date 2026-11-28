@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { writeFileSync, mkdirSync } from 'node:fs'
 import os from 'node:os'
 import { getCacheStats, type CacheStats } from './cachePruningManager'
+import { completeProcSamples, takeProcSamples, type CpuSample } from './cpuSampler'
 
 export interface ProcessDiagnostic {
   pid: number
@@ -109,10 +110,22 @@ export async function captureDiagnosticReport(
   context: DiagnosticsContext,
   samplingMs: number = 2000
 ): Promise<DiagnosticReport> {
-  // Sample initial metrics
+  // Sample initial metrics. On Linux the CPU figure has to be *measured*: Electron's
+  // `percentCPUUsage` is a Windows/macOS measurement and comes back as 0 here, which is why a report
+  // sent to answer "huge CPU usage" could not name a single process. Take the `/proc` readings before
+  // the wait, and the second reading after it.
+  let procSamples: CpuSample[] = []
+  const samplingStart = Date.now()
+  const pids = (typeof app.getAppMetrics === 'function' ? app.getAppMetrics() : []).map((m) => m.pid)
+  if (samplingMs > 0 && process.platform === 'linux') {
+    procSamples = takeProcSamples([process.pid, ...pids])
+  }
   if (samplingMs > 0) {
     await new Promise((resolve) => setTimeout(resolve, samplingMs))
   }
+  const measured = procSamples.length
+    ? completeProcSamples(procSamples, Math.max(1, Date.now() - samplingStart))
+    : null
 
   const rawMetrics: ProcessMetric[] = typeof app.getAppMetrics === 'function' ? app.getAppMetrics() : []
   const mainPid = process.pid
@@ -174,7 +187,12 @@ export async function captureDiagnosticReport(
     const peakMB = Math.round((m.memory.peakWorkingSetSize / 1024) * 10) / 10
     const privMB = Math.round(((m.memory.privateBytes || 0) / 1024) * 10) / 10
     const sharedMB = Math.round((((m.memory as any).sharedBytes || 0) / 1024) * 10) / 10
-    const cpu = Math.round(m.cpu.percentCPUUsage * 10) / 10
+    // Measured where it can be measured, Electron's own figure otherwise.
+    const measuredCpu = measured?.get(m.pid)
+    const cpu =
+      typeof measuredCpu === 'number'
+        ? measuredCpu
+        : Math.round((m.cpu?.percentCPUUsage ?? 0) * 10) / 10
 
     totalCpu += cpu
     totalMemKB += m.memory.workingSetSize

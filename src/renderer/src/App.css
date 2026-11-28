@@ -643,3 +643,27 @@ button:hover .shortcut-keys,
   border-color: color-mix(in srgb, var(--container-color) 45%, transparent);
   color: color-mix(in srgb, var(--container-color) 30%, var(--text));
 }
+
+/* ==========================================================================
+   Idle cost: nothing decorative runs for a window nobody is looking at.
+
+   The sidebar's loops (the arc on the active tab, the container ripple, the
+   shimmer across a label) are `infinite` by design and each one keeps the
+   compositor producing frames. When the window is in the background — which is
+   most of the time, while a model is answering — none of it can be seen, so
+   none of it should run. `data-window-focus` is set from App.tsx by both the
+   DOM focus events and the main process's own verdict.
+   ========================================================================== */
+
+html[data-window-focus='blurred'] *,
+html[data-window-focus='blurred'] *::before,
+html[data-window-focus='blurred'] *::after {
+  animation-play-state: paused !important;
+}
+
+/* A blur that is not being re-rendered is cacheable; one that is, is not. Anything layered over the
+   shell while the window is in the background is flattened instead of composited every frame. */
+html[data-window-focus='blurred'] .sidebar,
+html[data-window-focus='blurred'] .sidebar-chat-tabs {
+  will-change: auto;
+}
