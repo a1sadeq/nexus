@@ -59,6 +59,28 @@ export interface RepairOptions {
    * tab on its previous page, so the repair must not run then — the caller defers it instead.
    */
   navigationInFlight?: boolean
+  /**
+   * When the detach/re-attach step is allowed to run.
+   *
+   * A re-attach is the strongest repair there is, and also the one that can leave the window with no
+   * surface behind the page — which is the blank view users clear by switching tabs. So it should be
+   * reserved for the case that actually needs it:
+   *
+   *   `'always'`      — the last resort, after repeated repaints for a visible view have failed.
+   *   `'if-detached'` — only when the view is *known* not to be a child of the window. A resume, a window
+   *                     restore or a wake from sleep is not evidence that anything was lost.
+   *   `'never'`       — bounds/visibility/invalidate only.
+   *
+   * Default `'always'`, so existing callers keep the behaviour they asked for; a caller that wants the
+   * conservative path says so.
+   */
+  reattach?: 'always' | 'if-detached' | 'never'
+  /**
+   * Ground truth for `'if-detached'`. Return `false` only when the view is definitely not in the window:
+   * an unknown answer (`undefined`, a throw) is treated as attached, because detaching a view that is
+   * already in place is the failure being avoided.
+   */
+  isAttached?: () => boolean | null | undefined
 }
 
 export type RepairOutcome = 'repaired' | 'partial' | 'skipped'
@@ -146,10 +168,25 @@ export function repairViewSurface(
     }
   }
 
-  // 4. Detach + re-attach: a new surface attach for the same WebContents.
+  // 4. Detach + re-attach: a new surface attach for the same WebContents — when that is warranted.
   const contentView = host?.contentView
+  const reattachMode = options.reattach ?? 'always'
   let reattached = false
-  if (contentView?.addChildView && contentView?.removeChildView) {
+  let reattachAllowed = reattachMode !== 'never'
+  if (reattachAllowed && reattachMode === 'if-detached') {
+    let attached: boolean | null | undefined
+    try {
+      attached = options.isAttached?.()
+    } catch {
+      attached = undefined
+    }
+    // Only a definite "it is not in the window" justifies a detach. Unknown is not a reason.
+    reattachAllowed = attached === false
+    if (!reattachAllowed) {
+      log(`re-attach skipped (${reason}): the view is ${attached === true ? 'attached' : 'assumed attached'}`)
+    }
+  }
+  if (reattachAllowed && contentView?.addChildView && contentView?.removeChildView) {
     try {
       contentView.removeChildView(view)
       contentView.addChildView(view)
@@ -182,7 +219,7 @@ export function repairViewSurface(
     return 'skipped'
   }
   log(
-    `repair (${reason}): ${reattached ? 're-attached' : 'no re-attach'}, ` +
+    `repair (${reason}): ${reattached ? 're-attached' : reattachAllowed ? 'no re-attach' : 'kept the existing surface'}, ` +
       `bounds ${isUsableRect(bounds) ? `${bounds.width}x${bounds.height}` : 'unchanged'}, ` +
       `visible ${shouldBeVisible}`
   )

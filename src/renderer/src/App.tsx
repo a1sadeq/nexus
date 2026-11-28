@@ -90,7 +90,7 @@ import './App.css'
 
 /** Bumped whenever this file's UI changes, so a stale bundle is obvious at a glance
  *  (`document.querySelector('[data-nexus-build]')` in devtools). */
-const NEXUS_UI_BUILD = '17'
+const NEXUS_UI_BUILD = '18'
 
 /** Where the "the guide has been seen" state lives. Set on close, cleared by "Tour again". */
 const GUIDE_SEEN_KEY = 'vicinae.guide.seen.v1'

@@ -179,6 +179,7 @@ import { cleanupAllUploadTempDirs, cleanupStaleUploadTempDirs } from './uploadAt
 import { forceViewRepaint } from './viewRepaint'
 import { classifySurfaceReturn } from './surfaceReturn'
 import { repairViewSurface, SurfaceRepairPolicy } from './viewSurface'
+import { decideResumeSurfaceAction } from './surfaceResume'
 import { VideoJobManager } from './videoJob'
 import { sweepStaleJobDirs } from './videoPrepare'
 import { locateMediaTools } from './videoProbe'
@@ -313,6 +314,27 @@ function tabIdForContents(contents: Electron.WebContents): string {
  * restoring the surface — the state that used to need a tab close/reopen. See viewSurface.ts.
  */
 const surfaceRepair = new SurfaceRepairPolicy()
+
+/**
+ * Is this view actually a child of the window right now?
+ *
+ * `null` means "cannot say" — an older build without `contentView.children`, or a window that is tearing
+ * down. Callers treat that as attached: the repair that matters is for a view that is definitely gone,
+ * not one that might be.
+ */
+function isViewAttached(view: Electron.WebContentsView): boolean | null {
+  try {
+    if (!mainWindow || mainWindow.isDestroyed()) return null
+    const children = (mainWindow.contentView as unknown as { children?: unknown[] }).children
+    if (!Array.isArray(children)) return null
+    return children.includes(view)
+  } catch {
+    return null
+  }
+}
+
+/** When the active view's surface was last refreshed because the window came back. */
+let lastResumeRefreshAt = 0
 /** One pending deferred surface repair per tab — a repair never runs mid-navigation. */
 const repairDeferrals = new Map<string, NodeJS.Timeout>()
 /**
@@ -3501,8 +3523,90 @@ function restoreWorkspaceAfterOverlay(): void {
   }
 }
 
+/**
+ * The active view's surface, refreshed after the window comes back.
+ *
+ * This used to be `repairTabSurface(activeViewId, 'window resumed', true)` — an unconditional
+ * detach and re-attach, on every `show`, `restore` and `powerMonitor resume`. The build-43 diagnostics
+ * show what that costs: after 4.5 hours hidden the trace records a resume, then a detach and an
+ * attach, and then the user opening Settings and switching tabs — the two things that clear a blank
+ * view. A resume is not evidence that the surface was lost; the re-attach was the injury, not the cure.
+ *
+ * Evidence decides now (`lib/surfaceResume`): a view missing from the window is put back with the page
+ * intact, everything else gets the strong repaint — visibility flip, invalidate, a real 1 px geometry
+ * change — which is exactly the lever the workaround uses and the one the trace shows recovering the
+ * view. A surface that is still broken after repeated repaints escalates through SurfaceRepairPolicy,
+ * which is the signal that actually means "the cheap path failed".
+ */
+function refreshActiveViewSurfaceAfterResume(reason: string): void {
+  const tabId = activeViewId
+  const view = tabId ? aiViews.get(tabId) : null
+  if (!tabId || !view || view.webContents.isDestroyed()) return
+
+  let loading = false
+  try {
+    loading = view.webContents.isLoading()
+  } catch {
+    loading = false
+  }
+
+  const action = decideResumeSurfaceAction({
+    attached: isViewAttached(view),
+    wasHidden: viewWasHidden(tabId, view),
+    msSinceLastRefresh: Date.now() - lastResumeRefreshAt
+  })
+
+  if (action === 'skip') {
+    traceViewOp(tabId, 'resume refresh skipped — the window just resumed', { reason })
+    return
+  }
+  lastResumeRefreshAt = Date.now()
+
+  if (action === 'repair') {
+    traceViewOp(tabId, 'view missing from the window — putting it back', { reason })
+    if (loading || navigationIntent.pendingUrl(tabId)) {
+      traceNav(tabId, 'repair', 'repair postponed — navigation in flight', { reason })
+      const timer = setTimeout(() => {
+        repairDeferrals.delete(tabId)
+        refreshActiveViewSurfaceAfterResume(`${reason} (deferred)`)
+      }, 600)
+      repairDeferrals.set(tabId, timer)
+      return
+    }
+    repairTabSurface(tabId, reason, true, false, 'if-detached')
+    return
+  }
+
+  const bounds = lastRealBounds.get(tabId) ?? null
+  // Not a failing repaint: this is a known transition, so it must not count towards escalation.
+  surfaceRepair.forget(tabId)
+  // Always the strong repaint. A resume is the transition where the surface may be gone, and the
+  // bookkeeping that would say otherwise is what the build-43 trace shows failing.
+  const outcome = forceViewRepaint(view, {
+    bounds: bounds && bounds.width > 0 && bounds.height > 0 ? bounds : null,
+    reason: `window resumed (${reason})`,
+    force: true,
+    log: (message) => console.log(`[viewRepaint] ${message}`)
+  })
+  traceViewOp(tabId, 'repaint after resume — kept the existing surface', { outcome, reason })
+}
+
 /** Rebuild one tab's surface in place, keeping its page. Never recreates the WebContents. */
-function repairTabSurface(tabId: string, reason: string, visible = true, deferred = false): void {
+function repairTabSurface(
+  tabId: string,
+  reason: string,
+  visible = true,
+  deferred = false,
+  /**
+   * May this repair detach and re-attach the view?
+   *
+   * `'always'` is the escalation: repeated repaints for a visible view have already failed, so the
+   * surface has to be rebuilt. `'if-detached'` is for callers that act on evidence (a resume that found
+   * the view missing from the window) — if it turns out to be attached after all, the detach is skipped
+   * rather than performed on a view that did not need it.
+   */
+  reattach: 'always' | 'if-detached' = 'always'
+): void {
   const view = aiViews.get(tabId)
   if (!view || view.webContents.isDestroyed()) return
 
@@ -3557,6 +3661,8 @@ function repairTabSurface(tabId: string, reason: string, visible = true, deferre
     // Belt and braces: the guard above already deferred when a load was in flight.
     navigationInFlight: Boolean(view.webContents.isLoading?.()) || Boolean(navigationIntent.pendingUrl(tabId)),
     reason: `tab ${tabId} ${reason}`,
+    reattach,
+    isAttached: () => isViewAttached(view),
     log: (message) => console.log(`[viewRepair] ${message}`)
   })
   if (outcome === 'repaired') {
@@ -3712,10 +3818,24 @@ function reconcileViewPresentation(): void {
           // Asking twice in a row for the same tab to repaint means the cheap path is not working. That
           // is the user's "it went blank and only closing the tab brought it back" — but a detach/attach
           // in the half-second after an overlay closed is what *created* the blank surface, so it waits.
-          if (surfaceRepair.shouldRepair(activeViewId) && Date.now() - lastOverlayCloseAt > 600) {
+          const justResumed = Date.now() - lastResumeRefreshAt <= 600
+          if (
+            surfaceRepair.shouldRepair(activeViewId) &&
+            Date.now() - lastOverlayCloseAt > 600 &&
+            !justResumed
+          ) {
             repairTabSurface(activeViewId, 'reconciled twice without a frame', true)
           } else if (surfaceRepair.shouldRepair(activeViewId)) {
-            traceViewOp(activeViewId, 'repair held back — an overlay just closed, the strong repaint runs first', {})
+            // A resume just ran the strong repaint. Escalating to a detach in the half-second after it
+            // would replace the surface that repaint was about to produce — and a detach is the way to
+            // end up with no surface at all.
+            traceViewOp(
+              activeViewId,
+              justResumed
+                ? 'repair held back — the window just resumed, the strong repaint runs first'
+                : 'repair held back — an overlay just closed, the strong repaint runs first',
+              {}
+            )
           }
         }
         try {
@@ -4423,10 +4543,16 @@ function createWindow() {
   const suspendAllViews = () => {
     previewLoop.stop()
     arenaTitleSync.stop()
-    for (const view of aiViews.values()) {
+    for (const [tabId, view] of aiViews) {
       if (!view.webContents.isDestroyed()) {
         view.webContents.setBackgroundThrottling(true)
         view.webContents.setAudioMuted(true)
+        // Record it. The window being hidden or minimised *is* a hidden transition for every view, and
+        // the resume path asks `viewWasHidden()` to decide how strong a repaint this needs. Nothing used
+        // to set it here, so after hours hidden the answer was still "not hidden" — the build-43 trace
+        // reads `repaint ... {comingBackFromHidden=false}` one millisecond after a 4.5-hour gap, and the
+        // transition that does drop a surface then took the weak path.
+        markViewVisibility(tabId, false)
       }
     }
   }
@@ -4442,11 +4568,13 @@ function createWindow() {
   })
   const resumeActiveView = () => {
     restartActiveArenaTitleSync()
+    // Reconcile first: it is what re-shows the view (and, because `suspendAllViews` now records the
+    // hidden transition, what takes the *strong* repaint branch instead of the weak one).
     reconcileViewPresentation()
-    // Coming back from hidden/minimised/sleep is where the compositor drops a surface, and where a
-    // plain repaint request is known to be too weak. Rebuild the surface, keep the page.
+    // Coming back from hidden/minimised/sleep is where the compositor can drop a surface. Refresh it with
+    // the strongest *safe* lever; re-attach only if the view is really missing from the window.
     if (activeViewId && activeViewVisible && !overlaysOpen) {
-      repairTabSurface(activeViewId, 'window resumed', true)
+      refreshActiveViewSurfaceAfterResume('window resumed')
     }
     try {
       if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
@@ -5735,6 +5863,18 @@ function ensureAiView(tabId: string, containerId?: unknown): Electron.WebContent
     sendToMainWindow('ai-loading', tabId, true)
   })
   view.webContents.on('did-stop-loading', () => {
+    // `did-stop-loading` carries no frame information and fires for subframe traffic too — the build-43
+    // trace has ten of them, each one line after `did-start-navigation {url=about:blank mainFrame=false}`.
+    // Treating those as "the page finished loading" cleared the navigation intent while the *main frame*
+    // was still loading, which is the claim that `repairTabSurface`, the URL-bar load and the abort
+    // defence all rely on ("detach (repair) — aborts any load in flight"). So ask the contents whether it
+    // is still loading: a subframe stop leaves that true, and is left alone.
+    let stillLoading = false
+    try {
+      stillLoading = view.webContents.isLoading()
+    } catch {
+      stillLoading = false
+    }
     traceNav(tabId, 'event', 'did-stop-loading', {
       url: (() => {
         try {
@@ -5743,8 +5883,14 @@ function ensureAiView(tabId: string, containerId?: unknown): Electron.WebContent
           return '(gone)'
         }
       })(),
-      pending: navigationIntent.pendingUrl(tabId) || '(none)'
+      pending: navigationIntent.pendingUrl(tabId) || '(none)',
+      stillLoading
     })
+    if (stillLoading) {
+      // A subframe finished, not the page. Nothing about the tab's navigation state has changed.
+      tabDiscardManager.reconcileCapacity()
+      return
+    }
     navigationIntent.forget(tabId)
     tabDiscardManager.reconcileCapacity()
     sendToMainWindow('ai-loading', tabId, false)
