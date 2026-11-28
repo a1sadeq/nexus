@@ -99,7 +99,13 @@ import {
   VISITED_DONE_LINGER_MS
 } from '../shared/aiLifecycle'
 import { AiToastManager } from './aiToastManager'
-import { formatDuration, formatNotificationContent, modelLabel } from '../shared/notificationContent'
+import {
+  formatDuration,
+  formatNotificationContent,
+  modelLabel,
+  statusDescription,
+  statusLabel
+} from '../shared/notificationContent'
 import { createNotificationRecorder } from './notificationDiagnostics'
 import {
   applyNotificationPreferenceChange,
@@ -1006,7 +1012,9 @@ function buildNotificationHtml(data: {
   const isWaitingInput = data.status === 'waiting-input'
   const accentColor = isWaitingInput ? '#ef4444' : '#10b981'
   const glowColor = isWaitingInput ? 'rgba(239, 68, 68, 0.4)' : 'rgba(16, 185, 129, 0.3)'
-  const statusLabel = isWaitingInput ? 'Needs Input' : 'Response Ready'
+  // Shared with the OS popup: the badge and the description line are built once, in
+  // shared/notificationContent, so the two surfaces can never describe one event differently.
+  const badge = statusLabel(data.status)
   // The same facts the desktop notification reports, so the two never disagree.
   const factLabel = [modelLabel(data.model), formatDuration(data.durationMs)]
     .filter((part) => part.length > 0)
@@ -1014,9 +1022,7 @@ function buildNotificationHtml(data: {
   const escapeHtmlText = (value: string): string =>
     value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
   const safeTitle = escapeHtmlText(data.tabTitle)
-  const rawSnippet =
-    data.snippet ||
-    (isWaitingInput ? 'Waiting for your choice or confirmation' : 'Generation completed.')
+  const rawSnippet = statusDescription(data.status, data.snippet)
   const safeSnippet = rawSnippet
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
@@ -1216,7 +1222,7 @@ function buildNotificationHtml(data: {
         <span class="status-dot"></span>
         <span class="tab-title">${safeTitle}</span>
       </div>
-      <span class="badge">${statusLabel}</span>
+      <span class="badge">${badge}</span>
       ${factLabel ? `<span class="facts">${escapeHtmlText(factLabel)}</span>` : ''}
       <button type="button" class="close-btn" id="closeBtn" title="Dismiss">✕</button>
     </div>
@@ -1383,6 +1389,10 @@ const aiToastManager = new AiToastManager(
         try {
           aiNotificationView?.setVisible(visible)
         } catch {}
+        // The card leaving the window is a surface-order change of its own: give the page back its
+        // frame (see `settleSurfaceAfterNotification`). Showing the card is handled by the repaint in
+        // `showInAppToast`; only the removal needs the follow-up.
+        if (!visible) settleSurfaceAfterNotification('the notification card left the surface')
       },
       setBounds: (bounds) => {
         try {
@@ -1440,10 +1450,29 @@ function showInAppToast(data: DesktopNotificationInput & { id: string }) {
 
   lastNotifiedTabId = data.tabId
 
-  const nativeShown = triggerDesktopNotification(data)
+  // One event, one surface (build 51).
+  //
+  // The old rule was "always try the OS popup, and also draw the in-app card unless the window is in
+  // the background and the popup landed" — so a tab finishing behind another tab in the *focused*
+  // window got a desktop popup AND a card, twice for one event, which is the duplication the user
+  // reported. The rule now picks exactly one surface:
+  //
+  //   * the window is in front → the card. An OS popup over the app you are already looking at is
+  //     noise, and it is the copy that ends up stacked on the notification daemon's history.
+  //   * the window is not in front → the OS popup, which is the only surface that can reach the user.
+  //     If the platform refuses it, the card is drawn anyway: silence is never the answer.
+  const nativeShown = isAppActiveAndVisible ? false : triggerDesktopNotification(data)
 
-  // The HUD is shown when Nexus is in front on another tab, and — importantly — whenever the
-  // OS could not show anything, so a platform without a notification daemon is not silent.
+  if (isAppActiveAndVisible) {
+    notificationRecorder.record({
+      tabId: data.tabId,
+      status: data.status,
+      detail: preferences.detail,
+      outcome: 'in-app',
+      reason: 'the window is in front, so the in-app card is the notification'
+    })
+  }
+
   if (!isAppActiveAndVisible && nativeShown) return
   if (!aiNotificationView) {
     if (!nativeShown) {
@@ -1486,6 +1515,45 @@ function dismissInAppToast(immediate = false) {
   aiToastManager.dismiss(immediate)
   currentNotificationData = aiToastManager.getCurrentData()
   isAiNotificationVisible = aiToastManager.getIsVisible()
+}
+
+/**
+ * The page under the notification card has to be asked for a frame again, twice.
+ *
+ * The card is a native view stacked *above* the AI view, and putting it there rebuilds the window's
+ * surface order (see the comment in `showInAppToast`). Taking it away does the same thing in reverse,
+ * and that direction had no repair at all: the card was hidden with `setVisible(false)`, the compositor
+ * dropped the child it had been drawing, and the page underneath — which had been told nothing —
+ * kept its last frame only until the next invalidation. That is the reported "the notification came
+ * and the AI view went blank", and it fires *after* the card goes away, several seconds after the
+ * notification, which is why it never looked connected to one.
+ *
+ * So: whenever the card leaves the surface, re-present the active view through the ordinary verified
+ * path (never a flip, never a detach — build 47's guarantee), and look a second time a quarter of a
+ * second later, because a compositor that has just lost a child does not always admit it on the first
+ * ask. Nothing runs while an overlay is open or the tab is meant to be hidden.
+ */
+let notificationSettleTimers: NodeJS.Timeout[] = []
+
+function cancelNotificationSettle(): void {
+  for (const timer of notificationSettleTimers) clearTimeout(timer)
+  notificationSettleTimers = []
+}
+
+function settleSurfaceAfterNotification(reason: string): void {
+  cancelNotificationSettle()
+  notificationSettleTimers.push(
+    setTimeout(() => {
+      if (overlaysOpen || !activeViewVisible) return
+      ensureActiveViewPresented(reason, 'suspect')
+    }, 60)
+  )
+  notificationSettleTimers.push(
+    setTimeout(() => {
+      if (overlaysOpen || !activeViewVisible) return
+      ensureActiveViewPresented(`${reason} / second look`, 'cheap')
+    }, 300)
+  )
 }
 // Match the actual OS and bundled Chromium version; do not impersonate Linux on Windows.
 // Strip Electron/product tokens by constructing a regular Chrome-compatible UA.
@@ -1980,6 +2048,24 @@ function triggerCompletionNotification(
   const prev = lastCompletionNotifications.get(tabId)
   const currentRev = activeAiLifecycles.get(tabId)?.revision ?? 0
   if (shouldDeduplicateCompletion(prev, status, currentRev, now)) return
+  // The same event, announced twice.
+  //
+  // `shouldDeduplicateCompletion` only covers two seconds and an unchanged revision, which is not what a
+  // provider page does: several of them are polled, and a page that keeps reporting "waiting for input"
+  // — or a revision that bumps while the status stays put — produced a fresh popup for every poll. The
+  // user's word for it was "duplicates", and no single event should ever be announced more than once, so
+  // the window is per status: a completion is quiet for four seconds, an input request for twenty.
+  const repeatWindowMs = status === 'waiting-input' ? 20000 : 4000
+  if (prev && prev.status === status && now - prev.time < repeatWindowMs) {
+    notificationRecorder.record({
+      tabId,
+      status,
+      detail: notificationPreferences().detail,
+      outcome: 'duplicate',
+      reason: 'the same event had already been announced for this tab'
+    })
+    return
+  }
   lastCompletionNotifications.set(tabId, { status, revision: currentRev, time: now })
 
   const tabTitle = viewTitles.get(tabId) || 'AI Session'
@@ -2233,6 +2319,25 @@ ipcMain.handle('capture_diagnostics', async (event, samplingMs?: number) => {
         verbose: navTrace.isVerbose(),
         events: navTrace.events(200),
         text: navTrace.formatAll(200)
+      },
+      // The other half of the story, in the report itself rather than only in the trace.
+      //
+      // Build 50's export ended on "overlay open — AI view hidden" and nothing else: no panel named,
+      // no way to tell a real panel from a flag left behind, and no record of what the app believed
+      // about the views it had just hidden. The next export answers all three at the moment it is
+      // taken, even if the trace has rolled past the event.
+      overlayState: {
+        open: overlaysOpen,
+        panels: lastOverlayKeys.length > 0 ? lastOverlayKeys : 'not reported',
+        openForMs: overlaysOpen && overlaysOpenedAt > 0 ? Date.now() - overlaysOpenedAt : 0,
+        activeViewId,
+        activeViewVisible,
+        presentedVisible: Object.fromEntries(presentedVisible),
+        notificationCard: {
+          visible: isAiNotificationVisible,
+          suspended: aiToastManager.isSuspended(),
+          tabId: currentNotificationData?.tabId ?? null
+        }
       }
     }
   }
@@ -4368,11 +4473,79 @@ ipcMain.on('set_container_menu_open', (_event, open: boolean) => {
   containerMenuOpen = Boolean(open)
 })
 
-ipcMain.on('set_overlays_open', (_event, open: boolean) => {
+/**
+ * Which panels the renderer says are open, and a watchdog for the case where those answers stop coming.
+ *
+ * Build 50's diagnostics ended with `overlay open — AI view hidden` on four views and then thirty
+ * silent seconds: every native view hidden, and no record anywhere of *what* had opened. Without that
+ * name, "a notification blanked the page" and "some panel is open" look identical in the trace, and the
+ * only way to tell them apart was to guess. So the renderer now names the open panels with the flag,
+ * the trace prints them, and a report that names nothing is refused instead of hiding the workspace:
+ * hiding every view is only ever correct because *something* covers them.
+ */
+/** How often a long-lived overlay is asked to confirm it is still up. */
+const OVERLAY_STATE_RECHECK_MS = 8000
+/** The panels last reported as open, for the trace. Empty means the renderer did not say. */
+let lastOverlayKeys = ''
+let overlayStateRecheckTimer: NodeJS.Timeout | null = null
+
+function stopOverlayStateRecheck(): void {
+  if (overlayStateRecheckTimer) {
+    clearTimeout(overlayStateRecheckTimer)
+    overlayStateRecheckTimer = null
+  }
+}
+
+function startOverlayStateRecheck(): void {
+  stopOverlayStateRecheck()
+  overlayStateRecheckTimer = setTimeout(function recheck() {
+    overlayStateRecheckTimer = null
+    if (!overlaysOpen) return
+    // The views are hidden because a panel is up. If the renderer's idea of that panel has gone stale
+    // — a panel that unmounted without telling anyone — nothing would ever un-hide them again, and the
+    // window would sit there with no page in it until the user restarts. Ask again, every few seconds,
+    // and let the renderer answer with whatever it believes now.
+    // Guarded for the shortcut tests, which evaluate this handler on its own: a missing bridge must
+    // cost the re-check, not the process.
+    if (typeof traceNav === 'function') {
+      traceNav(activeViewId || '', 'overlay', 'overlay state re-check — the overlay has been open a while', {
+        openForMs: overlaysOpenedAt > 0 ? Date.now() - overlaysOpenedAt : -1,
+        overlays: lastOverlayKeys.length > 0 ? lastOverlayKeys : 'not reported'
+      })
+    }
+    if (typeof sendToMainWindow === 'function') sendToMainWindow('overlays_state_requested')
+    overlayStateRecheckTimer = setTimeout(recheck, OVERLAY_STATE_RECHECK_MS)
+  }, OVERLAY_STATE_RECHECK_MS)
+}
+
+ipcMain.on('set_overlays_open', (_event, open: boolean, reportedKeys?: unknown) => {
   const next = Boolean(open)
-  if (overlaysOpen === next) return
+  const openKeys = Array.isArray(reportedKeys)
+    ? reportedKeys.filter((key): key is string => typeof key === 'string')
+    : []
+  // A renderer that names no panel cannot make the workspace disappear. Older renderers send no list at
+  // all (`undefined`), and are still trusted — this only refuses an explicit empty answer, which is the
+  // one that means "yes, an overlay is open, but I cannot tell you which".
+  if (next && Array.isArray(reportedKeys) && openKeys.length === 0) {
+    if (typeof traceNav === 'function') {
+      traceNav(activeViewId || '', 'overlay', 'overlay open refused — the renderer named no open panel', {})
+    }
+    console.log('[overlay] refused to hide the AI view: the renderer reported an open overlay with no name')
+    return
+  }
+  if (overlaysOpen === next) {
+    if (next) lastOverlayKeys = openKeys.join(', ')
+    return
+  }
   overlaysOpen = next
+  lastOverlayKeys = openKeys.join(', ')
   restartActiveArenaTitleSync()
+  try {
+    if (overlaysOpen) startOverlayStateRecheck()
+    else stopOverlayStateRecheck()
+  } catch {
+    /* the re-check is a safety net, never a precondition for opening a panel */
+  }
 
   if (!overlaysOpen) {
     // The renderer confirmed it: the Escape deadline no longer applies.
@@ -4443,10 +4616,15 @@ ipcMain.on('set_overlays_open', (_event, open: boolean) => {
     } catch {
       /* not running inside the app's module scope */
     }
-    traceNav(activeViewId || '', 'overlay', 'overlay open — AI view hidden', {})
+    traceNav(activeViewId || '', 'overlay', 'overlay open — AI view hidden', {
+      overlays: lastOverlayKeys.length > 0 ? lastOverlayKeys : 'not reported'
+    })
     console.log('[overlay] open — the shell has the keyboard, the AI view is hidden')
   } else {
-    traceNav(activeViewId || '', 'overlay', 'overlay closed — restoring the workspace', {})
+    traceNav(activeViewId || '', 'overlay', 'overlay closed — restoring the workspace', {
+      was: lastOverlayKeys.length > 0 ? lastOverlayKeys : 'not reported',
+      openForMs: overlaysOpenedAt > 0 ? Date.now() - overlaysOpenedAt : -1
+    })
     console.log('[overlay] closed — restoring the workspace')
     restoreWorkspaceAfterOverlay()
   }

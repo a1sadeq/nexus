@@ -65,7 +65,7 @@ describe('a view that was hidden is repainted, not re-attached — build 33', ()
 
 describe('a notification survives a tab switch and a panel — build 33', () => {
   const overlayStart = main.indexOf("ipcMain.on('set_overlays_open'")
-  const overlayHandler = main.slice(overlayStart, overlayStart + 4200)
+  const overlayHandler = main.slice(overlayStart, overlayStart + 5200)
 
   it('suspends the toast when a panel opens, and resumes it when the panel closes', () => {
     expect(overlayHandler).toContain('aiToastManager.suspend()')
@@ -79,7 +79,7 @@ describe('a notification survives a tab switch and a panel — build 33', () => 
 
   it('arms a toast that arrives while a panel is open, instead of dropping it', () => {
     const showStart = main.indexOf('function showInAppToast(')
-    const show = main.slice(showStart, showStart + 2600)
+    const show = main.slice(showStart, showStart + 3600)
     expect(show).not.toContain('if (overlaysOpen || !aiNotificationView)')
     expect(show).toContain('if (overlaysOpen) aiToastManager.suspend()')
   })
@@ -95,7 +95,7 @@ describe('a notification survives a tab switch and a panel — build 33', () => 
     // Stacking a native child rebuilds the window's surface order, and the page underneath can come
     // back with no frame — "the AI view went blank when a notification came".
     const showStart = main.indexOf('function showInAppToast(')
-    const show = main.slice(showStart, showStart + 3200)
+    const show = main.slice(showStart, showStart + 4200)
     expect(show).toContain("reason: 'a notification was stacked over the page'")
     expect(show).toContain('forceViewRepaint(activeView')
   })

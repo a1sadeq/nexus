@@ -18,6 +18,8 @@ export type NotificationOutcome =
   | 'duplicate'
   | 'throttled'
   | 'active-tab'
+  /** The window was in front: the in-app card is the notification, the OS was deliberately skipped. */
+  | 'in-app'
   | 'failed'
 
 export interface NotificationAttempt {
@@ -44,6 +46,7 @@ const EMPTY_TOTALS: Record<NotificationOutcome, number> = {
   duplicate: 0,
   throttled: 0,
   'active-tab': 0,
+  'in-app': 0,
   failed: 0
 }
 
@@ -116,7 +119,16 @@ export function createNotificationRecorder(options: RecorderOptions = {}): Notif
       if (environment.lastFailure) {
         lines.push(`The last attempt at the OS level failed: ${environment.lastFailure}`)
       }
-      const order: NotificationOutcome[] = ['shown', 'active-tab', 'duplicate', 'throttled', 'disabled', 'unsupported', 'failed']
+      const order: NotificationOutcome[] = [
+        'shown',
+        'in-app',
+        'active-tab',
+        'duplicate',
+        'throttled',
+        'disabled',
+        'unsupported',
+        'failed'
+      ]
       for (const outcome of order) {
         if (totals[outcome] > 0) lines.push(`${totals[outcome]} × ${outcome} — ${defaultReason(outcome)}`)
       }
@@ -138,6 +150,8 @@ function defaultReason(outcome: NotificationOutcome): string {
       return 'the same completion had already been announced'
     case 'throttled':
       return 'another notification for this tab fired less than two seconds earlier'
+    case 'in-app':
+      return 'the window was in front, so the in-app card was the notification'
     case 'active-tab':
       return 'that tab was already in front of you'
     case 'failed':

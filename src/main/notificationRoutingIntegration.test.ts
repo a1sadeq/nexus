@@ -137,21 +137,17 @@ describe('completion notifications and latest-notification shortcut', () => {
   })
   afterEach(() => vi.useRealTimers())
 
-  it('shows both OS and in-app alerts for a background tab while Nexus is focused', () => {
+  it('shows exactly one alert — the in-app card — for a background tab while Nexus is focused', () => {
     context.showInAppToast(data)
-    expect(NativeNotification.created).toHaveLength(1)
-    expect(NativeNotification.created[0].shown).toBe(true)
-    // Detail level `standard`: the tab title and the model are in the notification, the prompt
-    // text is not. This is the deliberate change from the previous title-less wording.
-    const options = NativeNotification.created[0].options as { title: string; body: string }
-    expect(options.body).toContain('private title')
-    expect(options.body).not.toContain('private text')
-    expect(options.title).toContain('response ready')
+    // Build 51: one event, one surface. The window is in front, so the card is the notification and
+    // the OS popup is deliberately not raised; it used to be raised as well, which is the duplicate.
+    expect(NativeNotification.created).toHaveLength(0)
     expect(toast.show).toHaveBeenCalledWith(expect.objectContaining(data))
     expect(win.contentView.addChildView).toHaveBeenCalledOnce()
     expect(win.contentView.removeChildView).not.toHaveBeenCalled()
     expect(win.focus).not.toHaveBeenCalled()
-    expect(vm.runInContext('nativeNotificationTimers.size', context)).toBe(1)
+    // No native object was created for this event at all: the card is the notification.
+    expect(vm.runInContext('nativeNotificationTimers.size', context)).toBe(0)
     // The page underneath is asked for a frame when the toast is stacked over it, so a notification
     // arriving cannot leave the AI view blank.
     expect(context.forceViewRepaint).toHaveBeenCalledOnce()
@@ -167,8 +163,15 @@ describe('completion notifications and latest-notification shortcut', () => {
     context.showInAppToast(data)
     expect(NativeNotification.created).toHaveLength(1)
     expect(toast.show).not.toHaveBeenCalled()
+    // Build 51 contract: the popup is titled with the tab it came from, and its body is the sentence
+    // the in-app card would have printed — not the app name and a restatement of the tab title.
+    const options = NativeNotification.created[0].options as { title: string; body: string }
+    expect(options.title).toBe('private title')
+    expect(options.body.split('\n')).toEqual(['Generation completed.', 'Response Ready · Arena'])
+    expect(options.body).not.toContain('private text')
   })
   it('releases retained notifications on failure and routes click to the original tab', () => {
+    win.isFocused = () => false
     context.showInAppToast(data)
     const native = NativeNotification.created[0]
     native.emit('click')
@@ -180,6 +183,7 @@ describe('completion notifications and latest-notification shortcut', () => {
     expect(vm.runInContext('nativeNotificationTimers.size', context)).toBe(0)
   })
   it('keeps a bounded number of native objects and releases them by timeout', () => {
+    win.isFocused = () => false
     for (let i = 0; i < 70; i++) context.showInAppToast({ ...data, tabId: `tab-${i}` })
     expect(vm.runInContext('nativeNotificationTimers.size', context)).toBe(64)
     vi.advanceTimersByTime(15 * 60 * 1000)
@@ -258,6 +262,8 @@ describe('completion notifications and latest-notification shortcut', () => {
   })
   it('still shows the in-app toast if the OS reports notifications unsupported', () => {
     NativeNotification.supported = false
+    // The OS is only asked when the window is not in front; that is the path that has to fall back.
+    win.isFocused = () => false
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     context.showInAppToast(data)
     context.showInAppToast(data)

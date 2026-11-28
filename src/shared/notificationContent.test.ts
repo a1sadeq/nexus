@@ -5,6 +5,8 @@ import {
   formatNotificationContent,
   isNotificationDetail,
   modelLabel,
+  statusDescription,
+  statusLabel,
   DEFAULT_NOTIFICATION_DETAIL
 } from './notificationContent'
 
@@ -12,7 +14,10 @@ describe('detail levels', () => {
   it('defaults to the level that names the tab, because the old text identified nothing', () => {
     expect(DEFAULT_NOTIFICATION_DETAIL).toBe('standard')
     const content = formatNotificationContent({ tabTitle: 'Refactor auth', model: 'gemini', status: 'done' })
-    expect(content.body).toContain('Refactor auth')
+    // Build 51: the tab's title is the *title* (that is what the user asked for), and the body carries
+    // the same description the in-app card prints, followed by the facts that card shows as a badge.
+    expect(content.title).toBe('Refactor auth')
+    expect(content.body).toContain('Generation completed.')
     expect(content.body).toContain('Gemini')
   })
 
@@ -40,28 +45,59 @@ describe('detail levels', () => {
 })
 
 describe('title', () => {
-  it('says what happened and which model, so two popups are distinguishable', () => {
-    const a = formatNotificationContent({ tabTitle: 'A', model: 'gemini', status: 'done' })
-    const b = formatNotificationContent({ tabTitle: 'A', model: 'claude', status: 'done' })
-    expect(a.title).toBe('Nexus — response ready · Gemini')
-    expect(b.title).not.toBe(a.title)
+  it('is the tab it came from, so two popups are distinguishable at a glance', () => {
+    const a = formatNotificationContent({ tabTitle: 'Refactor auth', model: 'gemini', status: 'done' })
+    const b = formatNotificationContent({ tabTitle: 'Pricing page', model: 'gemini', status: 'done' })
+    expect(a.title).toBe('Refactor auth')
+    expect(b.title).toBe('Pricing page')
+    expect(a.title).not.toBe(b.title)
   })
 
-  it('marks input requests distinctly from completions', () => {
+  it('marks input requests distinctly in the body, and asks the OS to insist on them', () => {
     const content = formatNotificationContent({ tabTitle: 'A', model: 'gemini', status: 'waiting-input' })
-    expect(content.title).toContain('needs your input')
+    expect(content.title).toBe('A')
+    expect(content.body.split('\n')[0]).toBe('Waiting for your choice or confirmation')
+    expect(content.body).toContain('Needs Input')
     expect(content.urgency).toBe('critical')
   })
 
   it('works without a model or a title', () => {
     const content = formatNotificationContent({ status: 'done' })
-    expect(content.title).toBe('Nexus — response ready')
+    expect(content.title).toBe('Nexus · Response Ready')
     expect(content.body.length).toBeGreaterThan(0)
   })
 
   it('accepts an application name', () => {
     const content = formatNotificationContent({ status: 'done' }, { appName: 'Arena' })
-    expect(content.title.startsWith('Arena — ')).toBe(true)
+    expect(content.title).toBe('Arena · Response Ready')
+  })
+
+  it('caps a runaway tab title instead of letting it eat the popup', () => {
+    const content = formatNotificationContent({ tabTitle: 'x'.repeat(200), status: 'done' })
+    expect(content.title).toHaveLength(80)
+  })
+})
+
+describe('the same description the in-app card prints', () => {
+  it('is the answer text at full detail, and the plain status sentence otherwise', () => {
+    const card = statusDescription('done', 'Here is the finished thing')
+    const full = formatNotificationContent(
+      { tabTitle: 'T', status: 'done', snippet: 'Here is the finished thing' },
+      { detail: 'full' }
+    )
+    expect(full.body.split('\n')[0]).toBe(card)
+    const standard = formatNotificationContent(
+      { tabTitle: 'T', status: 'done', snippet: 'Here is the finished thing' }
+    )
+    expect(standard.body).not.toContain('finished thing')
+    expect(standard.body.split('\n')[0]).toBe(statusDescription('done', undefined))
+  })
+
+  it('names the two states once, for both surfaces', () => {
+    expect(statusLabel('done')).toBe('Response Ready')
+    expect(statusLabel('waiting-input')).toBe('Needs Input')
+    expect(statusDescription('waiting-input', undefined)).toBe('Waiting for your choice or confirmation')
+    expect(statusDescription('done', '   ')).toBe('Generation completed.')
   })
 })
 
@@ -70,7 +106,8 @@ describe('facts in the body', () => {
     const withDuration = formatNotificationContent({ tabTitle: 'T', model: 'gemini', status: 'done', durationMs: 67_000 })
     expect(withDuration.body).toContain('1m 07s')
     const without = formatNotificationContent({ tabTitle: 'T', model: 'gemini', status: 'done' })
-    expect(without.body).not.toContain('s')
+    expect(without.body).not.toContain('1m 07s')
+    expect(without.body.split('\n')[1]).toBe('Response Ready · Gemini')
   })
 
   it('reports coalesced completions rather than dropping them silently', () => {
@@ -84,15 +121,18 @@ describe('facts in the body', () => {
 
   it('never produces an empty body', () => {
     const content = formatNotificationContent({ status: 'waiting-input' })
-    expect(content.body).toBe('Open Nexus to reply')
+    expect(content.body.length).toBeGreaterThan(0)
+    expect(content.body.split('\n')[0]).toBe('Waiting for your choice or confirmation')
   })
 })
 
 describe('sanitising', () => {
   it('collapses control characters and newlines so the daemon cannot be fed a fake second line', () => {
     const content = formatNotificationContent({ tabTitle: 'evil\nTitle\u0007\u001b[31m', status: 'done' })
-    expect(content.body).not.toContain('\u0007')
-    expect(content.body.split('\n')[0]).toBe('evil Title [31m')
+    expect(content.title).not.toContain('\u0007')
+    // The title is one line: a tab title cannot forge a second line in the popup either.
+    expect(content.title).toBe('evil Title [31m')
+    expect(content.body.split('\n')).toHaveLength(2)
   })
 
   it('caps long titles with an ellipsis', () => {

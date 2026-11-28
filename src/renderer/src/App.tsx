@@ -19,7 +19,13 @@ import {
 import { partitionTabSections } from './lib/tabSections'
 import { sfx } from './lib/soundFx'
 import { getShortcutKeys, getShortcutMap, onShortcutsChanged } from './lib/shortcuts'
-import { describeOverlays, dismissibleOverlayKeys, isAnyOverlayOpen, type OverlayKey } from './lib/overlays'
+import {
+  describeOverlays,
+  dismissibleOverlayKeys,
+  isAnyOverlayOpen,
+  openOverlayKeys,
+  type OverlayKey
+} from './lib/overlays'
 import {
   MAX_TAB_SHORTCUT_NUMBER,
   shortcutLabelForTab,
@@ -91,7 +97,7 @@ import './App.css'
 
 /** Bumped whenever this file's UI changes, so a stale bundle is obvious at a glance
  *  (`document.querySelector('[data-nexus-build]')` in devtools). */
-const NEXUS_UI_BUILD = '24'
+const NEXUS_UI_BUILD = '25'
 
 /** Where the "the guide has been seen" state lives. Set on close, cleared by "Tour again". */
 /**
@@ -1148,7 +1154,22 @@ Acknowledge these skills with a concise confirmation in this exact format:
     // @ts-ignore
     window.electron?.ipcRenderer?.on('notification_switch_to_tab', handleSwitchToTabFromNotif)
 
+    // Main asks again when an overlay has been open for a while: a panel that unmounted without
+    // clearing its flag would otherwise leave every native view hidden until the app was restarted.
+    const handleOverlayStateRequest = () => {
+      // @ts-ignore
+      window.electron?.ipcRenderer?.send(
+        'set_overlays_open',
+        isAnyOverlayOpen(overlayFlagsRef.current),
+        openOverlayKeys(overlayFlagsRef.current)
+      )
+    }
+    // @ts-ignore
+    window.electron?.ipcRenderer?.on('overlays_state_requested', handleOverlayStateRequest)
+
     return () => {
+      // @ts-ignore
+      window.electron?.ipcRenderer?.removeListener('overlays_state_requested', handleOverlayStateRequest)
       // @ts-ignore
       window.electron?.ipcRenderer?.removeListener('window-focus-changed', handleMainFocus)
       // @ts-ignore
@@ -2213,8 +2234,16 @@ Acknowledge these skills with a concise confirmation in this exact format:
   // process stops intercepting shortcuts so the overlay keeps its own keys
   // (arrows, Ctrl+J/K navigation, Ctrl+H/L cycling, Escape) working.
   useEffect(() => {
+    // The flag *and* the names of the panels that are up. Main hides every native view while an overlay
+    // is open, and a build-50 trace that ends on "overlay open — AI view hidden" with no panel named is
+    // impossible to read: the page was gone and nothing said why. With the names in the trace (and an
+    // unnamed report refused outright), that sentence can never be the whole story again.
     // @ts-ignore
-    window.electron?.ipcRenderer.send('set_overlays_open', Boolean(anyOverlayOpen))
+    window.electron?.ipcRenderer.send(
+      'set_overlays_open',
+      Boolean(anyOverlayOpen),
+      openOverlayKeys(overlayFlagsRef.current)
+    )
     if (anyOverlayOpen) {
       // @ts-ignore
       window.electron?.ipcRenderer.send('resize_view', { x: 0, y: 0, width: 0, height: 0 })

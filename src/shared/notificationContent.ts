@@ -11,6 +11,12 @@
  * Privacy note, because it is a real change in behaviour: `standard` is the default and it
  * includes the tab title. Titles are user content. `generic` is the old behaviour, unchanged,
  * and one setting flips back to it. Prompt text (the snippet) never appears below `full`.
+ *
+ * Build 51 moved the *title* and the *description* to match what the app already shows in its own
+ * in-app toast, because the user asked for exactly that: the popup is titled with the tab it came
+ * from, not with the app, and it says what the in-app card says underneath that title. The two
+ * surfaces now read one pair of helpers — `statusLabel()` and `statusDescription()` — so they cannot
+ * drift into two different descriptions of the same event.
  */
 
 export type NotificationDetail = 'generic' | 'standard' | 'full'
@@ -95,6 +101,25 @@ export function isNotificationDetail(value: unknown): value is NotificationDetai
   return typeof value === 'string' && (NOTIFICATION_DETAILS as readonly string[]).includes(value)
 }
 
+
+/** The badge the in-app card wears, and the word the OS popup leads with. One spelling. */
+export function statusLabel(status: 'done' | 'waiting-input'): string {
+  return status === 'waiting-input' ? 'Needs Input' : 'Response Ready'
+}
+
+/**
+ * The one line the in-app notification prints under its title.
+ *
+ * When the provider gave us the last thing it said, that is the description; otherwise the card has
+ * always fallen back to a status sentence, and the fallback lives here so the OS popup and the card
+ * cannot say two different things about one event.
+ */
+export function statusDescription(status: 'done' | 'waiting-input', snippet?: string): string {
+  const text = cleanLine(snippet, 140)
+  if (text) return text
+  return status === 'waiting-input' ? 'Waiting for your choice or confirmation' : 'Generation completed.'
+}
+
 export function formatNotificationContent(
   input: NotificationContentInput,
   options: { detail?: NotificationDetail; appName?: string } = {}
@@ -113,31 +138,33 @@ export function formatNotificationContent(
   }
 
   const model = modelLabel(input.model)
-  const title = cleanLine(
-    `${appName} — ${waiting ? 'needs your input' : 'response ready'}${model ? ` · ${model}` : ''}`,
-    80
-  )
+  // Title: the tab the notification came from. That is the one fact a popup needs and the one the old
+  // title ("Nexus — response ready · Gemini") threw away; two completions from two tabs used to look
+  // identical until you read the body. A nameless tab still gets something sayable.
+  const tabTitle = cleanLine(input.tabTitle, 80)
+  const title = tabTitle.length > 0 ? tabTitle : cleanLine(`${appName} · ${statusLabel(input.status)}`, 80)
 
-  const tabTitle = cleanLine(input.tabTitle, 70)
-  const facts = [model, formatDuration(input.durationMs)].filter((part) => part.length > 0).join(' · ')
+  // Body: the description the in-app card prints, then the facts the card wears as a badge and a
+  // subtitle. Snippet text stays behind `full`, exactly as before.
+  const description =
+    detail === 'full'
+      ? statusDescription(input.status, input.snippet)
+      : statusDescription(input.status, undefined)
+  const facts = [statusLabel(input.status), model, formatDuration(input.durationMs)]
+    .filter((part) => part.length > 0)
+    .join(' · ')
   const extra =
     typeof input.alsoFinished === 'number' && input.alsoFinished > 0
       ? `+${input.alsoFinished} more tab${input.alsoFinished === 1 ? '' : 's'} finished`
       : ''
 
-  const lines: string[] = []
-  if (tabTitle) lines.push(tabTitle)
+  const lines: string[] = [description]
   if (facts) lines.push(facts)
   if (extra) lines.push(extra)
-  if (detail === 'full') {
-    const snippet = cleanLine(input.snippet, 140)
-    if (snippet) lines.push(snippet)
-  }
 
-  // Each line is already cleaned; join it afterwards so the newlines survive.
   // Never an empty body: an OS renders title-only as a blank card.
-  const joined = lines.length > 0 ? lines.join('\n') : waiting ? 'Open Nexus to reply' : 'Open Nexus to see the result'
-  const body = joined.length > 300 ? `${joined.slice(0, 299).trimEnd()}…` : joined
+  const joined = lines.filter((line) => line.length > 0).join('\n')
+  const body = joined.length > 0 ? (joined.length > 300 ? `${joined.slice(0, 299).trimEnd()}…` : joined) : 'Open Nexus'
 
   return { title, body, urgency }
 }
