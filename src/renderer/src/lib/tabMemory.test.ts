@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   adoptTabMemory,
+  applyRememberedPinnedPosition,
   applyRememberedPosition,
   memoryKeyForUrl,
   readTabMemory,
@@ -132,6 +133,7 @@ describe('giving a new tab what it had before', () => {
         accentColor: '#f59e0b',
         auraColor: '#14b8a6',
         position: 3,
+        pinnedPosition: 1,
         updatedAt: 1
       }
     }
@@ -162,6 +164,55 @@ describe('giving a new tab what it had before', () => {
     expect(applyRememberedPosition(tabs, 'a', 99).map((t) => t.id)).toEqual(['b', 'c', 'a'])
     expect(applyRememberedPosition(tabs, 'a', null)).toBe(tabs)
     expect(applyRememberedPosition(tabs, 'a', 0)).toBe(tabs)
+  })
+})
+
+describe('the pinned section has its own place', () => {
+  const pinnedSet = ['p1', 'p2', 'p3']
+  const list: Tab[] = [
+    tab({ id: 'p1', url: 'https://a.example/p1' }),
+    tab({ id: 'p2', url: 'https://a.example/p2' }),
+    tab({ id: 'p3', url: 'https://a.example/p3' }),
+    tab({ id: 's1', url: 'https://a.example/s1' })
+  ]
+
+  it('records where a pinned tab sits among the pinned ones', () => {
+    const memory = rememberTabs({}, [list[0], list[2], list[1]], ['p1', 'p3', 'p2'], 10)
+    expect(memory['https://a.example/p3'].pinnedPosition).toBe(1)
+    expect(memory['https://a.example/p2'].pinnedPosition).toBe(2)
+  })
+
+  it('puts a pinned tab back in the middle of the pinned list, above the sessions', () => {
+    const tabsNow: Tab[] = [
+      tab({ id: 'p1', url: 'https://a.example/p1' }),
+      tab({ id: 'p3', url: 'https://a.example/p3' }),
+      tab({ id: 'p2', url: 'https://a.example/p2' }),
+      tab({ id: 's1', url: 'https://a.example/s1' })
+    ]
+    const restored = applyRememberedPinnedPosition(tabsNow, 'p2', 1, pinnedSet)
+    expect(restored.map((t) => t.id)).toEqual(['p1', 'p2', 'p3', 's1'])
+  })
+
+  it('pins at the top when it is the only pinned tab, and at the end when the place is beyond it', () => {
+    const only: Tab[] = [
+      tab({ id: 'p1', url: 'https://a.example/p1' }),
+      tab({ id: 's1', url: 'https://a.example/s1' })
+    ]
+    expect(applyRememberedPinnedPosition(only, 'p1', 0, ['p1']).map((t) => t.id)).toEqual(['p1', 's1'])
+    const three = list.map((t) => tab({ id: t.id, url: t.url }))
+    expect(applyRememberedPinnedPosition(three, 'p1', 9, pinnedSet).map((t) => t.id)).toEqual([
+      'p2',
+      'p3',
+      'p1',
+      's1'
+    ])
+  })
+
+  it('says nothing about a pinned place for a tab that is not pinned', () => {
+    const memory = rememberTabs({}, [tab({ id: 's1', url: 'https://a.example/s1' })], [], 10)
+    const adopted = adoptTabMemory(tab({ id: 's1b', url: 'https://a.example/s1' }), memory)
+    expect(adopted.pinned).toBe(false)
+    expect(adopted.pinnedPosition).toBeNull()
   })
 })
 

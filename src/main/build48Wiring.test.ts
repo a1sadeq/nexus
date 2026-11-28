@@ -77,7 +77,7 @@ describe('the pixels are actually looked at', () => {
 describe('the tab is remembered, not the row', () => {
   it('pin, both colours and position are adopted by address', () => {
     expect(app).toContain('adoptTabMemory(tab, tabMemoryRef.current ?? {})')
-    expect(app).toContain('applyRememberedPosition(nextTabs, tab.id, inherited.position)')
+    expect(app).toContain('applyRememberedPosition(nextTabs, placement.id, placement.position)')
     const adoption = app.slice(app.indexOf('const inherited = adoptTabMemory'), app.indexOf('if (nextTabs !== tabs)'))
     expect(adoption).toContain('if (inherited.pinned) toPin.push(tab.id)')
   })

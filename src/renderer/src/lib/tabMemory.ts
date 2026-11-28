@@ -31,6 +31,14 @@ export interface TabMemoryEntry {
   auraColor?: string
   /** Zero-based place in the flat tab list, as it was when the tab was last seen. */
   position: number
+  /**
+   * Zero-based place *within the pinned section*.
+   *
+   * A pinned tab is drawn in its own group above the sessions, so its flat index says nothing about
+   * where it appears. Pinning a tab and finding it at the bottom of the pinned list is the same loss of
+   * place as being at the bottom of the sessions.
+   */
+  pinnedPosition: number
   updatedAt: number
 }
 
@@ -89,6 +97,7 @@ export function readTabMemory(raw: string | null | undefined): TabMemory {
       key,
       pinned: entry.pinned === true,
       position: asCount(entry.position),
+      pinnedPosition: asCount(entry.pinnedPosition),
       updatedAt: typeof entry.updatedAt === 'number' && Number.isFinite(entry.updatedAt) ? entry.updatedAt : 0
     }
     if (colours.accentColor) record.accentColor = colours.accentColor
@@ -116,15 +125,19 @@ export function rememberTabs(
 ): TabMemory {
   const next: TabMemory = { ...memory }
   const pinned = new Set(pinnedIds)
+  let pinnedSeen = 0
   tabs.forEach((tab, index) => {
     const key = memoryKeyForUrl(tab.url)
     if (!key) return
+    const isPinned = pinned.has(tab.id)
     const entry: TabMemoryEntry = {
       key,
-      pinned: pinned.has(tab.id),
+      pinned: isPinned,
       position: index,
+      pinnedPosition: isPinned ? pinnedSeen : 0,
       updatedAt: now
     }
+    if (isPinned) pinnedSeen += 1
     const colours = sanitiseTabColors(tab)
     // A tab with no colour of its own must not erase a colour it has not been given yet — a freshly
     // restored row is colourless for a moment before the effect that adopts the memory runs.
@@ -157,9 +170,9 @@ export function rememberTabs(
 export function adoptTabMemory(
   tab: Tab,
   memory: TabMemory
-): { tab: Tab; pinned: boolean; position: number | null } {
+): { tab: Tab; pinned: boolean; position: number | null; pinnedPosition: number | null } {
   const entry = memory[memoryKeyForUrl(tab.url)]
-  if (!entry) return { tab, pinned: false, position: null }
+  if (!entry) return { tab, pinned: false, position: null, pinnedPosition: null }
   const colours = sanitiseTabColors({
     accentColor: entry.accentColor ?? tab.accentColor,
     auraColor: entry.auraColor ?? tab.auraColor
@@ -167,7 +180,12 @@ export function adoptTabMemory(
   const next: Tab = { ...tab }
   if (colours.accentColor) next.accentColor = colours.accentColor
   if (colours.auraColor) next.auraColor = colours.auraColor
-  return { tab: next, pinned: entry.pinned, position: entry.position }
+  return {
+    tab: next,
+    pinned: entry.pinned,
+    position: entry.position,
+    pinnedPosition: entry.pinned ? (entry.pinnedPosition ?? 0) : null
+  }
 }
 
 /**
@@ -177,6 +195,33 @@ export function adoptTabMemory(
  * now three long goes to the end rather than nowhere. Pinned tabs are hoisted by the sidebar itself, so
  * their position is only meaningful against the tab array.
  */
+export function applyRememberedPinnedPosition(
+  tabs: Tab[],
+  tabId: string,
+  pinnedPosition: number | null,
+  pinnedIds: string[]
+): Tab[] {
+  if (pinnedPosition === null || !Number.isFinite(pinnedPosition)) return tabs
+  const tab = tabs.find((candidate) => candidate.id === tabId)
+  if (!tab) return tabs
+  const others = tabs.filter((candidate) => candidate.id !== tabId)
+  const pinnedOthers = others.filter((candidate) => pinnedIds.includes(candidate.id))
+  const wanted = Math.max(0, Math.floor(pinnedPosition))
+  let insertAt: number
+  if (pinnedOthers.length === 0) {
+    // The only pinned tab: it belongs at the top, where the pinned section starts.
+    insertAt = 0
+  } else if (wanted >= pinnedOthers.length) {
+    insertAt = others.indexOf(pinnedOthers[pinnedOthers.length - 1]) + 1
+  } else {
+    insertAt = others.indexOf(pinnedOthers[wanted])
+  }
+  if (insertAt < 0) insertAt = others.length
+  const next = [...others]
+  next.splice(insertAt, 0, tab)
+  return next
+}
+
 export function applyRememberedPosition(tabs: Tab[], tabId: string, position: number | null): Tab[] {
   if (position === null || !Number.isFinite(position)) return tabs
   const from = tabs.findIndex((tab) => tab.id === tabId)

@@ -5814,6 +5814,19 @@ function ensureAiView(tabId: string, containerId?: unknown): Electron.WebContent
   view.webContents.setMaxListeners(50)
   webContentsPartitions.set(view.webContents.id, partition)
 
+  // A view is the one thing that does not survive: discard, restart, a blank-surface rebuild and a
+  // closed-then-reopened tab all build a new one, and this process keeps per-tab colours in memory
+  // next to the old one. Ask the renderer what this tab's colours are, rather than waiting for it to
+  // notice — a renderer that believes it has already sent them (same tab id, same colours) sends
+  // nothing, and the page then opens in the app's default colours while its row stays coloured.
+  setTimeout(() => {
+    try {
+      sendToMainWindow('request_tab_colors', tabId)
+    } catch {
+      /* no window yet (first launch): the activation path will follow */
+    }
+  }, 0)
+
   // Own the navigation surface. From here on, every programmatic load, reload, stop or history move on
   // this view records itself with the file and line that called it, so "the tab went back on its own"
   // stops being a theory and becomes a stack frame.

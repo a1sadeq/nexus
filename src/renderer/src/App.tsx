@@ -69,7 +69,7 @@ import TabColorModal from './components/TabColorModal'
 import TabColorButton from './components/TabColorButton'
 import ShortcutKeys from './components/ShortcutKeys'
 import { applyTabColors, sanitiseTabColors, tabAccentColor, type TabColors } from './lib/tabColors'
-import { adoptTabMemory, applyRememberedPosition, readTabMemory, rememberTabs, serializeTabMemory, TAB_MEMORY_STORAGE_KEY, type TabMemory } from './lib/tabMemory'
+import { adoptTabMemory, applyRememberedPinnedPosition, applyRememberedPosition, readTabMemory, rememberTabs, serializeTabMemory, TAB_MEMORY_STORAGE_KEY, type TabMemory } from './lib/tabMemory'
 import {
   containerColorOf,
   containerForShortcutIndex,
@@ -91,7 +91,7 @@ import './App.css'
 
 /** Bumped whenever this file's UI changes, so a stale bundle is obvious at a glance
  *  (`document.querySelector('[data-nexus-build]')` in devtools). */
-const NEXUS_UI_BUILD = '22'
+const NEXUS_UI_BUILD = '23'
 
 /** Where the "the guide has been seen" state lives. Set on close, cleared by "Tour again". */
 /**
@@ -1008,6 +1008,7 @@ Acknowledge these skills with a concise confirmation in this exact format:
     memoryBootstrappedRef.current = true
     let nextTabs = tabs
     const toPin: string[] = []
+    const placements: { id: string; position: number | null; pinnedPosition: number | null }[] = []
     for (const tab of tabs) {
       if (adopted.has(tab.id)) continue
       adopted.add(tab.id)
@@ -1017,8 +1018,26 @@ Acknowledge these skills with a concise confirmation in this exact format:
         nextTabs = nextTabs.map((candidate) => (candidate.id === tab.id ? inherited.tab : candidate))
       }
       if (inherited.pinned) toPin.push(tab.id)
-      if (inherited.position !== null) {
-        nextTabs = applyRememberedPosition(nextTabs, tab.id, inherited.position)
+      placements.push({
+        id: tab.id,
+        position: inherited.position,
+        pinnedPosition: inherited.pinnedPosition
+      })
+    }
+    // Pinned tabs are drawn in their own group, so their place there is a different index from their
+    // place in the flat list. Both are restored, and the pinned one is applied against the pin list as
+    // it will be once this pass has added to it.
+    const pinnedAfter = Array.from(new Set([...pinnedIdsRef.current, ...toPin]))
+    for (const placement of placements) {
+      if (placement.pinnedPosition !== null) {
+        nextTabs = applyRememberedPinnedPosition(
+          nextTabs,
+          placement.id,
+          placement.pinnedPosition,
+          pinnedAfter
+        )
+      } else if (placement.position !== null) {
+        nextTabs = applyRememberedPosition(nextTabs, placement.id, placement.position)
       }
     }
     if (nextTabs !== tabs) setTabs(nextTabs)
@@ -1035,6 +1054,24 @@ Acknowledge these skills with a concise confirmation in this exact format:
       } catch {
         /* pinning is already applied in this session */
       }
+    }
+  }, [tabs])
+
+  /**
+   * A tab that leaves the sidebar must be a stranger again.
+   *
+   * Ctrl+Shift+T re-inserts the tab object it stored when the tab was closed — the same id, not a new
+   * one — so "have I adopted this tab already?" answered yes and the reopened tab kept neither its pin
+   * nor its colours. The same cold-start applies to the colours sent to a tab's view: main drops them
+   * with the view, and a renderer that thinks it has already sent them sends nothing.
+   */
+  useEffect(() => {
+    const live = new Set(tabs.map((tab) => tab.id))
+    for (const id of Array.from(memoryAdoptedRef.current)) {
+      if (!live.has(id)) memoryAdoptedRef.current.delete(id)
+    }
+    for (const id of Object.keys(sentTabColorsRef.current)) {
+      if (!live.has(id)) delete sentTabColorsRef.current[id]
     }
   }, [tabs])
 
@@ -1520,10 +1557,27 @@ Acknowledge these skills with a concise confirmation in this exact format:
     const unsubPin = window.electron?.ipcRenderer.on('toggle_pin_tab', handleTogglePinTab)
     const unsubRestarted = window.electron?.ipcRenderer.on('tab_restarted', handleTabRestarted)
 
+    // Main has just built a view for this tab and wants to know what it should look like. Answering
+    // here rather than only on activation is what colours a *rebuilt* view: discard, restart, the
+    // blank-surface rebuild and Ctrl+Shift+T all land in this handler.
+    const handleRequestTabColors = (_event: unknown, tabId: string): void => {
+      if (typeof tabId !== 'string' || !tabId) return
+      const tab = tabsRef.current.find((candidate) => candidate.id === tabId)
+      const colors = sanitiseTabColors(tab ?? {})
+      const key = `${colors.accentColor ?? ''}|${colors.auraColor ?? ''}`
+      sentTabColorsRef.current[tabId] = key
+      window.electron?.ipcRenderer.send('set_tab_colors', tabId, {
+        accentColor: colors.accentColor,
+        auraColor: colors.auraColor
+      })
+    }
+    const unsubColors = window.electron?.ipcRenderer.on('request_tab_colors', handleRequestTabColors)
+
     return () => {
       if (typeof unsubCycle === 'function') unsubCycle()
       if (typeof unsubPin === 'function') unsubPin()
       if (typeof unsubRestarted === 'function') unsubRestarted()
+      if (typeof unsubColors === 'function') unsubColors()
     }
   }, [])
 
@@ -2237,8 +2291,18 @@ Acknowledge these skills with a concise confirmation in this exact format:
             const { tabs: nextTabs, activeId: nextId, restoredEntry, nextStack } = reopenClosedTab(tabs, currentStack)
             if (restoredEntry) {
               setTabs(nextTabs)
-              if (restoredEntry.isPinned && !pinnedIds.includes(restoredEntry.tab.id)) {
-                togglePin(restoredEntry.tab.id)
+              // Pinned on reopen, without the toggle. `togglePin` decides from whatever the closure
+              // last saw, and a toggle that guesses wrong *unpins* the tab the user just got back.
+              if (restoredEntry.isPinned && !pinnedIdsRef.current.includes(restoredEntry.tab.id)) {
+                const merged = Array.from(new Set([...pinnedIdsRef.current, restoredEntry.tab.id]))
+                pinnedIdsRef.current = merged
+                setPinnedIds(merged)
+                try {
+                  localStorage.setItem('vicinae.pinned', JSON.stringify(merged))
+                  void window.electron?.ipcRenderer?.invoke('save_pinned', JSON.stringify(merged))?.catch(() => {})
+                } catch {
+                  /* the pin is already applied for this session */
+                }
               }
               if (nextId && restoredEntry.tab.url) {
                 // @ts-ignore
