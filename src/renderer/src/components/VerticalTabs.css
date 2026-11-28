@@ -124,3 +124,53 @@
   background: rgba(0, 0, 0, 0.28);
   border-color: rgba(255, 255, 255, 0.35);
 }
+
+/*
+ * Every tab row is tinted with its provider's colour, not only the selected one.
+ *
+ * The row used to be neutral unless it was active, so a list of six tabs read as six identical grey
+ * bars and the only way to tell Gemini from ChatGPT was to read the title. Now the row itself carries
+ * the colour — a soft gradient of the provider's accent, a border in the same accent, and a matching
+ * number badge — while the selected tab keeps the brighter arc-reactor treatment on top of it.
+ *
+ * `!important` for the same reason the arc-reactor uses it: the row's own Tailwind utilities
+ * (`bg-(--surface2)/50`) are in the same cascade layer, and a tint that loses to a utility class is a
+ * tint that silently disappears.
+ */
+.vertical-tab-provider {
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--provider-gradient-start, var(--provider-color, #00e5ff)) 14%, var(--surface2, #0f3460)),
+    color-mix(in srgb, var(--provider-gradient-end, var(--provider-color, #00e5ff)) 8%, var(--surface, #16213e))
+  ) !important;
+  border-color: color-mix(in srgb, var(--provider-color, #00e5ff) 32%, transparent) !important;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--provider-color, #00e5ff) 8%, transparent);
+}
+
+.vertical-tab-provider:hover {
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--provider-gradient-start, var(--provider-color, #00e5ff)) 22%, var(--surface2, #0f3460)),
+    color-mix(in srgb, var(--provider-gradient-end, var(--provider-color, #00e5ff)) 14%, var(--surface, #16213e))
+  ) !important;
+  border-color: color-mix(in srgb, var(--provider-color, #00e5ff) 58%, transparent) !important;
+  box-shadow:
+    0 0 12px color-mix(in srgb, var(--provider-color, #00e5ff) 20%, transparent),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+/* A sleeping tab keeps its colour, but quietly: it is still telling you whose tab it is. */
+.vertical-tab-provider.vertical-tab-sleeping {
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--provider-color, #00e5ff) 7%, var(--surface, #16213e)),
+    color-mix(in srgb, var(--provider-color, #00e5ff) 4%, var(--bg, #1a1a2e))
+  ) !important;
+  border-color: color-mix(in srgb, var(--provider-color, #00e5ff) 18%, transparent) !important;
+}
+
+.vertical-tab-provider .vertical-tab-number {
+  color: color-mix(in srgb, var(--provider-color, #00e5ff) 70%, #ffffff);
+  border-color: color-mix(in srgb, var(--provider-color, #00e5ff) 40%, transparent);
+  background: color-mix(in srgb, var(--provider-color, #00e5ff) 12%, rgba(0, 0, 0, 0.35));
+}

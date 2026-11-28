@@ -3,6 +3,8 @@ import type { HistoryItem, ModelKey } from '../lib/tabs'
 import { fzfMatch } from '../lib/fzf'
 import { BrandIcon, IconSearch, IconTrash, IconHistory, IconClock, IconImage } from './BrandIcons'
 import { BRAND_IDS } from '../lib/modelVisuals'
+import { providerColorFor } from '../lib/providerVisuals'
+import './NewTabOverlay.css'
 import { matchesShortcut, getShortcutKeys } from '../lib/shortcuts'
 import { useFocusLock } from '../lib/useFocusLock'
 
@@ -46,7 +48,12 @@ function itemDate(item: HistoryItem): string {
 }
 
 interface Props {
-  models: { key: string; label: string; url: string; desc?: string; icon?: string }[]
+  /**
+   * `color` is the accent configured for the provider in Settings → AI Providers. It used to be ignored
+   * here: the new-tab list painted every provider with a hardcoded brand colour, so a provider given a
+   * custom colour in Settings still arrived grey-blue in the one screen you open a tab from.
+   */
+  models: { key: string; label: string; url: string; desc?: string; icon?: string; color?: string }[]
   usageCounts: Record<string, number>
   history: HistoryItem[]
   onOpenNew: (provider: ProviderDef) => void
@@ -87,7 +94,9 @@ export default function NewTabOverlay({
         name: m.label || m.key,
         url: m.url,
         desc: m.desc || (meta ? meta.desc : DEFAULT_DESC),
-        color: meta ? meta.color : DEFAULT_COLOR,
+        // Configured accent first, then the brand colour, then the neutral default — the same
+        // resolution Settings and the tabs use (lib/providerVisuals).
+        color: providerColorFor(m.key, models) || (meta ? meta.color : DEFAULT_COLOR),
         icon: m.icon
       })
     }
@@ -302,13 +311,12 @@ export default function NewTabOverlay({
                       setProviderIdx(idx)
                       onOpenNew(p)
                     }}
-                    className={`p-4 border-b border-(--border)/50 cursor-pointer flex items-start gap-4 transition-colors group ${
-                      isSelected
-                        ? 'bg-(--border)'
-                        : isPassiveActive
-                          ? 'bg-(--surface)'
-                          : 'hover:bg-(--surface)'
-                    }`}
+                    data-provider-row={p.id}
+                    data-selected={isSelected ? 'true' : isPassiveActive ? 'passive' : 'false'}
+                    // The row, the bar down its left edge and the name all take the provider's accent
+                    // (NewTabOverlay.css), so the list reads as colours rather than as a table.
+                    style={{ '--provider-color': p.color } as React.CSSProperties}
+                    className="newtab-provider p-4 border-b border-(--border)/50 cursor-pointer flex items-start gap-4 transition-colors group"
                   >
                     <div
                       className={`w-10 h-10 rounded-lg flex items-center justify-center text-white shrink-0 shadow-[inset_0_1px_0_rgba(255,255,255,0.25),inset_0_-6px_12px_rgba(0,0,0,0.25),0_2px_6px_rgba(0,0,0,0.4)] transition-all duration-150 ${
@@ -319,7 +327,8 @@ export default function NewTabOverlay({
                             : 'group-hover:ring-1 group-hover:ring-white/20 group-hover:shadow-lg'
                       }`}
                       style={{
-                        background: `linear-gradient(135deg, ${p.color} 0%, ${p.color}99 100%)`
+                        background: `linear-gradient(135deg, ${p.color} 0%, ${p.color}99 100%)`,
+                        boxShadow: `0 0 14px ${p.color}66, inset 0 1px 0 rgba(255,255,255,0.25)`
                       }}
                     >
                       {p.icon || BRAND_IDS[p.id] ? (
@@ -329,7 +338,7 @@ export default function NewTabOverlay({
                       )}
                     </div>
                     <div className="flex-1 min-w-0">
-                      <div className="text-(--text) font-medium mb-1 flex items-center">
+                      <div className="font-medium mb-1 flex items-center" style={{ color: p.color }}>
                         {p.name}
                         {isSelected && (
                           <span className="ml-auto text-[10px] bg-(--accent)/20 text-(--accent) px-2 py-0.5 rounded flex items-center gap-1">
@@ -338,7 +347,7 @@ export default function NewTabOverlay({
                           </span>
                         )}
                       </div>
-                      <div className="text-(--text2) text-xs leading-relaxed truncate">
+                      <div className="newtab-provider-desc text-xs leading-relaxed truncate text-(--text2)">
                         {p.desc}
                       </div>
                     </div>

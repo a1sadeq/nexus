@@ -1,0 +1,43 @@
+/*
+ * The provider list on the new-tab screen, coloured by each provider's own accent.
+ *
+ * Every row used to be the same surface colour with a coloured 40px tile — the accent existed, but only
+ * inside a square, and a provider whose colour was configured in Settings never reached this screen at
+ * all (the list had its own hardcoded brand map). A row now carries the accent down its left edge, in
+ * its background and in its name, so "which one do I open" is answered by colour before it is answered
+ * by reading.
+ *
+ * `--provider-color` is set inline per row from the resolved provider colour; everything here is derived
+ * from it, so adding a provider with any accent needs no CSS.
+ */
+
+.newtab-provider {
+  position: relative;
+  border-left: 3px solid transparent;
+  background: color-mix(in srgb, var(--provider-color, #8899aa) 5%, transparent);
+}
+
+.newtab-provider:hover {
+  border-left-color: color-mix(in srgb, var(--provider-color, #8899aa) 70%, transparent);
+  background: color-mix(in srgb, var(--provider-color, #8899aa) 13%, transparent);
+}
+
+/* The provider the history pane is showing, while the list has focus. */
+.newtab-provider[data-selected='passive'] {
+  border-left-color: color-mix(in srgb, var(--provider-color, #8899aa) 80%, transparent);
+  background: color-mix(in srgb, var(--provider-color, #8899aa) 11%, transparent);
+}
+
+/* Press Enter here: the accent is the strongest thing on the screen. */
+.newtab-provider[data-selected='true'] {
+  border-left-color: var(--provider-color, #8899aa);
+  background: color-mix(in srgb, var(--provider-color, #8899aa) 20%, transparent);
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--provider-color, #8899aa) 45%, transparent),
+    inset 12px 0 22px -18px var(--provider-color, #8899aa);
+}
+
+/* Keep the description readable on a tinted row: the accent belongs to the name, not the prose. */
+.newtab-provider .newtab-provider-desc {
+  color: color-mix(in srgb, var(--text2, #8899aa) 85%, #ffffff 15%);
+}

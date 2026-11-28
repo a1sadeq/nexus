@@ -157,20 +157,21 @@ export default function VerticalTabs({
         }}
         title={`${t.title || 'New Chat'} (${t.model})${containerMarks?.[t.id] ? ` · ${containerMarks[t.id].name}` : ''} ${isSleeping ? '— Sleeping / Hibernated (click to wake)' : ''} — Right-click to ${isPinned ? 'unpin' : 'pin'}`}
         style={
-          isActive
-            ? ({
-                '--provider-color': color,
-                '--provider-gradient-start': gradient.start,
-                '--provider-gradient-end': gradient.end
-              } as React.CSSProperties)
-            : undefined
+          // Every row carries its provider's colour, selected or not: the list is meant to read as a map of
+          // what is open — Gemini teal, ChatGPT green, your own provider in its own accent — not as a
+          // column of identical grey rows with coloured text inside.
+          {
+            '--provider-color': color,
+            '--provider-gradient-start': gradient.start,
+            '--provider-gradient-end': gradient.end
+          } as React.CSSProperties
         }
         className={`group relative flex items-center justify-between rounded-lg cursor-pointer transition-all duration-150 border ${
           isActive
             ? 'vertical-tab-arc-reactor text-white shadow-lg font-semibold border-white/30'
             : isSleeping
-              ? 'vertical-tab-sleeping bg-(--surface)/40 hover:bg-(--surface2)/50 border-white/5 hover:border-white/15 text-(--text2) hover:text-(--text)'
-              : 'bg-(--surface2)/50 hover:bg-(--surface2) border-white/10 hover:border-white/20 text-(--text)'
+              ? 'vertical-tab-provider vertical-tab-sleeping bg-(--surface)/40 border-white/5 text-(--text2) hover:text-(--text)'
+              : 'vertical-tab-provider bg-(--surface2)/50 text-(--text)'
         } ${sidebarCollapsed ? 'px-2 py-1.5' : 'px-2.5 py-2'} ${
           isDragging ? 'opacity-40 border-dashed border-(--accent)' : ''
         } ${isDragOver ? 'border-t-2 border-t-(--accent) shadow-lg' : ''}`}
@@ -234,7 +235,7 @@ export default function VerticalTabs({
               className={`text-[11px] font-medium tracking-tight truncate leading-tight flex-1 min-w-0 ${
                 isActive ? 'text-white font-semibold' : ''
               }`}
-              style={!isActive && !isSleeping ? { color } : undefined}
+              style={!isActive ? { color } : undefined}
             >
               {formatCollapsedTitle(t.title, 4)}
             </span>
@@ -248,9 +249,7 @@ export default function VerticalTabs({
               style={
                 isActive
                   ? { color: '#ffffff' }
-                  : !isSleeping
-                    ? { color }
-                    : undefined
+                  : { color: isSleeping ? `color-mix(in srgb, ${color} 70%, var(--text2))` : color }
               }
             >
               {t.title || 'New Chat'}
