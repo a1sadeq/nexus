@@ -232,10 +232,10 @@ jobs:
           case "$TAG" in refs/*) TAG="v$(node -p "require('./package.json').version")";; esac
           VERSION=$(node -p "require('./package.json').version")
           echo "Checking $TAG (version $VERSION)"
-          gh release view "$TAG" --json assets,isDraft,isLatest \
+          gh release view "$TAG" --json assets,isDraft \
             --jq '.assets[].name' | tee assets.txt
           for want in latest.yml latest-linux.yml; do
             grep -qx "$want" assets.txt || { echo "::error::missing $want — auto-update will not see this release"; exit 1; }
           done
           grep -q "nexus-${VERSION}-setup.exe" assets.txt || { echo "::error::missing the Windows installer"; exit 1; }
-          gh release view "$TAG" --json isDraft,isLatest --jq '"draft=\(.isDraft) latest=\(.isLatest)"'
+          gh release view "$TAG" --json isDraft,isPrerelease --jq '"draft=\(.isDraft) prerelease=\(.isPrerelease)"'
