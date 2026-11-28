@@ -40,9 +40,7 @@ describe('a view that was hidden is repainted, not re-attached — build 33', ()
     expect(main).toContain('wasHidden || !previousBounds')
     // Build 45 kept the decision and moved the repaint behind `ensureActiveViewPresented`, which verifies
     // the view is really on screen and then flips it with a gate — the strong path is still what runs.
-    expect(main).toContain(
-      "ensureActiveViewPresented('coming back from hidden (overlay / tab switch)')"
-    )
+    expect(main).toContain("'coming back from hidden (overlay / tab switch)'")
     expect(main).toContain('force: true')
   })
 

@@ -335,6 +335,10 @@ function isViewAttached(view: Electron.WebContentsView): boolean | null {
 
 /** When the active view's surface was last refreshed because the window came back. */
 let lastResumeRefreshAt = 0
+/** When the window was last hidden or minimised — a resume minutes later is a different animal. */
+let lastWindowHiddenAt = 0
+/** When the overlays were opened. A panel that was open for a moment is not a lost surface. */
+let overlaysOpenedAt = 0
 
 /**
  * Ask the view itself whether it is really on screen, and put it right if it is not.
@@ -1700,6 +1704,14 @@ app.commandLine.appendSwitch('disk-cache-size', '104857600')
 app.commandLine.appendSwitch('media-cache-size', '52428800')
 app.commandLine.appendSwitch('js-flags', '--max-old-space-size=512')
 app.commandLine.appendSwitch('process-per-site')
+// Chromium's own log goes to the terminal that started the app, and it is not the app's log. One
+// `tile memory limits exceeded, some content may not draw` warning per frame — sixty a second while a
+// heavy page rasterises — buries everything else, the app's own diagnostics included. Limit the
+// Chromium log to fatal errors unless a developer asks for it:
+//   NEXUS_VERBOSE_CHROMIUM=1 npm run dev
+if (process.env.NEXUS_VERBOSE_CHROMIUM !== '1') {
+  app.commandLine.appendSwitch('log-level', '3')
+}
 
 // Authoritative in-memory pinned tab cache. Eliminates synchronous per-candidate
 // disk reads during discard scans and ensures 100% synchronization with UI state.
@@ -3852,7 +3864,10 @@ function refreshActiveViewSurfaceAfterResume(reason: string): void {
   surfaceRepair.forget(tabId)
   // Verify and re-present, not just repaint: a resume is the transition where the surface — or the
   // presenting of the view itself — may be gone.
-  ensureActiveViewPresented(`window resumed (${reason})`, 'suspect')
+  // A window that was hidden for minutes is the transition the first blank reports came from; a resume
+  // triggered by a focus change a second later is not. Only the long one pays for the flip.
+  const awayFor = lastWindowHiddenAt > 0 ? Date.now() - lastWindowHiddenAt : 0
+  ensureActiveViewPresented(`window resumed (${reason})`, awayFor >= 1500 ? 'always' : 'suspect')
 }
 
 /** Rebuild one tab's surface in place, keeping its page. Never recreates the WebContents. */
@@ -4063,7 +4078,20 @@ function reconcileViewPresentation(): void {
           // first, a check that the view is actually in the window and showing, because the build-44
           // trace shows `setVisible {visible=true}` being logged for a view that was not on screen.
           surfaceRepair.forget(activeViewId)
-          ensureActiveViewPresented('coming back from hidden (overlay / tab switch)')
+          // An overlay that was *open* — Settings, Diagnostics, the address bar, or the notification
+          // toast, which hides every view the same way — hides the view for as long as it is up, and
+          // coming back from that is the transition Chromium can drop a surface over. The build-46
+          // diagnostics show exactly that: a notification opened an overlay at #811, closed at #820, the
+          // reconcile at #823 took the cheap path, and the AI view was blank. A tab switch is not that
+          // transition — it was the flash the user felt on every switch — so it keeps the cheap path and
+          // only flips if the presentation check had to repair something.
+          const overlayHidTheView =
+            Date.now() - lastOverlayCloseAt <= 1500 && overlaysOpenedAt > 0 && lastOverlayCloseAt > overlaysOpenedAt
+          const overlayWasLongEnough = overlayHidTheView && lastOverlayCloseAt - overlaysOpenedAt >= 250
+          ensureActiveViewPresented(
+            'coming back from hidden (overlay / tab switch)',
+            overlayWasLongEnough ? 'always' : 'suspect'
+          )
         } else {
           surfaceRepair.noteRepaint(activeViewId)
           forceViewRepaint(view, {
@@ -4201,6 +4229,13 @@ ipcMain.on('set_overlays_open', (_event, open: boolean) => {
       giveKeyboardToShell('overlay open')
     } catch {
       /* focus stays where it was; the overlay still owns the shortcuts */
+    }
+    // Guarded rather than plain: this handler is also evaluated on its own by the shortcut tests, where
+    // the module-level clock above does not exist. A missing clock must not cost the overlay its keyboard.
+    try {
+      overlaysOpenedAt = Date.now()
+    } catch {
+      /* not running inside the app's module scope */
     }
     traceNav(activeViewId || '', 'overlay', 'overlay open — AI view hidden', {})
     console.log('[overlay] open — the shell has the keyboard, the AI view is hidden')
@@ -4805,6 +4840,7 @@ function createWindow() {
   const suspendAllViews = () => {
     previewLoop.stop()
     arenaTitleSync.stop()
+    lastWindowHiddenAt = Date.now()
     for (const [tabId, view] of aiViews) {
       if (!view.webContents.isDestroyed()) {
         view.webContents.setBackgroundThrottling(true)
@@ -8595,6 +8631,13 @@ ipcMain.on('destroy_tab_view', async (_event, tabId: string) => {
 })
 
 // Ctrl+R: full reload of the active AI view (like a browser reload)
+ipcMain.on('reload_tab', (_event, tabId: string) => {
+  const view = tabId ? aiViews.get(tabId) : null
+  if (!view || view.webContents.isDestroyed()) return
+  traceNav(tabId, 'load', 'reload (tab context menu)', {})
+  view.webContents.reload()
+})
+
 ipcMain.on('reload_active_view', () => {
   const view = activeViewId ? aiViews.get(activeViewId) : null
   if (view) {

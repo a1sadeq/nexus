@@ -8,6 +8,7 @@ import { normaliseHexColor } from '../lib/tabColors'
 import { partitionTabSections, type TabSections } from '../lib/tabSections'
 import { AiStatusBadge } from './AiStatusBadge'
 import { formatCollapsedTitle, type TabAiStatus } from '../lib/tabStatus'
+import TabContextMenu, { type TabMenuItem } from './TabContextMenu'
 import './VerticalTabs.css'
 
 interface Props {
@@ -75,6 +76,9 @@ export default function VerticalTabs({
   const [draggingTabId, setDraggingTabId] = useState<string | null>(null)
   const [dragOverTabId, setDragOverTabId] = useState<string | null>(null)
   const [previewPos, setPreviewPos] = useState<{ top: number; left: number } | null>(null)
+  // The right-click menu: which tab it belongs to and where the cursor was. Right-click used to toggle
+  // pin and had no other options at all.
+  const [menu, setMenu] = useState<{ tabId: string; x: number; y: number } | null>(null)
   const hoverTimerRef = useRef<NodeJS.Timeout | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
 
@@ -114,6 +118,102 @@ export default function VerticalTabs({
         No active tabs
       </div>
     )
+  }
+
+  /**
+   * Everything the user can do to a tab from the sidebar, in one menu.
+   *
+   * The actions are the ones the app already knows how to perform — this is a surface for them, not a
+   * second implementation: pin, reload (a new `reload_tab`, so a background tab can be reloaded without
+   * being activated first), copy the address or the title, hoist to the top of its section, and the
+   * three ways of closing that a browser owes you.
+   */
+  const buildMenuItems = (t: Tab): TabMenuItem[] => {
+    const isPinned = pinnedIds.includes(t.id)
+    const openable = orderedTabs.filter((candidate) => candidate.id !== t.id)
+    const closable = openable.filter((candidate) => !pinnedIds.includes(candidate.id))
+    const indexInOrder = orderedTabs.findIndex((candidate) => candidate.id === t.id)
+    const below = indexInOrder >= 0 ? orderedTabs.slice(indexInOrder + 1) : []
+    // The top of *this tab's* section: pinning moves a tab above the sessions, so hoisting an unpinned
+    // tab to the very top would be a no-op as far as the eye is concerned.
+    const sectionTop = (isPinned
+      ? pinnedTabs
+      : activeTabs.filter((candidate) => !pinnedIds.includes(candidate.id))
+    )[0]?.id
+    const copy = (text: string): void => {
+      try {
+        void navigator.clipboard?.writeText(text)
+      } catch {
+        /* clipboard permission is the user's; a failed copy must not close the app's menu path */
+      }
+    }
+
+    return [
+      {
+        id: isPinned ? 'unpin' : 'pin',
+        label: isPinned ? 'Unpin tab' : 'Pin tab',
+        hint: isPinned ? 'Back to Active Sessions' : 'Keep it at the top across restarts',
+        onSelect: () => onTogglePin(t.id)
+      },
+      {
+        id: 'reload',
+        label: 'Reload',
+        hint: 'Reloads without switching to it',
+        onSelect: () => {
+          try {
+            // @ts-ignore -- the preload bridge is untyped here, as everywhere else in this file
+            window.electron?.ipcRenderer.send('reload_tab', t.id)
+          } catch {
+            /* nothing to reload */
+          }
+        }
+      },
+      {
+        id: 'copy-url',
+        label: 'Copy address',
+        disabled: !t.url,
+        onSelect: () => copy(t.url || '')
+      },
+      {
+        id: 'copy-title',
+        label: 'Copy title',
+        disabled: !t.title,
+        onSelect: () => copy(t.title || '')
+      },
+      {
+        id: 'move-top',
+        label: 'Move to top',
+        hint: isPinned ? 'Top of the pinned list' : 'Top of Active Sessions',
+        separatorBefore: true,
+        disabled: !onReorder || !sectionTop || sectionTop === t.id,
+        onSelect: () => {
+          if (sectionTop && sectionTop !== t.id) onReorder?.(t.id, sectionTop)
+        }
+      },
+      {
+        id: 'close',
+        label: 'Close tab',
+        danger: true,
+        separatorBefore: true,
+        onSelect: () => onClose(t.id)
+      },
+      {
+        id: 'close-others',
+        label: 'Close other tabs',
+        hint: `${closable.length} to close`,
+        danger: true,
+        disabled: closable.length === 0,
+        onSelect: () => closable.forEach((candidate) => onClose(candidate.id))
+      },
+      {
+        id: 'close-below',
+        label: 'Close tabs below',
+        hint: `${below.length} to close`,
+        danger: true,
+        disabled: below.length === 0,
+        onSelect: () => below.forEach((candidate) => onClose(candidate.id))
+      }
+    ]
   }
 
   const renderTab = (t: Tab, isSleeping: boolean): ReactElement => {
@@ -162,7 +262,7 @@ export default function VerticalTabs({
           setDraggingTabId(null)
           setDragOverTabId(null)
         }}
-        title={`${t.title || 'New Chat'} (${t.model})${containerMarks?.[t.id] ? ` · ${containerMarks[t.id].name}` : ''} ${isSleeping ? '— Sleeping / Hibernated (click to wake)' : ''} — Right-click to ${isPinned ? 'unpin' : 'pin'}`}
+        title={`${t.title || 'New Chat'} (${t.model})${containerMarks?.[t.id] ? ` · ${containerMarks[t.id].name}` : ''} ${isSleeping ? '— Sleeping / Hibernated (click to wake)' : ''} — Right-click for tab actions`}
         style={
           // Every row carries its provider's colour, selected or not: the list is meant to read as a map of
           // what is open — Gemini teal, ChatGPT green, your own provider in its own accent — not as a
@@ -185,7 +285,8 @@ export default function VerticalTabs({
         onClick={() => onSelect(t.id)}
         onContextMenu={(e) => {
           e.preventDefault()
-          onTogglePin(t.id)
+          e.stopPropagation()
+          setMenu({ tabId: t.id, x: e.clientX, y: e.clientY })
         }}
         onMouseEnter={(e) => {
           const rect = e.currentTarget.getBoundingClientRect()
@@ -338,10 +439,14 @@ export default function VerticalTabs({
     )
   }
 
+  const menuTab = menu ? orderedTabs.find((candidate) => candidate.id === menu.tabId) : null
+
   return (
-    <div
+    <>
+      <div
       ref={containerRef}
       data-guide={dataGuide}
+      data-tab-scroller="true"
       className="flex flex-col gap-1 w-full px-2 py-1 overflow-y-auto overflow-x-hidden flex-1 select-none focus:outline-none"
       role="tablist"
       aria-label="Browser Tabs"
@@ -428,6 +533,15 @@ export default function VerticalTabs({
           {discardedTabs.map((t) => renderTab(t, true))}
         </div>
       )}
-    </div>
+      </div>
+      {menu && menuTab && (
+        <TabContextMenu
+          x={menu.x}
+          y={menu.y}
+          items={buildMenuItems(menuTab)}
+          onClose={() => setMenu(null)}
+        />
+      )}
+    </>
   )
 }

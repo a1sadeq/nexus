@@ -161,7 +161,7 @@ describe('VerticalTabs Component', () => {
     expect(handleClose).toHaveBeenCalledWith('tab-1')
   })
 
-  it('triggers onTogglePin on right click (context menu)', async () => {
+  it('opens the tab menu on right click, and pins from it', async () => {
     const handlePin = vi.fn()
     await act(async () => {
       root.render(
@@ -177,7 +177,18 @@ describe('VerticalTabs Component', () => {
     })
     const secondTab = container.querySelector('[data-vertical-tab-id="tab-2"]') as HTMLElement
     await act(async () => {
-      secondTab.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }))
+      secondTab.dispatchEvent(
+        new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 40, clientY: 120 })
+      )
+    })
+    // Build 47: right-click opens the tab menu instead of silently toggling pin, and pinning is the
+    // first thing in it.
+    const menu = container.querySelector('[data-testid="tab-context-menu"]') as HTMLElement
+    expect(menu).toBeTruthy()
+    const pinItem = menu.querySelector('[data-menu-action="pin"]') as HTMLButtonElement
+    expect(pinItem).toBeTruthy()
+    await act(async () => {
+      pinItem.click()
     })
     expect(handlePin).toHaveBeenCalledWith('tab-2')
   })

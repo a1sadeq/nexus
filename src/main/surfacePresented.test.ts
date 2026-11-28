@@ -97,9 +97,11 @@ describe('build 45 — one way to present the active view', () => {
 
   it('only the escalation flips unconditionally', () => {
     expect(main).toContain("ensureActiveViewPresented('reconciled twice without a frame', 'always')")
-    expect(main).toContain('ensureActiveViewPresented(`window resumed (${reason})`, \'suspect\')')
-    // The tab-switch / overlay-close path takes the default, which is 'suspect'.
-    expect(main).toContain("ensureActiveViewPresented('coming back from hidden (overlay / tab switch)')")
+    expect(main).toContain('ensureActiveViewPresented(`window resumed (${reason})`, awayFor >= 1500')
+    // The tab-switch / overlay-close path decides from the overlay timestamps (build 47): an overlay
+    // that was really open flips, a tab switch does not.
+    expect(main).toContain("'coming back from hidden (overlay / tab switch)'")
+    expect(main).toContain("overlayWasLongEnough ? 'always' : 'suspect'")
   })
 
   it('never forces a repaint over an overlay, or on a tab that is not active', () => {
