@@ -1,4 +1,3 @@
-
 import { closeWebContents, type ClosableContents } from './webContentsLifecycle'
 
 import { join } from 'path'
@@ -372,6 +371,73 @@ export class TabDiscardManager {
 
   public waitForClose(tabId: string): Promise<void> {
     return this.closing.get(tabId) || Promise.resolve()
+  }
+
+  /**
+   * Evict a tab because a person asked for it.
+   *
+   * Everything else in this class evicts on a timer or on capacity pressure, and both of those have to
+   * refuse: pinned tabs, tabs mid-turn, tabs still loading. A user saying "free this one" is a different
+   * kind of evidence, so the guards here are only the ones that would make the eviction fail outright —
+   * no view to drop, a teardown already in flight, or no URL to bring the tab back with. A pinned or
+   * active tab may be discarded on request; that is the whole point of the menu item.
+   *
+   * The saved state is what makes this indistinguishable from the automatic eviction: the wake path in
+   * `activate_tab` loads the URL again and restores the scroll position, so the tab comes back rebuilt
+   * with its conversation, which is exactly what "close the tab and open it again" used to do by hand.
+   */
+  public async restartTab(tabId: string): Promise<'ok' | 'no-view' | 'busy' | 'no-url'> {
+    if (!tabId) return 'no-view'
+    const view = this.views.get(tabId)
+    if (!view) return 'no-view'
+    if (this.closing.has(tabId)) return 'busy'
+    let url = ''
+    try {
+      url = this.knownContents(tabId, view)?.getURL() || ''
+    } catch {
+      url = ''
+    }
+    if (!isUsableRestoreUrl(url)) return 'no-url'
+
+    // The scroll position is a nicety, not a condition: it is read with the same bounded timeout the
+    // timer path uses, and a page that will not answer simply comes back at the top.
+    let scrollY = 0
+    try {
+      const contents = this.knownContents(tabId, view)
+      if (contents) {
+        let timer: NodeJS.Timeout | undefined
+        const timedOut = new Promise<number>((resolve) => {
+          timer = setTimeout(() => resolve(0), this.snapshotTimeoutMs)
+        })
+        const read = Promise.resolve(contents.executeJavaScript('window.scrollY'))
+          .then((val) => Number(val) || 0)
+          .catch(() => 0)
+        scrollY = await Promise.race([read, timedOut])
+        if (timer) clearTimeout(timer)
+        if (!Number.isFinite(scrollY) || scrollY < 0) scrollY = 0
+      }
+    } catch {
+      scrollY = 0
+    }
+
+    const state: EvictedTabState = { url, scrollY, timestamp: this.clock() }
+    this.pendingTickets.delete(tabId)
+    const ok = await this.teardown(tabId, view, () => {
+      if (this.views.get(tabId) !== view) return
+      this.evictedTabStates.set(tabId, state)
+      this.views.delete(tabId)
+      this.contents.delete(tabId)
+      this.unavailable.delete(tabId)
+      this.lastActivatedAt.delete(tabId)
+      this.backgroundSince.delete(tabId)
+      this.enteredIdleAt.delete(tabId)
+      this.retryAfter.delete(tabId)
+      this.lastEviction = { tabId, reason: 'capacity', timestamp: this.clock() }
+    })
+    if (!ok) return 'busy'
+    this.reconcileCapacity()
+    this.notifyStatusChange()
+    return 'ok'
   }
 
   public async closeTab(tabId: string): Promise<boolean> {
@@ -758,4 +824,3 @@ export class TabDiscardManager {
     }
   }
 }
-

@@ -43,16 +43,30 @@ export default function TabContextMenu({ x, y, items, onClose }: Props): ReactEl
         close()
       }
     }
-    // A menu that stays open while the list scrolls under it is worse than no menu: it points at the
-    // wrong row. Dismiss on anything that moves the anchor.
-    window.addEventListener('mousedown', close, true)
+    // Dismiss on a press anywhere that is not the menu itself.
+    //
+    // This was the build-47 bug, and it made every single item dead: the dismissal listened in the
+    // *capture* phase on `window`, so it ran before the button under the pointer ever saw the press. The
+    // menu was removed from the DOM between `mousedown` and `mouseup`, the button never received a
+    // `click`, and nothing the user picked did anything at all. The listener now stays out of the way of
+    // presses that land inside the menu; `stopPropagation` in the menu's own handler is not enough,
+    // because capture-phase listeners run first by definition.
+    const onPointerDown = (event: MouseEvent): void => {
+      // `instanceof` rather than a cast: a press dispatched on `window` itself (which is what a
+      // dismissal test does, and what a synthetic close looks like) has a target that is not a Node, and
+      // asking `contains()` about it throws — which would leave the menu open instead of closing it.
+      const target = event.target
+      if (target instanceof Node && ref.current && ref.current.contains(target)) return
+      close()
+    }
+    window.addEventListener('mousedown', onPointerDown, true)
     window.addEventListener('resize', close)
     window.addEventListener('blur', close)
     window.addEventListener('keydown', onKey, true)
     const scroller = ref.current?.closest('[data-tab-scroller]') as HTMLElement | null
     scroller?.addEventListener('scroll', close, { passive: true })
     return () => {
-      window.removeEventListener('mousedown', close, true)
+      window.removeEventListener('mousedown', onPointerDown, true)
       window.removeEventListener('resize', close)
       window.removeEventListener('blur', close)
       window.removeEventListener('keydown', onKey, true)
@@ -60,9 +74,23 @@ export default function TabContextMenu({ x, y, items, onClose }: Props): ReactEl
     }
   }, [onClose])
 
-  // Keep the menu inside the window: a right-click near the bottom edge used to draw half a menu.
+  // Keep the menu inside the window, and — the part that decides whether it is clickable at all — inside
+  // the sidebar. The AI view is a native view drawn *over* the renderer, so any part of this menu that
+  // spills past the sidebar's right edge is covered by the page and cannot be pressed. Clamping to the
+  // tab list's own box means every item is always reachable.
   const height = items.length * 30 + 16
-  const left = Math.max(MENU_MARGIN, Math.min(x, window.innerWidth - MENU_WIDTH - MENU_MARGIN))
+  let maxRight = window.innerWidth
+  try {
+    const scroller = document.querySelector('[data-tab-scroller]')
+    const rect = scroller?.getBoundingClientRect()
+    if (rect && rect.width > 0) maxRight = Math.min(maxRight, rect.right)
+  } catch {
+    /* no tab list on screen: the window is the bound */
+  }
+  const left = Math.max(
+    MENU_MARGIN,
+    Math.min(x, Math.max(MENU_MARGIN, maxRight - MENU_WIDTH - MENU_MARGIN))
+  )
   const top = Math.max(MENU_MARGIN, Math.min(y, window.innerHeight - height - MENU_MARGIN))
 
   return (
@@ -71,7 +99,6 @@ export default function TabContextMenu({ x, y, items, onClose }: Props): ReactEl
       role="menu"
       aria-label="Tab actions"
       data-testid="tab-context-menu"
-      onMouseDown={(event) => event.stopPropagation()}
       onContextMenu={(event) => event.preventDefault()}
       style={{
         position: 'fixed',

@@ -140,6 +140,15 @@ export default function VerticalTabs({
       ? pinnedTabs
       : activeTabs.filter((candidate) => !pinnedIds.includes(candidate.id))
     )[0]?.id
+    const isDiscarded = discardedTabIds?.includes(t.id) ?? false
+    const send = (channel: string, ...args: unknown[]): void => {
+      try {
+        // @ts-ignore -- the preload bridge is untyped here, as everywhere else in this file
+        window.electron?.ipcRenderer.send(channel, ...args)
+      } catch {
+        /* the bridge is absent in a plain browser */
+      }
+    }
     const copy = (text: string): void => {
       try {
         void navigator.clipboard?.writeText(text)
@@ -159,13 +168,23 @@ export default function VerticalTabs({
         id: 'reload',
         label: 'Reload',
         hint: 'Reloads without switching to it',
+        onSelect: () => send('reload_tab', t.id)
+      },
+      {
+        id: 'restart',
+        label: 'Restart tab',
+        hint: 'Rebuilds the view — the fix for a blank AI view',
+        onSelect: () => send('restart_tab', t.id)
+      },
+      {
+        // The two memory actions are one item: a tab is either taking memory or it is not, and the menu
+        // should offer the move that applies rather than both.
+        id: isDiscarded ? 'load' : 'discard',
+        label: isDiscarded ? 'Load again' : 'Discard from memory',
+        hint: isDiscarded ? 'Reopens the page' : 'Frees the page; the tab stays',
         onSelect: () => {
-          try {
-            // @ts-ignore -- the preload bridge is untyped here, as everywhere else in this file
-            window.electron?.ipcRenderer.send('reload_tab', t.id)
-          } catch {
-            /* nothing to reload */
-          }
+          if (isDiscarded) onSelect(t.id)
+          else send('discard_tab', t.id)
         }
       },
       {

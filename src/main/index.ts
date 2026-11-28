@@ -179,6 +179,7 @@ import { cleanupAllUploadTempDirs, cleanupStaleUploadTempDirs } from './uploadAt
 import { forceViewRepaint } from './viewRepaint'
 import { classifySurfaceReturn } from './surfaceReturn'
 import { repairViewSurface, SurfaceRepairPolicy } from './viewSurface'
+import { isUniformBitmap, judgeSurface, mayRestartSurface, type RestartBudget } from './surfacePixels'
 import { decideResumeSurfaceAction } from './surfaceResume'
 import { VideoJobManager } from './videoJob'
 import { sweepStaleJobDirs } from './videoPrepare'
@@ -525,6 +526,138 @@ function probeSurfaceState(
 }
 
 /**
+ * The one check that cannot be lied to: the pixels.
+ *
+ * Every wired-in witness in this app said the view was fine while it was blank. `getVisible()` is about
+ * the wrapper, `document.visibilityState` is about what the page believes, and the presentation check is
+ * about geometry — all three were green in the traces of builds 46 and 47, on sessions where the user was
+ * looking at an empty frame. `capturePage()` reads the composited surface itself, so a dropped surface
+ * comes back flat, and `surfacePixels.ts` grades that.
+ *
+ * The cost of being wrong in each direction decides the shape of this:
+ *
+ *   - a false "painted" leaves the user exactly where they are now, no worse;
+ *   - a false "blank" rebuilds a healthy view, which is a reload of a page they were reading.
+ *
+ * So a rebuild needs all of: a captured frame, flat pixels, page text that proves there is something to
+ * paint, no navigation in flight, a cooldown, and a hard cap per tab per run.
+ */
+const surfaceRestartBudget = new Map<string, RestartBudget>()
+const lastSurfaceProbe = new Map<string, number>()
+/** The shortest gap between two pixel probes for the same tab. */
+const SURFACE_PROBE_COOLDOWN_MS = 1500
+/** How long to wait after a present before reading the frame back — long enough for a repaint to land. */
+const SURFACE_PROBE_DELAY_MS = 700
+
+async function readSurfaceSample(view: Electron.WebContentsView): Promise<{
+  captured: boolean
+  uniform: boolean
+  domTextLength: number
+  loading: boolean
+}> {
+  let captured = false
+  let uniform = false
+  let domTextLength = -1
+  let loading = false
+  try {
+    loading = view.webContents.isLoading()
+  } catch {
+    loading = false
+  }
+  try {
+    const image = await view.webContents.capturePage()
+    if (image && !image.isEmpty()) {
+      const size = image.getSize()
+      if (size.width > 0 && size.height > 0) {
+        // Older Electron typings describe `getBitmap()` as void; at runtime it is the BGRA buffer.
+        const bitmap = (image as unknown as { getBitmap: () => Buffer }).getBitmap()
+        uniform = isUniformBitmap(bitmap, size.width, size.height)
+        captured = true
+      }
+    }
+  } catch {
+    captured = false
+  }
+  try {
+    const length = await view.webContents.executeJavaScript(
+      "(function(){try{return ((document.body&&document.body.innerText)||'').trim().length}catch(e){return -1}})()"
+    )
+    if (typeof length === 'number') domTextLength = length
+  } catch {
+    domTextLength = -1
+  }
+  return { captured, uniform, domTextLength, loading }
+}
+
+/**
+ * Look at the frame, and rebuild the view if the page is there and the frame is not.
+ *
+ * Runs off the critical path — a probe never delays a switch, an overlay closing or a resume — and it
+ * is the last step of the surface chain, after verify/repaint/flip have all had their turn.
+ */
+function probePaintedSurface(tabId: string, view: Electron.WebContentsView, reason: string): void {
+  if (!tabId || !view || view.webContents.isDestroyed()) return
+  if (tabId !== activeViewId || !activeViewVisible || overlaysOpen) return
+  const now = Date.now()
+  const lastProbe = lastSurfaceProbe.get(tabId) ?? 0
+  if (now - lastProbe < SURFACE_PROBE_COOLDOWN_MS) return
+  lastSurfaceProbe.set(tabId, now)
+
+  void (async () => {
+    let sample: Awaited<ReturnType<typeof readSurfaceSample>>
+    try {
+      sample = await readSurfaceSample(view)
+    } catch {
+      return
+    }
+    // The user may have switched away while the frame was being read back; the verdict would then be
+    // about a tab that is no longer the one on screen.
+    if (tabId !== activeViewId || !activeViewVisible || overlaysOpen) return
+    const verdict = judgeSurface(sample)
+    traceViewOp(tabId, 'surface probe — pixels', {
+      verdict,
+      reason,
+      uniform: sample.uniform,
+      domText: sample.domTextLength,
+      loading: sample.loading
+    })
+    if (verdict !== 'blank-surface') return
+
+    const decision = mayRestartSurface(surfaceRestartBudget.get(tabId), Date.now())
+    if (!decision.allowed) {
+      traceViewOp(tabId, 'blank surface — not rebuilding', { reason, because: decision.reason })
+      return
+    }
+    const previous = surfaceRestartBudget.get(tabId)
+    surfaceRestartBudget.set(tabId, {
+      count: (previous?.count ?? 0) + 1,
+      lastAt: Date.now()
+    })
+    traceViewOp(
+      tabId,
+      'blank surface — the page has content and the frame does not; rebuilding the view (this is "close the tab and open it again", keeping the tab)',
+      { reason, budget: decision.reason }
+    )
+    let restarted: Awaited<ReturnType<typeof tabDiscardManager.restartTab>> = 'no-view'
+    try {
+      restarted = await tabDiscardManager.restartTab(tabId)
+    } catch {
+      restarted = 'busy'
+    }
+    traceNav(tabId, 'load', `restart (blank surface) — ${restarted}`, { reason })
+    console.log(`[surface] blank frame on ${tabId} (${reason}) — restart: ${restarted}`)
+    if (restarted === 'ok') {
+      sendToMainWindow('tab_restarted', tabId, restarted, tabId === activeViewId, 'blank-surface')
+    }
+  })()
+}
+
+/** Arm the pixel probe after a present has had time to land. */
+function scheduleSurfaceProbe(tabId: string, view: Electron.WebContentsView, reason: string): void {
+  setTimeout(() => probePaintedSurface(tabId, view, reason), SURFACE_PROBE_DELAY_MS)
+}
+
+/**
  * How hard a view should be made to present itself.
  *
  *   `'suspect'` — the default. Verify, then repaint without touching visibility unless the check found
@@ -576,6 +709,10 @@ function ensureActiveViewPresented(reason: string, mode: PresentMode = 'suspect'
     if (mode !== 'cheap') {
       setTimeout(() => probeSurfaceState(tabId, view, `${reason} / settle probe`, true), 300)
     }
+    // Then the only witness that cannot be fooled. A wedged tab looks exactly like a healthy one to
+    // every check above, and the user finds out by looking at it — so look at the pixels, once the
+    // repaint has had time to land, throttled per tab.
+    scheduleSurfaceProbe(tabId, view, `${reason} / after repaint`)
     return
   }
 
@@ -609,6 +746,9 @@ function ensureActiveViewPresented(reason: string, mode: PresentMode = 'suspect'
   })
   // The gate shows the view again asynchronously, so the probe has to wait for it.
   setTimeout(() => probeSurfaceState(tabId, view, `${reason} / after flip`, true), 520)
+  // A flip that leaves the frame flat is the case the user kept reporting: the page is fine, the surface
+  // is not, and only a fresh view brings it back.
+  scheduleSurfaceProbe(tabId, view, `${reason} / after flip`)
 }
 /** One pending deferred surface repair per tab — a repair never runs mid-navigation. */
 const repairDeferrals = new Map<string, NodeJS.Timeout>()
@@ -8636,6 +8776,50 @@ ipcMain.on('reload_tab', (_event, tabId: string) => {
   if (!view || view.webContents.isDestroyed()) return
   traceNav(tabId, 'load', 'reload (tab context menu)', {})
   view.webContents.reload()
+})
+
+/**
+ * Rebuild a tab's view on request — the menu's "Restart tab".
+ *
+ * This is the user's own workaround made into a button. Closing a tab and opening it again is the one
+ * thing that reliably clears a blank AI view, because it throws away the whole `WebContentsView` and
+ * builds a new one; this does the same while keeping the tab: its id, its pin, its colours, its place in
+ * the sidebar and its conversation URL. The eviction path already knows how to save a tab (URL + scroll)
+ * and the activation path already knows how to bring it back, so the rebuild runs through them instead
+ * of through a second, hand-rolled view lifecycle.
+ */
+ipcMain.on('restart_tab', (_event, tabId: string) => {
+  if (typeof tabId !== 'string' || !tabId) return
+  const wasActive = tabId === activeViewId
+  traceNav(tabId, 'load', 'restart (tab context menu)', { wasActive })
+  void (async () => {
+    let restarted: Awaited<ReturnType<typeof tabDiscardManager.restartTab>> = 'no-view'
+    try {
+      restarted = await tabDiscardManager.restartTab(tabId)
+    } catch (err) {
+      console.warn('[restart_tab] failed:', err)
+    }
+    traceNav(tabId, 'load', `restart — ${restarted}`, { wasActive })
+    console.log(`[restart_tab] ${tabId}: ${restarted}`)
+    // The renderer owns the bounds and the tab record, so it is the one that re-activates the tab; main
+    // only reports what happened. An inactive tab needs nothing: the wake path loads it next time it is
+    // shown, exactly as it would after any other eviction.
+    sendToMainWindow('tab_restarted', tabId, restarted, wasActive)
+  })()
+})
+
+/** Free a tab's memory on request. The tab row stays; the page comes back on the next activation. */
+ipcMain.on('discard_tab', (_event, tabId: string) => {
+  if (typeof tabId !== 'string' || !tabId) return
+  void (async () => {
+    let discarded: Awaited<ReturnType<typeof tabDiscardManager.restartTab>> = 'no-view'
+    try {
+      discarded = await tabDiscardManager.restartTab(tabId)
+    } catch (err) {
+      console.warn('[discard_tab] failed:', err)
+    }
+    traceNav(tabId, 'load', `discard (tab context menu) — ${discarded}`, {})
+  })()
 })
 
 ipcMain.on('reload_active_view', () => {

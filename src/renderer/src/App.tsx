@@ -69,6 +69,7 @@ import TabColorModal from './components/TabColorModal'
 import TabColorButton from './components/TabColorButton'
 import ShortcutKeys from './components/ShortcutKeys'
 import { applyTabColors, sanitiseTabColors, tabAccentColor, type TabColors } from './lib/tabColors'
+import { adoptTabMemory, applyRememberedPosition, readTabMemory, rememberTabs, serializeTabMemory, TAB_MEMORY_STORAGE_KEY, type TabMemory } from './lib/tabMemory'
 import {
   containerColorOf,
   containerForShortcutIndex,
@@ -90,9 +91,27 @@ import './App.css'
 
 /** Bumped whenever this file's UI changes, so a stale bundle is obvious at a glance
  *  (`document.querySelector('[data-nexus-build]')` in devtools). */
-const NEXUS_UI_BUILD = '21'
+const NEXUS_UI_BUILD = '22'
 
 /** Where the "the guide has been seen" state lives. Set on close, cleared by "Tour again". */
+/**
+ * The remembered tabs, parsed once per run.
+ *
+ * A module-level cache rather than a `useRef` initialiser body: the ref pattern needs a `.current` read
+ * during render, and calling this from the initialiser keeps the render pure while still parsing the
+ * stored JSON a single time instead of on every render of a component that re-renders constantly.
+ */
+let cachedTabMemory: TabMemory | null = null
+function loadTabMemoryFromStorage(): TabMemory {
+  if (cachedTabMemory) return cachedTabMemory
+  try {
+    cachedTabMemory = readTabMemory(localStorage.getItem(TAB_MEMORY_STORAGE_KEY))
+  } catch {
+    cachedTabMemory = {}
+  }
+  return cachedTabMemory
+}
+
 const GUIDE_SEEN_KEY = 'vicinae.guide.seen.v1'
 
 import {
@@ -874,6 +893,18 @@ Acknowledge these skills with a concise confirmation in this exact format:
   })
   useEffect(() => { pinnedIdsRef.current = pinnedIds }, [pinnedIds])
 
+  // What each address was the last time it was open: pinned or not, its two colours, its place in the
+  // list. Kept here rather than on the tab because the tab row is the wrong lifetime — closing a tab and
+  // opening the same conversation again must not produce a stranger.
+  // A ref, not state: nothing renders from the memory, it is read when a tab appears and written when
+  // a tab changes. Keeping it out of state also keeps the effects below from re-rendering the sidebar
+  // every time a tab's colour or place is re-recorded.
+  const tabMemoryRef = useRef<TabMemory>(loadTabMemoryFromStorage())
+  // Tabs whose memory has already been applied. A tab is adopted once, when it first appears, so the
+  // memory can never fight the user: re-pinning a tab by hand does not get undone by the stored value.
+  const memoryAdoptedRef = useRef<Set<string>>(new Set())
+  const memoryBootstrappedRef = useRef(false)
+
 
   // Reconcile pinned tabs on mount. A one-time non-destructive migration merges legacy
   // localStorage with backend pinned.json; subsequent boots treat the backend as authoritative.
@@ -961,6 +992,64 @@ Acknowledge these skills with a concise confirmation in this exact format:
     [tabs, activeId, pinnedIds, tabStatuses, residentTabIds, discardedTabIds, pinnedSectionOrder]
   )
   const tabNumbers = useMemo(() => tabNumbersForOrder(visualTabOrder), [visualTabOrder])
+
+  /**
+   * Give a tab that has just appeared the state it had the last time its address was open.
+   *
+   * Runs when the tab *appears*, which is why it is driven by the tab list rather than by the four or
+   * five places that create tabs: a tab arrives from a new chat, from history, from a container, from
+   * Ctrl+T, from a restored session, and every one of them has to behave the same. The first render is
+   * skipped on purpose — a restored list already carries its own colours and pinned ids, and re-applying
+   * memory over it could only move things the user had arranged since.
+   */
+  useEffect(() => {
+    const adopted = memoryAdoptedRef.current
+    const firstPass = !memoryBootstrappedRef.current
+    memoryBootstrappedRef.current = true
+    let nextTabs = tabs
+    const toPin: string[] = []
+    for (const tab of tabs) {
+      if (adopted.has(tab.id)) continue
+      adopted.add(tab.id)
+      if (firstPass) continue
+      const inherited = adoptTabMemory(tab, tabMemoryRef.current ?? {})
+      if (inherited.tab !== tab) {
+        nextTabs = nextTabs.map((candidate) => (candidate.id === tab.id ? inherited.tab : candidate))
+      }
+      if (inherited.pinned) toPin.push(tab.id)
+      if (inherited.position !== null) {
+        nextTabs = applyRememberedPosition(nextTabs, tab.id, inherited.position)
+      }
+    }
+    if (nextTabs !== tabs) setTabs(nextTabs)
+    if (toPin.length > 0) {
+      const merged = Array.from(new Set([...pinnedIdsRef.current, ...toPin]))
+      pinnedIdsRef.current = merged
+      setPinnedIds(merged)
+      try {
+        localStorage.setItem('vicinae.pinned', JSON.stringify(merged))
+        const bridge = window.electron as
+          | { ipcRenderer?: { invoke: (channel: string, ...args: unknown[]) => Promise<unknown> } }
+          | undefined
+        void bridge?.ipcRenderer?.invoke('save_pinned', JSON.stringify(merged))?.catch(() => {})
+      } catch {
+        /* pinning is already applied in this session */
+      }
+    }
+  }, [tabs])
+
+  /** Keep the memory in step with the tabs that are open now, and persist it. */
+  useEffect(() => {
+    const current = tabMemoryRef.current ?? {}
+    const next = rememberTabs(current, tabs, pinnedIds)
+    if (serializeTabMemory(next) === serializeTabMemory(current)) return
+    tabMemoryRef.current = next
+    try {
+      localStorage.setItem(TAB_MEMORY_STORAGE_KEY, serializeTabMemory(next))
+    } catch {
+      /* storage full or unavailable: this run just will not remember */
+    }
+  }, [tabs, pinnedIds])
   const tabStatusesRef = useRef<Record<string, TabAiStatus>>({})
   useEffect(() => {
     tabStatusesRef.current = tabStatuses
@@ -1413,13 +1502,28 @@ Acknowledge these skills with a concise confirmation in this exact format:
     }
 
     // @ts-ignore
+    // A tab's view was rebuilt — by the menu's "Restart tab", by "Discard from memory", or by the
+    // surface probe finding flat pixels on a page that has content. The tab keeps its id, so the
+    // sidebar needs nothing; the *view* is gone, and the only thing that brings it back is activating
+    // the tab again, which is what a person does by clicking it.
+    const handleTabRestarted = (_event: unknown, tabId: string, outcome: string): void => {
+      if (typeof tabId !== 'string' || !tabId) return
+      if (outcome !== 'ok') return
+      if (tabId !== activeIdRef.current) return
+      const tab = tabsRef.current.find((candidate) => candidate.id === tabId)
+      if (!tab || !tab.url) return
+      switchToTabRef.current?.(tab.id, tab.url)
+    }
+
     const unsubCycle = window.electron?.ipcRenderer.on('trigger_tab_cycle', handleTabCycleIPC)
     // @ts-ignore
     const unsubPin = window.electron?.ipcRenderer.on('toggle_pin_tab', handleTogglePinTab)
+    const unsubRestarted = window.electron?.ipcRenderer.on('tab_restarted', handleTabRestarted)
 
     return () => {
       if (typeof unsubCycle === 'function') unsubCycle()
       if (typeof unsubPin === 'function') unsubPin()
+      if (typeof unsubRestarted === 'function') unsubRestarted()
     }
   }, [])
 

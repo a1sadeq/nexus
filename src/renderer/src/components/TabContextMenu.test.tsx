@@ -27,6 +27,7 @@ describe('the tab menu — build 47', () => {
   let closeTab: ReturnType<typeof vi.fn<(id: string) => void>>
   let pinTab: ReturnType<typeof vi.fn<(id: string) => void>>
   let reorder: ReturnType<typeof vi.fn<(sourceId: string, targetId: string) => void>>
+  let select: ReturnType<typeof vi.fn<(id: string) => void>>
 
   const open = async (tabId: string): Promise<HTMLElement> => {
     const row = container.querySelector(`[data-vertical-tab-id="${tabId}"]`) as HTMLElement
@@ -40,11 +41,29 @@ describe('the tab menu — build 47', () => {
     return menu
   }
 
+  /**
+   * Press an item the way a mouse does: `mousedown`, then `mouseup`, then `click`.
+   *
+   * Build 47's menu tests called `element.click()` directly — which is a synthetic click with no press
+   * around it — so they passed while every real press did nothing. The bug was a capture-phase
+   * `mousedown` listener that dismissed the menu before the button under the pointer could see the
+   * press. Dispatching the whole gesture is the only way a test can catch that class of bug.
+   */
   const click = async (menu: HTMLElement, action: string): Promise<void> => {
     const item = menu.querySelector(`[data-menu-action="${action}"]`) as HTMLButtonElement
     expect(item, `menu item ${action}`).toBeTruthy()
     await act(async () => {
-      item.click()
+      item.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))
+    })
+    // The menu must still be there between press and release; if the dismissal swallowed the press,
+    // the button is gone and nothing below can happen.
+    expect(
+      container.querySelector(`[data-menu-action="${action}"]`),
+      `menu item ${action} survived the press`
+    ).toBeTruthy()
+    await act(async () => {
+      item.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }))
+      item.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
     })
   }
 
@@ -53,6 +72,7 @@ describe('the tab menu — build 47', () => {
     closeTab = vi.fn<(id: string) => void>()
     pinTab = vi.fn<(id: string) => void>()
     reorder = vi.fn<(sourceId: string, targetId: string) => void>()
+    select = vi.fn<(id: string) => void>()
     ;(window as unknown as { electron: unknown }).electron = { ipcRenderer: { send } }
     container = document.createElement('div')
     document.body.appendChild(container)
@@ -64,7 +84,7 @@ describe('the tab menu — build 47', () => {
           activeId="tab-1"
           pinnedIds={['tab-3']}
           sidebarCollapsed={false}
-          onSelect={vi.fn()}
+          onSelect={select}
           onClose={closeTab}
           onTogglePin={pinTab}
           onReorder={reorder}
@@ -86,6 +106,8 @@ describe('the tab menu — build 47', () => {
     for (const action of [
       'pin',
       'reload',
+      'restart',
+      'discard',
       'copy-url',
       'copy-title',
       'move-top',
@@ -137,6 +159,40 @@ describe('the tab menu — build 47', () => {
     await click(menu, 'close-below')
     expect(closeTab).toHaveBeenCalledTimes(1)
     expect(closeTab).toHaveBeenCalledWith('tab-2')
+  })
+
+  it('rebuilds the view on request — the one-click version of close-and-reopen', async () => {
+    const menu = await open('tab-2')
+    await click(menu, 'restart')
+    expect(send).toHaveBeenCalledWith('restart_tab', 'tab-2')
+  })
+
+  it('frees a tab memory, and offers to load it again once it has been freed', async () => {
+    let menu = await open('tab-2')
+    await click(menu, 'discard')
+    expect(send).toHaveBeenCalledWith('discard_tab', 'tab-2')
+
+    await act(async () => {
+      root.render(
+        <VerticalTabs
+          tabs={tabs}
+          activeId="tab-1"
+          pinnedIds={['tab-3']}
+          discardedTabIds={['tab-2']}
+          sidebarCollapsed={false}
+          onSelect={select}
+          onClose={closeTab}
+          onTogglePin={pinTab}
+          onReorder={reorder}
+        />
+      )
+    })
+    menu = await open('tab-2')
+    const load = menu.querySelector('[data-menu-action="load"]') as HTMLButtonElement
+    expect(load).toBeTruthy()
+    expect(menu.querySelector('[data-menu-action="discard"]')).toBeFalsy()
+    await click(menu, 'load')
+    expect(select).toHaveBeenCalledWith('tab-2')
   })
 
   it('closes on Escape and on a click anywhere else', async () => {
