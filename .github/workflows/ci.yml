@@ -6,11 +6,15 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   check:
-    name: Typecheck & Test
+    name: Typecheck, test, and bundle
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       - name: Checkout
@@ -30,3 +34,9 @@ jobs:
 
       - name: Test
         run: npm test
+
+      # Typecheck and tests both read the sources one file at a time; only a real bundle proves the app
+      # builds. This is the same esbuild/rollup pass the release runs, so a broken import fails here
+      # instead of failing a release build twenty minutes in.
+      - name: Bundle (main, preload, renderer)
+        run: npx electron-vite build
