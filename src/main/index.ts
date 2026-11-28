@@ -521,34 +521,90 @@ function probeSurfaceState(
 }
 
 /**
- * Make the active view really be on screen: verify the three facts, then hide/show it and ask both the
- * compositor and the page for a frame.
+ * How hard a view should be made to present itself.
+ *
+ *   `'suspect'` — the default. Verify, then repaint without touching visibility unless the check found
+ *                 something wrong (or the page says it is stuck hidden). This is the tab-switch and
+ *                 overlay-close path, and it must not cost the user a single visible frame.
+ *   `'always'`  — a surface that is already known to be lost (the escalation: repeated repaints for a
+ *                 view that is on screen have not worked). Verify, then hide/show with a gate.
+ *   `'cheap'`   — verify and repaint only, never hide.
+ *
+ * Build 45 flipped on *every* present, which fixed the blank and made every tab switch wait for the page
+ * to acknowledge a hide — the small blank/loading pause the user reported on tabs that were not even
+ * loading. The flip was never the part that found the bug: the build-45 trace's catch is
+ * `presentation check … fixed=shown again (it was hidden)`, i.e. a view that something had left hidden
+ * while the app believed it was on screen. So the check stays on every path, and the expensive flip now
+ * has to be earned.
  */
-function ensureActiveViewPresented(reason: string): void {
+type PresentMode = 'suspect' | 'always' | 'cheap'
+
+function ensureActiveViewPresented(reason: string, mode: PresentMode = 'suspect'): void {
   const tabId = activeViewId
   const view = tabId ? aiViews.get(tabId) : null
   if (!tabId || !view || view.webContents.isDestroyed()) return
   if (!activeViewVisible || overlaysOpen) return
-  verifyViewPresentation(tabId, view, reason)
+  const report = verifyViewPresentation(tabId, view, reason)
   surfaceRepair.forget(tabId)
+
+  const fixedSomething = report.fixed.length > 0
+  const shouldFlip = mode === 'always' || (mode === 'suspect' && fixedSomething)
   const bounds = lastRealBounds.get(tabId) ?? null
+  const usableBounds = bounds && bounds.width > 0 && bounds.height > 0 ? bounds : null
+
+  if (!shouldFlip) {
+    // The common case: the view is in the window, visible and where it should be. Ask for a repaint and
+    // let the page keep painting — going anywhere near visibility here is what made tab switches slow.
+    const outcome = forceViewRepaint(view, {
+      bounds: usableBounds,
+      reason,
+      force: true,
+      log: (message) => console.log(`[viewRepaint] ${message}`)
+    })
+    traceViewOp(tabId, 'presented — verified, repainted (no flip needed)', {
+      outcome,
+      reason,
+      fixed: fixedSomething ? report.fixed.join('; ') : 'none'
+    })
+    // One deferred question, off the critical path: is the page actually awake? If it is still reporting
+    // itself hidden a third of a second after being shown, the flip is worth its flash; if it says
+    // visible — which is what every probe in the build-45 trace said — this costs nothing at all.
+    if (mode !== 'cheap') {
+      setTimeout(() => probeSurfaceState(tabId, view, `${reason} / settle probe`, true), 300)
+    }
+    return
+  }
+
+  // A flip: the page has to see itself hidden before the view is shown again, or Chromium never builds a
+  // new frame. While the page is still loading there is nothing to wait for — it will paint when the load
+  // lands — so the hold stays short rather than holding a loading tab off screen.
+  let loading = false
+  try {
+    loading = view.webContents.isLoading()
+  } catch {
+    loading = false
+  }
   const outcome = forceViewRepaint(view, {
-    bounds: bounds && bounds.width > 0 && bounds.height > 0 ? bounds : null,
+    bounds: usableBounds,
     reason,
     force: true,
     flipVisibility: true,
-    // Only show the view again once the page has seen it hidden — a flip the page never observes is
-    // not a flip. Capped so the view can never be left hidden.
-    flipGate: pageVisibilityGate(view),
-    maxFlipHiddenMs: 700,
+    flipGate: loading ? undefined : pageVisibilityGate(view),
+    maxFlipHiddenMs: 400,
     // A flip that waits for the page can outlive a tab switch; never show a view that is no longer the
     // one on screen.
     flipShouldRestore: () => tabId === activeViewId && activeViewVisible && !overlaysOpen,
     log: (message) => console.log(`[viewRepaint] ${message}`)
   })
-  traceViewOp(tabId, 'presented — verified, then flipped', { outcome, reason })
+  traceViewOp(tabId, 'presented — verified, then flipped', {
+    outcome,
+    reason,
+    mode,
+    fixed: fixedSomething ? report.fixed.join('; ') : 'none',
+    loading
+  })
   // The gate shows the view again asynchronously, so the probe has to wait for it.
-  setTimeout(() => probeSurfaceState(tabId, view, `${reason} / after flip`, true), 820)
+  setTimeout(() => probeSurfaceState(tabId, view, `${reason} / after flip`, true), 520)
 }
 /** One pending deferred surface repair per tab — a repair never runs mid-navigation. */
 const repairDeferrals = new Map<string, NodeJS.Timeout>()
@@ -3796,7 +3852,7 @@ function refreshActiveViewSurfaceAfterResume(reason: string): void {
   surfaceRepair.forget(tabId)
   // Verify and re-present, not just repaint: a resume is the transition where the surface — or the
   // presenting of the view itself — may be gone.
-  ensureActiveViewPresented(`window resumed (${reason})`)
+  ensureActiveViewPresented(`window resumed (${reason})`, 'suspect')
 }
 
 /** Rebuild one tab's surface in place, keeping its page. Never recreates the WebContents. */
@@ -4030,7 +4086,7 @@ function reconcileViewPresentation(): void {
             // can destroy a surface. Escalation is now the same strong lever as everything else:
             // verify the presentation, hide/show, invalidate, ask the page — repeated as needed, with
             // the genuine detach left to the explicit "Repair AI View" command.
-            ensureActiveViewPresented('reconciled twice without a frame')
+            ensureActiveViewPresented('reconciled twice without a frame', 'always')
           } else if (surfaceRepair.shouldRepair(activeViewId)) {
             // A resume just ran the strong repaint. Escalating to a detach in the half-second after it
             // would replace the surface that repaint was about to produce — and a detach is the way to

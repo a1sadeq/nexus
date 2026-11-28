@@ -56,27 +56,55 @@ describe('build 45 — the presentation check', () => {
 })
 
 describe('build 45 — one way to present the active view', () => {
-  it('verifies first, then flips with a gate, then asks the page', () => {
-    const ensure = body('function ensureActiveViewPresented(', 1800)
+  it('verifies first, and only then decides whether to flip', () => {
+    const ensure = body('function ensureActiveViewPresented(', 3000)
     const verify = ensure.indexOf('verifyViewPresentation(tabId, view, reason)')
+    const decision = ensure.indexOf('const shouldFlip =')
     const flip = ensure.indexOf('flipVisibility: true')
-    const gate = ensure.indexOf('flipGate: pageVisibilityGate(view)')
-    const probe = ensure.indexOf('probeSurfaceState(tabId, view,')
     expect(verify).toBeGreaterThan(-1)
-    expect(flip).toBeGreaterThan(verify)
-    expect(gate).toBeGreaterThan(flip)
-    expect(probe).toBeGreaterThan(gate)
+    expect(decision).toBeGreaterThan(verify)
+    expect(flip).toBeGreaterThan(decision)
+  })
+
+  it('does not flip a view that the check found perfectly fine — build 46', () => {
+    // The build-45 trace: every tab switch logged `presented — verified, then flipped`, and the user felt
+    // a pause on tabs that were not even loading. A view that is attached, visible and correctly sized
+    // gets a repaint and nothing else.
+    const ensure = body('function ensureActiveViewPresented(', 3000)
+    expect(ensure).toContain("const shouldFlip = mode === 'always' || (mode === 'suspect' && fixedSomething)")
+    expect(ensure).toContain('const fixedSomething = report.fixed.length > 0')
+    // …and the no-flip path returns before the flip ever happens.
+    const cheapReturn = ensure.indexOf('presented — verified, repainted (no flip needed)')
+    const flipCall = ensure.indexOf('flipVisibility: true')
+    expect(cheapReturn).toBeGreaterThan(-1)
+    expect(flipCall).toBeGreaterThan(cheapReturn)
+  })
+
+  it('keeps the hidden-view repair on every path, which is what actually caught the bug', () => {
+    const check = body('function verifyViewPresentation(')
+    expect(check).toContain('view.getVisible')
+    expect(check).toContain('view.setVisible(true)')
+    // The build-45 trace's one real catch:
+    //   presentation check {… visible=true fixed=shown again (it was hidden) …}
+    expect(check).toContain('shown again (it was hidden)')
+  })
+
+  it('does not hold a loading tab off screen waiting for the page', () => {
+    const ensure = body('function ensureActiveViewPresented(', 3000)
+    expect(ensure).toContain('flipGate: loading ? undefined : pageVisibilityGate(view)')
+    expect(ensure).toContain('maxFlipHiddenMs: 400')
+  })
+
+  it('only the escalation flips unconditionally', () => {
+    expect(main).toContain("ensureActiveViewPresented('reconciled twice without a frame', 'always')")
+    expect(main).toContain('ensureActiveViewPresented(`window resumed (${reason})`, \'suspect\')')
+    // The tab-switch / overlay-close path takes the default, which is 'suspect'.
+    expect(main).toContain("ensureActiveViewPresented('coming back from hidden (overlay / tab switch)')")
   })
 
   it('never forces a repaint over an overlay, or on a tab that is not active', () => {
     const ensure = body('function ensureActiveViewPresented(', 800)
     expect(ensure).toContain('if (!activeViewVisible || overlaysOpen) return')
-  })
-
-  it('is what the resume, the strong path and the escalation now call', () => {
-    expect(main).toContain('ensureActiveViewPresented(`window resumed (${reason})`)')
-    expect(main).toContain("ensureActiveViewPresented('coming back from hidden (overlay / tab switch)')")
-    expect(main).toContain("ensureActiveViewPresented('reconciled twice without a frame')")
   })
 
   it('no longer detaches the surface to fix a blank one', () => {

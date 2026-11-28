@@ -58,7 +58,7 @@ describe('a window that comes back is repainted, not rebuilt — build 44', () =
     // The repaint is the strong one, and the view is kept. Build 45 moved the flip+repaint behind
     // `ensureActiveViewPresented` — the resume still keeps the surface, it just verifies first that the
     // window is presenting it at all, and waits for the page to acknowledge the hide before the show.
-    expect(refresh).toContain('ensureActiveViewPresented(`window resumed (${reason})`)')
+    expect(refresh).toContain('ensureActiveViewPresented(`window resumed (${reason})`, \'suspect\')')
     // A repair here is the conservative kind, and only for a view that is really gone.
     expect(refresh).toContain("repairTabSurface(tabId, reason, true, false, 'if-detached')")
   })
