@@ -8,7 +8,9 @@ export function buildActiveTitleReadScript(selector: string): string {
       let nodes;
       try { nodes = document.querySelectorAll(s); } catch (_) { continue; }
       for (const el of nodes) {
-        const txt = (el.innerText || el.textContent || '').trim();
+        // Build 52: textContent first. innerText forces a layout pass, and this runs every few seconds
+        // on the page that is on screen.
+        const txt = (el.textContent || '').trim() || (el.innerText || '').trim();
         if (!txt) continue;
         const st = getComputedStyle(el);
         if (el.getClientRects().length && st.visibility !== 'hidden' && st.display !== 'none' && !el.closest('[hidden], [aria-hidden="true"]')) return txt;

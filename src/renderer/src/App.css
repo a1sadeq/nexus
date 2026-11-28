@@ -661,6 +661,15 @@ html[data-window-focus='blurred'] *::after {
   animation-play-state: paused !important;
 }
 
+/* Build 52: the same loops, stopped for a window that is in front and untouched. Fifteen seconds
+   without input is the gate (App.tsx sets the attribute); any pointer, key or wheel event clears it.
+   A breathing arc nobody is watching is the shell burning a core to say so. */
+html[data-activity='idle'] *,
+html[data-activity='idle'] *::before,
+html[data-activity='idle'] *::after {
+  animation-play-state: paused !important;
+}
+
 /* A blur that is not being re-rendered is cacheable; one that is, is not. Anything layered over the
    shell while the window is in the background is flattened instead of composited every frame. */
 html[data-window-focus='blurred'] .sidebar,

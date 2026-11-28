@@ -2309,6 +2309,21 @@ ipcMain.handle('capture_diagnostics', async (event, samplingMs?: number) => {
     typeof samplingMs === 'number' ? samplingMs : 2000
   )
 
+  // Build 52: how busy the shell itself is, at the moment the report is taken.
+  //
+  // The report that led here showed the React shell at 26.9 % of a core and 161 idle wakeups a second
+  // with nobody touching the window. The CPU figure says "something in the shell"; this says whether it
+  // is the endless decorative animations (a number that should be 0 while idle) or something else.
+  let shellActivity: { runningAnimations: number | null } = { runningAnimations: null }
+  try {
+    const running = await mainWindow.webContents.executeJavaScript(
+      '(document.getAnimations ? document.getAnimations().filter((a) => a.playState === "playing").length : -1)'
+    )
+    shellActivity = { runningAnimations: typeof running === 'number' && running >= 0 ? running : null }
+  } catch {
+    shellActivity = { runningAnimations: null }
+  }
+
   // The navigation trace travels with the report: an export that explains the CPU but not the
   // navigation is the export that made us guess last time.
   return {
@@ -2320,6 +2335,7 @@ ipcMain.handle('capture_diagnostics', async (event, samplingMs?: number) => {
         events: navTrace.events(200),
         text: navTrace.formatAll(200)
       },
+      shellActivity,
       // The other half of the story, in the report itself rather than only in the trace.
       //
       // Build 50's export ended on "overlay open — AI view hidden" and nothing else: no panel named,
@@ -5744,7 +5760,7 @@ function buildWebviewRuntimeJs(modelKey?: string): string {
       ? 0
       : typeof requestedInterval === 'number' && Number.isFinite(requestedInterval)
         ? Math.max(500, Math.min(60000, requestedInterval))
-        : 1500
+        : 3000
   const enableSlash = feats.enableSlashFocus !== false
   const enableRetention = feats.enableFocusRetention !== false
   const virtSelector = feats.virtualizationSelector
@@ -5879,10 +5895,13 @@ if (!window.__slashFocusInjected && ${enableSlash}) {
       try {
         if (document.visibilityState === 'hidden') return;
         let txt = '';
+        // Build 52: textContent first. innerText forces a style and layout pass so it can report what a
+        // human would see, and this loop runs every couple of seconds on the page that is on screen —
+        // a layout flush per tick, forever, for a string that only changes once per turn.
         for (const s of splitList(titleSel)) {
           const el = document.querySelector(s);
           if (el) {
-            const candidate = (el.innerText || el.textContent || '').trim();
+            const candidate = (el.textContent || '').trim() || (el.innerText || '').trim();
             if (candidate) { txt = candidate; break; }
           }
         }
@@ -6806,7 +6825,7 @@ function setViewBackground(view) {
 // Live-preview capture stream (Settings → Webview tab). Captures the REAL
 // view (no duplicate page), streams ~3fps to the renderer panel.
 const previewLoop = new PreviewCaptureLoop<string>({
-  intervalMs: 1000,
+  intervalMs: 2500,
   canCapture: () =>
     !!mainWindow &&
     !mainWindow.isDestroyed() &&
@@ -6946,7 +6965,7 @@ function updateWebviewTitlePoller(view: Electron.WebContentsView, modelKey: stri
       ? 0
       : typeof requestedInterval === 'number' && Number.isFinite(requestedInterval)
         ? Math.max(500, Math.min(60000, requestedInterval))
-        : 1500
+        : 3000
   const script = `(() => {
     ${PAGE_HELPERS}
     if (window.__nexusTitleInterval) {
@@ -6963,10 +6982,11 @@ function updateWebviewTitlePoller(view: Electron.WebContentsView, modelKey: stri
         try {
           if (document.visibilityState === 'hidden') return;
         let txt = '';
+          // Build 52: textContent first — see the note in the injection above.
           for (const s of splitList(titleSel)) {
             const el = document.querySelector(s);
             if (el) {
-              const candidate = (el.innerText || el.textContent || '').trim();
+              const candidate = (el.textContent || '').trim() || (el.innerText || '').trim();
               if (candidate) { txt = candidate; break; }
             }
           }
@@ -8209,7 +8229,7 @@ function restartActiveArenaTitleSync(): void {
       ? 0
       : typeof requested === 'number' && Number.isFinite(requested)
         ? Math.max(500, Math.min(60000, requested))
-        : 1500
+        : 3000
   if (!selector || !interval) return
   const wc = view.webContents
   if (!wc || wc.isDestroyed()) return

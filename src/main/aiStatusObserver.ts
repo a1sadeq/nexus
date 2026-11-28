@@ -108,6 +108,16 @@ export function getAiStatusObserverScript(
       let doneDebounceTimer = null;
       let heartbeatTimer = null;
       let evaluateScheduled = false;
+      // A page-wide button sweep is a "does one exist?" question; it is not an inventory.
+      const STOP_SCAN_LIMIT = 60;
+      // "Is anything matching this visible?" needs a handful of candidates, not a census.
+      const VISIBLE_SCAN_LIMIT = 8;
+      // Build 52: how often this script is allowed to do real work. The observer fires on every mutation
+      // of the page and a streaming answer mutates the document continuously, so the 100 ms debounce
+      // meant ten evaluations a second. Four is already more often than any status change needs, and
+      // each evaluation is bounded as well (see looksLikeStopButton).
+      const EVALUATE_FLOOR_MS = 250;
+      let lastEvaluateAt = 0;
       let initialEmitted = false;
       let lastReportedStatus = null;
 
@@ -147,7 +157,29 @@ export function getAiStatusObserverScript(
         return '';
       }
 
+      // Build 52: resolve the assistant element once, not on every evaluation.
+      //
+      // Finding it walks up to fifteen selector lists over the whole document, and this runs several
+      // times a second on a page that is mutating thousands of times a second. The element only needs
+      // re-resolving when it has left the document (a new turn) or after half a second, which keeps a
+      // new turn's message found immediately while removing the walk from almost every evaluation.
+      let cachedAssistantEl = null;
+      let cachedAssistantAt = 0;
       function getAssistantElement() {
+        try {
+          const now = Date.now();
+          if (cachedAssistantEl && cachedAssistantEl.isConnected && now - cachedAssistantAt < 500) {
+            return cachedAssistantEl;
+          }
+          const found = resolveAssistantElement();
+          cachedAssistantEl = found;
+          cachedAssistantAt = now;
+          return found;
+        } catch (e) {}
+        return null;
+      }
+
+      function resolveAssistantElement() {
         try {
           const customAssistantSelector = getCfg().assistantSelector;
           if (customAssistantSelector) {
@@ -188,7 +220,7 @@ export function getAiStatusObserverScript(
             document.querySelector('[role="radiogroup"] [role="radio"]:not([disabled])')
           );
           const el = getAssistantElement();
-          const text = el ? (el.innerText || el.textContent || '').trim() : '';
+          const text = el ? (el.textContent || '').trim() : '';
           if (hasInteractiveChoice) {
             const base = text ? text.slice(-260) : 'Waiting for your input';
             return /[?？؟]\\s*$/.test(base) ? base : base + ' — Please choose an option?';
@@ -230,10 +262,46 @@ export function getAiStatusObserverScript(
         );
       }
 
+      /**
+       * Build 52: the cheap half of the stop-button test, and the reason this file is no longer a CPU
+       * problem.
+       *
+       * isStopButton used to begin with isElementVisible, which reads a bounding rect and the computed
+       * style — a forced layout — and it was called for every button and [role=button] in the document,
+       * several times a second, driven by a mutation observer that fires on every streamed token. On an
+       * app the size of arena.ai that is hundreds of layout flushes per evaluation.
+       *
+       * These tests read attributes and text only: no layout, no style resolution. A button that fails
+       * them cannot be a stop button, so it is dropped before anything expensive is asked about it.
+       */
+      function looksLikeStopButton(btn) {
+        try {
+          const get = (name) => (btn.getAttribute ? String(btn.getAttribute(name) || '') : '');
+          const label = get('aria-label').toLowerCase();
+          const title = get('title').toLowerCase();
+          const testId = get('data-testid').toLowerCase();
+          const className = (typeof btn.className === 'string' ? btn.className : '').toLowerCase();
+          const text = String(btn.textContent || '').trim().toLowerCase();
+          if (label.indexOf('stop') >= 0 || label.indexOf('interrupt') >= 0 || label.indexOf('停止') >= 0 || label.indexOf('cancel generation') >= 0) return true;
+          if (title.indexOf('stop') >= 0 || title.indexOf('停止') >= 0 || title.indexOf('interrupt') >= 0) return true;
+          if (testId.indexOf('stop') >= 0 || testId.indexOf('interrupt') >= 0) return true;
+          if (className.indexOf('stop-button') >= 0 || className.indexOf('btn-stop') >= 0 || className.indexOf('stop_button') >= 0 || className.indexOf('stop-btn') >= 0) return true;
+          if (text === 'stop' || text === 'stop generating' || text === '停止' || text === '停止生成' || text === 'interrupt' || text === 'pause') return true;
+          // Providers that draw the control as a filled square with no words at all.
+          if (btn.querySelector && btn.querySelector('svg.lucide-square, [class*="square" i]')) return true;
+          return false;
+        } catch (e) {
+          return false;
+        }
+      }
+
       function isStopButton(btn) {
-        if (!isElementVisible(btn)) return false;
-        // Strictly scope to prompt composer / chat input area to prevent false positives from audio/video buttons
+        if (!looksLikeStopButton(btn)) return false;
+        // Strictly scope to prompt composer / chat input area to prevent false positives from audio/video
+        // buttons. closest() walks the tree and reads no geometry, so it is still the cheap test — it now
+        // runs before the layout read instead of after it.
         if (!isInComposer(btn)) return false;
+        if (!isElementVisible(btn)) return false;
 
         try {
           const label = (btn.getAttribute('aria-label') || '').toLowerCase();
@@ -282,16 +350,32 @@ export function getAiStatusObserverScript(
         if (customStopSelector) {
           try {
             const nodes = document.querySelectorAll(customStopSelector);
-            for (let i = 0; i < nodes.length; i++) {
+            const stopLimit = Math.min(nodes.length, VISIBLE_SCAN_LIMIT);
+            for (let i = 0; i < stopLimit; i++) {
               if (isElementVisible(nodes[i]) && isInComposer(nodes[i])) return true;
             }
           } catch (e) {}
         }
 
         try {
-          const buttons = document.querySelectorAll('button, [role="button"]');
-          for (let i = 0; i < buttons.length; i++) {
-            if (isStopButton(buttons[i])) return true;
+          // Only a composer can hold a stop button, and a composer is a small subtree: searching it
+          // costs a fraction of walking every button in the document. The page-wide sweep stays as the
+          // fallback for providers that render the control outside the composer, and it is capped.
+          const scopes = document.querySelectorAll(
+            'form, [data-perf-target="composer"], [class*="composer" i], [class*="chat-input" i], [class*="chat-bar" i], footer'
+          );
+          let checked = 0;
+          for (let s = 0; s < scopes.length && checked < STOP_SCAN_LIMIT; s++) {
+            const buttons = scopes[s].querySelectorAll('button, [role="button"]');
+            for (let i = 0; i < buttons.length && checked < STOP_SCAN_LIMIT; i++) {
+              checked++;
+              if (isStopButton(buttons[i])) return true;
+            }
+          }
+          const all = document.querySelectorAll('button, [role="button"]');
+          const limit = Math.min(all.length, STOP_SCAN_LIMIT);
+          for (let i = 0; i < limit; i++) {
+            if (isStopButton(all[i])) return true;
           }
         } catch (e) {}
 
@@ -303,7 +387,8 @@ export function getAiStatusObserverScript(
         if (customSendSelector) {
           try {
             const nodes = document.querySelectorAll(customSendSelector);
-            for (let i = 0; i < nodes.length; i++) {
+            const sendLimit = Math.min(nodes.length, VISIBLE_SCAN_LIMIT);
+            for (let i = 0; i < sendLimit; i++) {
               const node = nodes[i];
               // Allow disabled Send buttons when composer is empty after completion,
               // as long as the button is visibly laid out inside the composer and is not a Stop button.
@@ -319,7 +404,8 @@ export function getAiStatusObserverScript(
         if (!customErrorSelector) return false;
         try {
           const nodes = document.querySelectorAll(customErrorSelector);
-          for (let i = 0; i < nodes.length; i++) {
+          const errorLimit = Math.min(nodes.length, VISIBLE_SCAN_LIMIT);
+          for (let i = 0; i < errorLimit; i++) {
             if (isElementVisible(nodes[i])) return true;
           }
         } catch (e) {}
@@ -331,7 +417,8 @@ export function getAiStatusObserverScript(
         if (!customCompletionSelector) return false;
         try {
           const nodes = document.querySelectorAll(customCompletionSelector);
-          for (let i = 0; i < nodes.length; i++) {
+          const completionLimit = Math.min(nodes.length, VISIBLE_SCAN_LIMIT);
+          for (let i = 0; i < completionLimit; i++) {
             if (isElementVisible(nodes[i])) return true;
           }
         } catch (e) {}
@@ -364,7 +451,8 @@ export function getAiStatusObserverScript(
         ];
         try {
           const streamingNodes = document.querySelectorAll(streamingSelectors.join(', '));
-          for (let i = 0; i < streamingNodes.length; i++) {
+          const streamingLimit = Math.min(streamingNodes.length, VISIBLE_SCAN_LIMIT);
+          for (let i = 0; i < streamingLimit; i++) {
             if (isElementVisible(streamingNodes[i])) return true;
           }
         } catch (e) {}
@@ -378,7 +466,8 @@ export function getAiStatusObserverScript(
         ];
         try {
           const spinnerNodes = document.querySelectorAll(spinnerSelectors.join(', '));
-          for (let i = 0; i < spinnerNodes.length; i++) {
+          const spinnerLimit = Math.min(spinnerNodes.length, VISIBLE_SCAN_LIMIT);
+          for (let i = 0; i < spinnerLimit; i++) {
             if (isElementVisible(spinnerNodes[i])) return true;
           }
         } catch (e) {}
@@ -403,10 +492,16 @@ export function getAiStatusObserverScript(
         evaluateScheduled = false;
         try {
           const now = Date.now();
+          if (now - lastEvaluateAt < EVALUATE_FLOOR_MS - 10) {
+            // Asked again inside the floor (the safety interval or a second caller): come back later.
+            scheduleEvaluate();
+            return;
+          }
+          lastEvaluateAt = now;
 
           // Measure assistant text growth (reset baseline when turn container node changes)
           const assistantEl = getAssistantElement();
-          const currentText = assistantEl ? (assistantEl.innerText || assistantEl.textContent || '').trim() : '';
+          const currentText = assistantEl ? (assistantEl.textContent || '').trim() : '';
           const currentLength = currentText.length;
           if (assistantEl !== lastAssistantEl) {
             lastAssistantEl = assistantEl;
@@ -586,39 +681,61 @@ export function getAiStatusObserverScript(
       function scheduleEvaluate() {
         if (evaluateScheduled) return;
         evaluateScheduled = true;
-        setTimeout(evaluateStatus, 100);
+        // Not dropped, spaced: the evaluation still happens, just not ten times a second.
+        const since = Date.now() - lastEvaluateAt;
+        setTimeout(evaluateStatus, since >= EVALUATE_FLOOR_MS ? 60 : EVALUATE_FLOOR_MS - since);
       }
 
       const observer = new MutationObserver(() => {
         scheduleEvaluate();
       });
 
-      const target = document.documentElement || document.body;
-      if (target) {
-        observer.observe(target, {
-          childList: true,
-          subtree: true,
-          characterData: true,
-          attributes: true,
-          attributeFilter: [
-            'style',
-            'class',
-            'disabled',
-            'aria-disabled',
-            'aria-label',
-            'aria-hidden',
-            'data-testid',
-            'data-active',
-            'data-is-streaming',
-            'data-state'
-          ]
-        });
+      // A tab nobody is looking at has nothing to report: its observer is disconnected and its safety
+      // interval does nothing until it is visible again. Background tabs used to keep a full mutation
+      // observer and a 500 ms poll alive — presentation work for nobody, on a page that is already
+      // being asked for a frame a second by the frame budget.
+      function syncObservation() {
+        try {
+          if (document.visibilityState === 'hidden') {
+            observer.disconnect();
+            return;
+          }
+          const scope = document.documentElement || document.body;
+          if (scope) {
+            observer.observe(scope, {
+              childList: true,
+              subtree: true,
+              characterData: true,
+              attributes: true,
+              attributeFilter: [
+                'style',
+                'class',
+                'disabled',
+                'aria-disabled',
+                'aria-label',
+                'aria-hidden',
+                'data-testid',
+                'data-active',
+                'data-is-streaming',
+                'data-state'
+              ]
+            });
+          }
+          scheduleEvaluate();
+        } catch (e) {}
       }
+      document.addEventListener('visibilitychange', syncObservation);
+      syncObservation();
 
       window.__nexusAiStatusEvaluate = evaluateStatus;
 
-      // Safety polling interval
-      setInterval(evaluateStatus, 500);
+      // Safety poll, not a heartbeat: the observer does the work, and this exists only so that a page
+      // which changes status without mutating (a provider that swaps a class on an existing node) is
+      // still noticed. 1.5 s is enough for that, and it costs nothing while hidden.
+      setInterval(() => {
+        if (document.visibilityState === 'hidden') return;
+        evaluateStatus();
+      }, 500);
       evaluateStatus();
     } catch (e) {}
   })()`

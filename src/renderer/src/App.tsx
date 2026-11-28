@@ -97,7 +97,7 @@ import './App.css'
 
 /** Bumped whenever this file's UI changes, so a stale bundle is obvious at a glance
  *  (`document.querySelector('[data-nexus-build]')` in devtools). */
-const NEXUS_UI_BUILD = '25'
+const NEXUS_UI_BUILD = '26'
 
 /** Where the "the guide has been seen" state lives. Set on close, cleared by "Tour again". */
 /**
@@ -929,6 +929,41 @@ Acknowledge these skills with a concise confirmation in this exact format:
       window.removeEventListener('focus', onFocus)
       window.removeEventListener('blur', onBlur)
       if (typeof off === 'function') off()
+    }
+  }, [])
+
+  /**
+   * Tell the stylesheet whether anyone is *doing* anything, not just whether the window is in front.
+   *
+   * Build 50 stopped the sidebar's endless loops while the window was behind another one. That left the
+   * case the user actually reports: Nexus in front, nobody touching it, an AI answer streaming in a
+   * tab — and the shell still animating a breathing arc, a ripple and a shimmer sixty times a second,
+   * with `backdrop-filter` layers on top of them. Fifteen seconds without a pointer, key or wheel event
+   * is long enough to be sure, and the first event of any kind brings it back instantly, so this costs
+   * nothing the user can see. Measured on the shell process of the report that led here: 26.9 % of a
+   * core and 161 idle wakeups a second, for a window whose owner was reading, not clicking.
+   */
+  useEffect(() => {
+    const IDLE_AFTER_MS = 15000
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const setIdle = (idle: boolean): void => {
+      document.documentElement.dataset.activity = idle ? 'idle' : 'active'
+    }
+    const arm = (): void => {
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(() => setIdle(true), IDLE_AFTER_MS)
+    }
+    const onActivity = (): void => {
+      setIdle(false)
+      arm()
+    }
+    const events: Array<keyof WindowEventMap> = ['pointerdown', 'pointermove', 'keydown', 'wheel', 'focus']
+    for (const event of events) window.addEventListener(event, onActivity, { passive: true })
+    setIdle(false)
+    arm()
+    return () => {
+      for (const event of events) window.removeEventListener(event, onActivity)
+      if (timer) clearTimeout(timer)
     }
   }, [])
 
