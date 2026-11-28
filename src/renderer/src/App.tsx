@@ -3975,12 +3975,15 @@ Acknowledge these skills with a concise confirmation in this exact format:
           setFolderUploadData(null)
           restoreViewBounds()
         }}
-        onConfirm={(selectedPaths) => {
+        onConfirm={(selectedPaths, partSizeBytes) => {
           if (folderUploadData) {
             // @ts-ignore
             window.electron?.ipcRenderer.send('confirm_folder_upload', {
               folderPath: folderUploadData.folderPath,
-              selectedPaths
+              selectedPaths,
+              // The size chosen in the popup. Without it the upload path used a hard-coded 8 MB and the
+              // control only ever affected the drawer's preview — the choice had no effect on the upload.
+              partSizeBytes
             })
           }
           setFolderUploadData(null)

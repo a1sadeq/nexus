@@ -1,4 +1,5 @@
 import type { ScannedFileInfo } from '../../../shared/folderUpload'
+import { normaliseRelativePath } from '../../../shared/folderUpload'
 
 export interface DirectoryGroup {
   dirKey: string
@@ -129,6 +130,14 @@ export interface FolderTreeNode {
  * computing nested children, depths, descendant paths, and cumulative statistics.
  */
 export function buildFolderTree(files: ScannedFileInfo[]): FolderTreeNode {
+  // Defence in depth for the Windows separator: the scan normalises `path.relative()` to `/` before it
+  // reaches the renderer, and this does it again on the way in, because the day one caller forgets is the
+  // day a folder turns back into a flat list of `folder\file.py` rows.
+  files = files.map((file) =>
+    file.relativePath.includes('\\')
+      ? { ...file, relativePath: normaliseRelativePath(file.relativePath) }
+      : file
+  )
   const root: FolderTreeNode = {
     name: 'root',
     fullPath: '',
@@ -283,7 +292,7 @@ export function getExpandedDirsForSearch(
   const expanded = new Set<string>()
 
   for (const f of matchingFiles) {
-    const parts = f.relativePath.split('/')
+    const parts = normaliseRelativePath(f.relativePath).split('/')
     let currentPath = ''
     for (let i = 0; i < parts.length - 1; i++) {
       currentPath = currentPath ? `${currentPath}/${parts[i]}` : parts[i]
@@ -312,4 +321,3 @@ export function getAllDirectoryPaths(tree: FolderTreeNode): Set<string> {
   traverse(tree)
   return all
 }
-

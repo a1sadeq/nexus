@@ -215,6 +215,36 @@ describe('folderUploadHelpers', () => {
       expect(expanded.has('docs')).toBe(false)
     })
 
+    it('makes folders out of a Windows scan, instead of one flat row of backslashed paths', () => {
+      // Exactly what a folder uploaded from Windows looked like: one node, and every file named with its
+      // whole path inside it. The tree reads `/`, so the separator is normalised on the way in too.
+      const windowsFiles: ScannedFileInfo[] = [
+        { path: 'C:\\proj\\main.py', relativePath: 'proj\\main.py', size: 10, extension: '.py', isSuggestedRemoval: false },
+        { path: 'C:\\proj\\lib\\util.py', relativePath: 'proj\\lib\\util.py', size: 20, extension: '.py', isSuggestedRemoval: false },
+        { path: 'C:\\proj\\lib\\deep\\core.py', relativePath: 'proj\\lib\\deep\\core.py', size: 30, extension: '.py', isSuggestedRemoval: false }
+      ]
+
+      const tree = buildFolderTree(windowsFiles)
+
+      expect(tree.files.length).toBe(0)
+      expect(tree.children.map((child) => child.name)).toEqual(['proj'])
+      const proj = tree.children[0]
+      expect(proj.files.map((f) => f.relativePath)).toEqual(['proj/main.py'])
+      expect(proj.children.map((child) => child.name)).toEqual(['lib'])
+      expect(proj.children[0].children.map((child) => child.name)).toEqual(['deep'])
+      expect(tree.totalFiles).toBe(3)
+    })
+
+    it('auto-expands Windows paths for search, using the same spelling', () => {
+      const windowsFiles: ScannedFileInfo[] = [
+        { path: 'C:\\proj\\lib\\util.py', relativePath: 'proj\\lib\\util.py', size: 20, extension: '.py', isSuggestedRemoval: false }
+      ]
+      const tree = buildFolderTree(windowsFiles)
+      const expanded = getExpandedDirsForSearch(tree, windowsFiles)
+      expect(expanded.has('proj')).toBe(true)
+      expect(expanded.has('proj/lib')).toBe(true)
+    })
+
     it('retrieves all directory paths for global collapse all', () => {
       const tree = buildFolderTree(sampleFiles)
       const allDirs = getAllDirectoryPaths(tree)
@@ -222,4 +252,3 @@ describe('folderUploadHelpers', () => {
     })
   })
 })
-

@@ -3186,11 +3186,22 @@ ipcMain.on('confirm_folder_upload', async (event, payload: ConfirmFolderUploadPa
     if (view && !view.webContents.isDestroyed()) {
       const modelKey = viewModelKeys.get(activeViewId) || ''
       const feats = getMergedProviderFeatures(modelKey, providerConfig[modelKey])
+      // Build 54: the part size the user chose in the popup decides how this selection is cut up.
+      //
+      // Until now the value existed only inside the Chunks & Parts drawer, and the button that actually
+      // attaches files ignored it entirely and used a hard-coded 8 MB. The choice is now made where the
+      // upload is confirmed, remembered between sessions, and snapped onto the sizes the popup offers, so
+      // a stale or corrupt remembered value cannot produce an unusable part.
+      const chosenPartBytes =
+        typeof payload.partSizeBytes === 'number' && Number.isFinite(payload.partSizeBytes)
+          ? payload.partSizeBytes
+          : undefined
       await bundleAndInjectSelectedFiles(
         view,
         payload.folderPath,
         payload.selectedPaths,
-        feats.attachmentSelector
+        feats.attachmentSelector,
+        chosenPartBytes ? { maxChunkBytes: chosenPartBytes } : undefined
       ).catch((err) => {
         console.error('Folder upload confirm failed:', err)
       })

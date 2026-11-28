@@ -13,6 +13,14 @@ import {
   requiresOriginalAttachment,
   type UploadFileKind
 } from '../../../shared/uploadFileKind'
+import {
+  UPLOAD_PART_SIZE_MB,
+  estimatePartCount,
+  loadPartSizeMb,
+  partBytesFor,
+  savePartSizeMb,
+  type UploadPartSizeMb
+} from '../lib/uploadPartSize'
 import { VideoPrepareDialog } from './VideoPrepareDialog'
 import { OfficePrepareDialog } from './OfficePrepareDialog'
 import { OfficeSelectionDialog } from './OfficeSelectionDialog'
@@ -64,7 +72,11 @@ export interface FolderUploadModalProps {
   isOpen: boolean
   data: FolderScanResult | null
   onClose: () => void
-  onConfirm: (selectedPaths: string[]) => void
+  /**
+   * `partSizeBytes` is the size chosen in this popup's part-size control — the same value the Chunks &
+   * Parts drawer shows, so the upload cannot be cut up one way while the drawer describes it another.
+   */
+  onConfirm: (selectedPaths: string[], partSizeBytes: number) => void
 }
 
 function formatBytes(bytes: number): string {
@@ -300,7 +312,7 @@ export const FolderUploadModal: React.FC<FolderUploadModalProps> = (props) => {
 const OpenFolderUploadModal: React.FC<{
   data: FolderScanResult
   onClose: () => void
-  onConfirm: (selectedPaths: string[]) => void
+  onConfirm: (selectedPaths: string[], partSizeBytes: number) => void
 }> = ({ data, onClose, onConfirm }) => {
   const allFiles = data.files
   const suggestedCount = useMemo(
@@ -400,7 +412,9 @@ const OpenFolderUploadModal: React.FC<{
 
   // Chunk Partition Drawer state
   const [isChunksDrawerOpen, setIsChunksDrawerOpen] = useState(false)
-  const [maxChunkMb, setMaxChunkMb] = useState<number>(8)
+  // The part size is a decision the user makes while uploading, not a setting buried in another drawer.
+  // It opens on whatever was chosen last time (see `uploadPartSize.ts`), and every change is stored.
+  const [maxChunkMb, setMaxChunkMb] = useState<UploadPartSizeMb>(() => loadPartSizeMb())
   const [enableCompression, setEnableCompression] = useState<boolean>(false)
   const [partitionResult, setPartitionResult] = useState<PartitionResult | null>(null)
   const [isPartitioning, setIsPartitioning] = useState(false)
@@ -578,7 +592,10 @@ const OpenFolderUploadModal: React.FC<{
 
   const handleConfirm = (): void => {
     if (selectedStats.count === 0) return
-    onConfirm(Array.from(selectedPaths))
+    // Remember it on the way out too: a user who picks a size and uploads has made a choice worth keeping,
+    // even though the control already stored it on change.
+    const mb = savePartSizeMb(undefined, maxChunkMb)
+    onConfirm(Array.from(selectedPaths), partBytesFor(mb))
   }
 
   // The displayed parts always correspond to the current selection and settings.
@@ -598,7 +615,7 @@ const OpenFolderUploadModal: React.FC<{
         const result = await window.electron?.ipcRenderer?.invoke('partition_folder_bundle', {
           folderPath: data.folderPath,
           selectedPaths: Array.from(selectedPaths),
-          maxChunkBytes: maxChunkMb * 1024 * 1024,
+          maxChunkBytes: partBytesFor(maxChunkMb),
           enableCompression
         })
         if (requestId !== partitionRequestIdRef.current) return
@@ -621,7 +638,7 @@ const OpenFolderUploadModal: React.FC<{
   }, [data.folderPath, selectedPaths, maxChunkMb, enableCompression, isChunksDrawerOpen])
 
   const handleOpenChunksDrawer = (): void => setIsChunksDrawerOpen(true)
-  const handleChangeMaxChunk = (mb: number): void => setMaxChunkMb(mb)
+  const handleChangeMaxChunk = (mb: number): void => setMaxChunkMb(savePartSizeMb(undefined, mb))
   const handleToggleCompression = (): void => setEnableCompression((current) => !current)
 
   // Attach every part of the selection to the current message (nothing is sent).
@@ -1294,6 +1311,41 @@ const OpenFolderUploadModal: React.FC<{
           </div>
 
           <div className="flex items-center gap-2.5">
+            {/* Part size — chosen here, where the upload happens, and remembered next time. */}
+            <div
+              className="flex items-center gap-1 pl-2 pr-1.5 py-1 rounded-xl bg-black/40 border border-white/10"
+              title={`Each attached part holds at most ${maxChunkMb} MB. Bigger parts mean fewer attachments; some providers reject very large ones.`}
+            >
+              <span className="text-[10px] uppercase tracking-wider text-gray-500">Part size</span>
+              <div className="flex items-center gap-0.5">
+                {UPLOAD_PART_SIZE_MB.map((mb) => (
+                  <button
+                    key={mb}
+                    type="button"
+                    onClick={() => handleChangeMaxChunk(mb)}
+                    aria-pressed={maxChunkMb === mb}
+                    className={`px-2 py-0.5 rounded-lg text-[11px] font-mono font-medium transition-all cursor-pointer ${
+                      maxChunkMb === mb
+                        ? 'bg-indigo-600 text-white shadow-sm shadow-indigo-500/40'
+                        : 'text-gray-400 hover:text-gray-200 hover:bg-white/5'
+                    }`}
+                  >
+                    {mb}
+                  </button>
+                ))}
+              </div>
+              <span className="text-[10px] font-mono text-gray-500">MB</span>
+              {selectedStats.count > 0 && (
+                <span
+                  className="text-[10px] font-mono text-indigo-300/80 pl-1"
+                  title="Approximate: the bundle's real part count also depends on file and header sizes."
+                >
+                  ≈ {estimatePartCount(selectedStats.bytes, maxChunkMb)} part
+                  {estimatePartCount(selectedStats.bytes, maxChunkMb) === 1 ? '' : 's'}
+                </span>
+              )}
+            </div>
+
             {/* Chunks & Partitions Manager Trigger */}
             <button
               type="button"
@@ -1458,9 +1510,9 @@ const OpenFolderUploadModal: React.FC<{
             <div className="px-6 py-3 border-b border-white/5 bg-white/[0.02] flex flex-wrap items-center justify-between gap-4">
               {/* Max Chunk Size Selector */}
               <div className="flex items-center gap-2">
-                <span className="text-xs text-gray-400 font-medium">Max Chunk Size:</span>
+                <span className="text-xs text-gray-400 font-medium">Part size:</span>
                 <div className="flex items-center gap-1 bg-black/40 p-1 rounded-xl border border-white/10">
-                  {[5, 8, 10].map((mb) => (
+                  {UPLOAD_PART_SIZE_MB.map((mb) => (
                     <button
                       key={mb}
                       type="button"

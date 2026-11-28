@@ -9,6 +9,7 @@ import type {
   BundleChunk,
   PartitionResult
 } from '../shared/folderUpload'
+import { normaliseRelativePath } from '../shared/folderUpload'
 import { annotateFileVariants } from '../shared/fileVariants'
 import { decodeBundleText } from './uploadTextSafety'
 import { partitionPreparedFiles } from './uploadPartition'
@@ -676,7 +677,12 @@ export async function buildSelectionScanResult(selectedPaths: string[]): Promise
   }
   for (const file of files) {
     // Always normalise: mixed selections can share a basename across folders.
-    file.relativePath = path.relative(common, file.path) || path.basename(file.path)
+    //
+    // And always in one spelling. On Windows `path.relative()` answers `src\main\index.ts`; the popup's
+    // folder tree, the search and the bundle headers all split on `/`, so a Windows folder used to arrive
+    // as a single flat row of backslashed paths instead of the folders the user picked.
+    file.relativePath =
+      normaliseRelativePath(path.relative(common, file.path)) || path.basename(file.path)
   }
 
   annotateFileVariants(files)
@@ -873,7 +879,7 @@ export function partitionCodebaseFiles(
         const stat = fs.statSync(fullPath)
         originalAttachments.push({
           path: fullPath,
-          relativePath: path.relative(folderPath, fullPath),
+          relativePath: normaliseRelativePath(path.relative(folderPath, fullPath)),
           size: stat.size,
           kind
         })
@@ -892,7 +898,7 @@ export function partitionCodebaseFiles(
       const processedSize = Buffer.byteLength(content, 'utf-8')
       totalProcessedBytes += processedSize
 
-      const relativePath = path.relative(folderPath, fullPath)
+      const relativePath = normaliseRelativePath(path.relative(folderPath, fullPath))
       processedFiles.push({ relativePath, content, size: processedSize })
     } catch (err) {
       throw new Error(
