@@ -265,6 +265,25 @@ body[data-preset='minimalist-slate'] .chat-tab-pill[data-active='true'] span {
   color: #000000 !important;
 }
 
+/* The tab rail draws no scrollbar of its own.
+ *
+ * A report came with a thin cyan band at the top of the sidebar's right edge. It was this rail's
+ * scrollbar: a 5 px track, a rounded thumb in the theme's accent colour, sitting at the top of the
+ * strip because the list had overflowed by a row. It reads as a loading indicator, which is exactly
+ * what it was mistaken for — and the rail is navigated by wheel, keyboard and drag, never by dragging
+ * a thumb two pixels wide. The scroll itself stays; only the furniture goes.
+ */
+.tab-rail-scroller {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.tab-rail-scroller::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+
 /* Universal Ultra-Thin Sleek Scrollbars */
 *::-webkit-scrollbar,
 .custom-scrollbar::-webkit-scrollbar {

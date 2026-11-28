@@ -466,7 +466,7 @@ export default function VerticalTabs({
       ref={containerRef}
       data-guide={dataGuide}
       data-tab-scroller="true"
-      className="flex flex-col gap-1 w-full px-2 py-1 overflow-y-auto overflow-x-hidden flex-1 select-none focus:outline-none"
+      className="tab-rail-scroller flex flex-col gap-1 w-full px-2 py-1 overflow-y-auto overflow-x-hidden flex-1 select-none focus:outline-none"
       role="tablist"
       aria-label="Browser Tabs"
       tabIndex={0}

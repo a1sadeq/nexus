@@ -185,7 +185,24 @@ import { cleanupAllUploadTempDirs, cleanupStaleUploadTempDirs } from './uploadAt
 import { forceViewRepaint } from './viewRepaint'
 import { classifySurfaceReturn } from './surfaceReturn'
 import { repairViewSurface, SurfaceRepairPolicy } from './viewSurface'
-import { isUniformBitmap, judgeSurface, mayRestartSurface, type RestartBudget } from './surfacePixels'
+import {
+  isUniformBitmap,
+  judgeSurface,
+  mayRestartSurface,
+  measureBitmap,
+  CONTENT_TEXT_THRESHOLD,
+  DARK_FRAME_LUMINANCE,
+  type BitmapMeasures,
+  type RestartBudget
+} from './surfacePixels'
+import {
+  buildAppearanceScript,
+  colourLuminance,
+  judgeReadability,
+  parseAppearance,
+  EMPTY_APPEARANCE,
+  type PageAppearance
+} from './viewForensics'
 import { decideResumeSurfaceAction } from './surfaceResume'
 import { VideoJobManager } from './videoJob'
 import { sweepStaleJobDirs } from './videoPrepare'
@@ -562,11 +579,14 @@ async function readSurfaceSample(view: Electron.WebContentsView): Promise<{
   uniform: boolean
   domTextLength: number
   loading: boolean
+  meanLuminance?: number
+  darkFraction?: number
 }> {
   let captured = false
   let uniform = false
   let domTextLength = -1
   let loading = false
+  let measures: BitmapMeasures | null = null
   try {
     loading = view.webContents.isLoading()
   } catch {
@@ -580,6 +600,9 @@ async function readSurfaceSample(view: Electron.WebContentsView): Promise<{
         // Older Electron typings describe `getBitmap()` as void; at runtime it is the BGRA buffer.
         const bitmap = (image as unknown as { getBitmap: () => Buffer }).getBitmap()
         uniform = isUniformBitmap(bitmap, size.width, size.height)
+        // The same buffer answers the other question — how dark is the frame — for the cost of one pass
+        // over samples it has already been loaded for. See `dark-surface` in `surfacePixels.ts`.
+        measures = measureBitmap(bitmap, size.width, size.height)
         captured = true
       }
     }
@@ -594,7 +617,118 @@ async function readSurfaceSample(view: Electron.WebContentsView): Promise<{
   } catch {
     domTextLength = -1
   }
-  return { captured, uniform, domTextLength, loading }
+  return {
+    captured,
+    uniform,
+    domTextLength,
+    loading,
+    meanLuminance: measures?.meanLuminance,
+    darkFraction: measures?.darkFraction
+  }
+}
+
+/**
+ * What the app last learned about one view's picture, kept per tab so an export can report it even when
+ * it is taken minutes later, with the Diagnostics panel open and no probe possible.
+ *
+ * This is the build-53 answer to the question every previous export left open: *was the view blank when
+ * the user saw it?* Until now that lived only in a trace line that had already rolled off, so the report
+ * could not distinguish "never painted" from "painted and then dropped" from "painted black".
+ */
+interface ViewForensics {
+  verdict: string
+  reason: string
+  at: number
+  meanLuminance: number | null
+  darkFraction: number | null
+  domText: number
+  appearance: PageAppearance
+  /** Frames this tab has been reported unreadable or blank since it was created. */
+  badFrames: number
+  /** Times the app replaced this view's document because the frame was missing. */
+  rebuilds: number
+  /** Theme colours were dropped for this view because they made the page unreadable. */
+  themeColoursSuppressed: boolean
+}
+const viewForensics = new Map<string, ViewForensics>()
+/** How long the appearance script may take before it is treated as an unanswered question. */
+const APPEARANCE_SCRIPT_TIMEOUT_MS = 4000
+
+function forensicsFor(tabId: string): ViewForensics {
+  let record = viewForensics.get(tabId)
+  if (!record) {
+    record = {
+      verdict: 'not probed',
+      reason: '',
+      at: 0,
+      meanLuminance: null,
+      darkFraction: null,
+      domText: -1,
+      appearance: EMPTY_APPEARANCE,
+      badFrames: 0,
+      rebuilds: 0,
+      themeColoursSuppressed: false
+    }
+    viewForensics.set(tabId, record)
+  }
+  return record
+}
+
+/**
+ * Forget everything learned about a tab's *view*.
+ *
+ * Every one of these maps was keyed by tab id and outlived the view it described. That is how the same
+ * tab could keep failing after it had been closed and opened again: `surfaceRestartBudget` still said
+ * "already rebuilt 3 times this run", so the fresh document that painted blank was never rebuilt, and
+ * the trace only ever said `not rebuilding`. A new document deserves a new budget — the cap exists to
+ * stop a loop on one page, not to condemn a tab for the life of the app.
+ */
+function resetSurfaceForensics(tabId: string, because: string): void {
+  if (!tabId) return
+  const had = forensicsFor(tabId)
+  const summary = {
+    because,
+    verdict: had.verdict,
+    badFrames: had.badFrames,
+    rebuilds: had.rebuilds,
+    budget: surfaceRestartBudget.get(tabId)?.count ?? 0
+  }
+  viewForensics.delete(tabId)
+  surfaceRestartBudget.delete(tabId)
+  surfaceSuspects.delete(tabId)
+  lastSurfaceProbe.delete(tabId)
+  textColourRepairs.delete(tabId)
+  if (had.badFrames > 0 || had.rebuilds > 0 || had.verdict !== 'not probed') {
+    traceViewOp(tabId, 'surface state reset — the view this was about is gone', summary)
+  }
+}
+
+/**
+ * Ask the page what it looks like, and record the answer.
+ *
+ * Every probe of a suspicious frame ends here, so the next export can quote the page rather than the
+ * app's belief about the page: the background and text colours it resolved, whether it is scrolling,
+ * whether it thinks it is visible, and how many stylesheets it is carrying (ours included).
+ */
+async function captureViewAppearance(
+  tabId: string,
+  view: Electron.WebContentsView
+): Promise<PageAppearance> {
+  const record = forensicsFor(tabId)
+  let raw: unknown = null
+  try {
+    raw = await Promise.race([
+      view.webContents.executeJavaScript(buildAppearanceScript()),
+      new Promise<never>((_resolve, reject) =>
+        setTimeout(() => reject(new Error('appearance timeout')), APPEARANCE_SCRIPT_TIMEOUT_MS)
+      )
+    ])
+  } catch (e: any) {
+    record.appearance = { ...EMPTY_APPEARANCE, ok: false, error: String(e?.message || e).slice(0, 200) }
+    return record.appearance
+  }
+  record.appearance = parseAppearance(raw)
+  return record.appearance
 }
 
 /**
@@ -637,8 +771,44 @@ function probePaintedSurface(tabId: string, view: Electron.WebContentsView, reas
       reason,
       uniform: sample.uniform,
       domText: sample.domTextLength,
-      loading: sample.loading
+      loading: sample.loading,
+      meanLuminance: sample.meanLuminance ?? null,
+      darkFraction: sample.darkFraction ?? null
     })
+    const record = forensicsFor(tabId)
+    record.verdict = verdict
+    record.reason = reason
+    record.at = Date.now()
+    record.meanLuminance = sample.meanLuminance ?? null
+    record.darkFraction = sample.darkFraction ?? null
+    record.domText = sample.domTextLength
+
+    // The frame has content and is nearly black. That is not a lost surface, so it is not rebuilt: the
+    // page is there and unreadable, which means the *paint* is wrong, not the view. Ask the page why.
+    if (verdict === 'dark-surface') {
+      record.badFrames += 1
+      const appearance = await captureViewAppearance(tabId, view)
+      const readability = judgeReadability(appearance)
+      traceViewOp(tabId, 'dark surface — the page painted its own text into its own background', {
+        reason,
+        meanLuminance: sample.meanLuminance ?? null,
+        darkFraction: sample.darkFraction ?? null,
+        thresholds: { frameMeanBelow: DARK_FRAME_LUMINANCE, textAbove: CONTENT_TEXT_THRESHOLD },
+        evidence: readability.reason,
+        contrast: readability.ratio,
+        unreadable: readability.unreadable,
+        bodyBg: appearance.bodyBg,
+        bodyColor: appearance.bodyColor,
+        htmlBg: appearance.htmlBg,
+        htmlColor: appearance.htmlColor,
+        opacity: appearance.bodyOpacity,
+        filter: appearance.bodyFilter || appearance.htmlFilter || 'none',
+        styleSheets: appearance.styleSheets,
+        arc: appearance.scroll.scrollHeight > appearance.scroll.clientHeight ? 'scrolls' : 'does not scroll'
+      })
+      if (readability.unreadable) repairUnreadableColours(tabId, view, reason, readability.reason)
+      return
+    }
     if (verdict !== 'blank-surface') return
     // Watch this tab from now on: it has produced a frame that was not there.
     surfaceSuspects.add(tabId)
@@ -653,10 +823,24 @@ function probePaintedSurface(tabId: string, view: Electron.WebContentsView, reas
       count: (previous?.count ?? 0) + 1,
       lastAt: Date.now()
     })
+    record.badFrames += 1
+    const appearance = await captureViewAppearance(tabId, view)
     traceViewOp(
       tabId,
       'blank surface — the page has content and the frame does not; rebuilding the view (this is "close the tab and open it again", keeping the tab)',
-      { reason, budget: decision.reason }
+      {
+        reason,
+        budget: decision.reason,
+        // The page's own account of the frame it believes it is showing. A page that says it is visible,
+        // scrolled and carrying our stylesheet, behind a frame with nothing in it, is a compositor fault;
+        // the same page reporting `visibilityState: hidden` is a lifetime fault. Those want different
+        // fixes, and until build 53 the export could not tell them apart.
+        pageVisibility: appearance.visibilityState,
+        bodyBg: appearance.bodyBg,
+        bodyColor: appearance.bodyColor,
+        styleSheets: appearance.styleSheets,
+        viewport: appearance.viewport
+      }
     )
     let restarted: Awaited<ReturnType<typeof tabDiscardManager.restartTab>> = 'no-view'
     try {
@@ -665,11 +849,78 @@ function probePaintedSurface(tabId: string, view: Electron.WebContentsView, reas
       restarted = 'busy'
     }
     traceNav(tabId, 'load', `restart (blank surface) — ${restarted}`, { reason })
+    if (restarted === 'ok') record.rebuilds += 1
     console.log(`[surface] blank frame on ${tabId} (${reason}) — restart: ${restarted}`)
     if (restarted === 'ok') {
       sendToMainWindow('tab_restarted', tabId, restarted, tabId === activeViewId, 'blank-surface')
     }
   })()
+}
+
+/**
+ * Text colours that were forced onto a view because the theme's own text had disappeared into the page.
+ *
+ * Keyed by tab, cleared when the view is replaced. Kept here rather than in the theme module because it
+ * is evidence from the *page*, not a user preference: it is the answer to "why could I not read this".
+ */
+const textColourRepairs = new Map<string, { text: string; text2: string; at: number; evidence: string }>()
+/** A longer gap than this and the same page is being repaired twice for the same reason. */
+const TEXT_REPAIR_COOLDOWN_MS = 60_000
+
+/** A short, stable fingerprint of a tab's accent colour, for the trace. The colour itself is not logged. */
+function themeAccentFingerprint(tabId: string): string {
+  try {
+    const key = viewModelKeys.get(tabId) || ''
+    let hash = 0
+    for (let i = 0; i < key.length; i++) hash = (hash * 31 + key.charCodeAt(i)) | 0
+    return key ? `${key.slice(0, 24)}#${Math.abs(hash).toString(36)}` : 'none'
+  } catch {
+    return 'none'
+  }
+}
+
+/**
+ * The page is there and its text cannot be seen. Give it text it can show.
+ *
+ * This is the one repair in the surface chain that does not touch the view: no hide, no show, no reload,
+ * no new document — a stylesheet swap. The evidence decides the colour: the page reported the background
+ * it actually paints, so the text only has to be the opposite of it. A page that reported no usable
+ * background gets no repair at all, because guessing is how a working page becomes an unreadable one.
+ */
+function repairUnreadableColours(
+  tabId: string,
+  view: Electron.WebContentsView,
+  reason: string,
+  evidence: string
+): void {
+  const record = forensicsFor(tabId)
+  const previous = textColourRepairs.get(tabId)
+  if (previous && Date.now() - previous.at < TEXT_REPAIR_COOLDOWN_MS) return
+  const bg = colourLuminance(record.appearance.bodyBg) ?? colourLuminance(record.appearance.htmlBg)
+  if (bg === null) {
+    traceViewOp(tabId, 'unreadable page — not repaired', {
+      reason,
+      because: 'the page reported no background to contrast against'
+    })
+    return
+  }
+  // Light page → near-black text; dark page → near-white text. Both are neutral so the page's own
+  // accents survive; the point is legibility, not the Nexus palette.
+  const text = bg > 140 ? '#0d0d12' : '#f2f2f7'
+  const text2 = bg > 140 ? '#3a3a44' : '#b9b9c4'
+  textColourRepairs.set(tabId, { text, text2, at: Date.now(), evidence })
+  traceViewOp(tabId, 'unreadable page — re-applying the stylesheet with text colours the page can show', {
+    reason,
+    evidence,
+    pageBackgroundLuminance: Math.round(bg),
+    text,
+    text2
+  })
+  try {
+    applyWebviewTheme(view)
+  } catch (e: any) {
+    traceViewOp(tabId, 'unreadable page — repair could not be applied', { error: String(e?.message || e) })
+  }
 }
 
 /** Arm the pixel probe after a present has had time to land. */
@@ -2203,6 +2454,9 @@ export const tabDiscardManager = new TabDiscardManager({
   retentionGraceMs: 15 * 60 * 1000,
   onTeardown: async (tabId, view, contents) => {
     surfaceRepair.forget(tabId)
+    // The same reason as `ensureAiView`: nothing learned about this view may outlive it, or the next
+    // document for this tab starts life already condemned.
+    resetSurfaceForensics(tabId, 'teardown')
     const pendingRepair = repairDeferrals.get(tabId)
     if (pendingRepair) {
       clearTimeout(pendingRepair)
@@ -2324,6 +2578,61 @@ ipcMain.handle('capture_diagnostics', async (event, samplingMs?: number) => {
     shellActivity = { runningAnimations: null }
   }
 
+  // Build 53: what is actually painted down the right edge of the tab rail.
+  //
+  // The report that prompted this had a thin cyan band at the top of the sidebar's right edge — a few
+  // pixels of colour nobody could name. From outside the app it is impossible to tell a scrollbar thumb
+  // from an accent border from an element that should not be on screen at all, so the report now hit-tests
+  // the edge and quotes the element it finds, with the properties that decide its colour.
+  let sidebarEdge: { points: unknown[]; note: string } = {
+    points: [],
+    note: 'the shell did not answer the hit-test'
+  }
+  try {
+    const probe = await mainWindow.webContents.executeJavaScript(
+      `(() => {
+        const rail = document.querySelector('[data-guide="tabs"]');
+        if (!rail) return { points: [], note: 'no tab rail in the shell' };
+        const box = rail.getBoundingClientRect();
+        const points = [];
+        const offsets = [1, 6, 20, 40, 80, Math.round(box.height / 2), Math.round(box.height) - 20];
+        for (const dy of offsets) {
+          const x = Math.round(box.right) - 2;
+          const y = Math.round(box.top) + dy;
+          if (y < box.top || y > box.bottom) continue;
+          const el = document.elementFromPoint(x, y);
+          if (!el) { points.push({ x, y, element: null }); continue; }
+          const cs = getComputedStyle(el);
+          points.push({
+            x,
+            y,
+            element: el.tagName.toLowerCase() +
+              (el.className && typeof el.className === 'string' ? '.' + el.className.trim().split(/\s+/).join('.') : ''),
+            background: cs.backgroundColor,
+            backgroundImage: cs.backgroundImage === 'none' ? 'none' : cs.backgroundImage.slice(0, 60),
+            borderRight: cs.borderRightWidth + ' ' + cs.borderRightStyle + ' ' + cs.borderRightColor,
+            boxShadow: cs.boxShadow === 'none' ? 'none' : cs.boxShadow.slice(0, 80),
+            rounded: cs.borderRadius,
+            size: Math.round(el.getBoundingClientRect().width) + 'x' + Math.round(el.getBoundingClientRect().height),
+            scrolls: el.scrollHeight > el.clientHeight + 1,
+            scrollbarPx: Math.max(0, el.offsetWidth - el.clientWidth)
+          });
+        }
+        return { points, note: 'element at the tab rail right edge, top to bottom' };
+      })()`
+    )
+    if (probe && typeof probe === 'object') {
+      sidebarEdge = {
+        points: Array.isArray((probe as { points?: unknown[] }).points)
+          ? ((probe as { points: unknown[] }).points as unknown[])
+          : [],
+        note: String((probe as { note?: unknown }).note ?? 'no note')
+      }
+    }
+  } catch (e: any) {
+    sidebarEdge = { points: [], note: `hit-test failed: ${String(e?.message || e)}` }
+  }
+
   // The navigation trace travels with the report: an export that explains the CPU but not the
   // navigation is the export that made us guess last time.
   return {
@@ -2336,19 +2645,83 @@ ipcMain.handle('capture_diagnostics', async (event, samplingMs?: number) => {
         text: navTrace.formatAll(200)
       },
       shellActivity,
+      sidebarEdge,
       // The other half of the story, in the report itself rather than only in the trace.
       //
       // Build 50's export ended on "overlay open — AI view hidden" and nothing else: no panel named,
       // no way to tell a real panel from a flag left behind, and no record of what the app believed
       // about the views it had just hidden. The next export answers all three at the moment it is
       // taken, even if the trace has rolled past the event.
+      // Build 53: what the app last observed about each view's *picture*, kept so the report can answer
+      // the question it kept failing to answer — was the view blank when the user saw it, and if so why?
+      //
+      // Until now the only witness was a trace line that had already rolled past by the time the report
+      // was taken, and `presentedVisible` alone could not distinguish a frame that never existed from one
+      // that was painted black. Both are reported per tab here, with the page's own account of itself.
+      viewForensics: {
+        note:
+          'verdict is the last pixel probe for that tab this run: painted = a frame with content, ' +
+          'dark-surface = a frame with content that is nearly black (unreadable, not missing), ' +
+          'blank-surface = content in the page and nothing in the frame, blank-page = nothing to paint yet. ' +
+          'appearance is the page quoting its own computed style at that moment.',
+        views: Object.fromEntries(
+          Array.from(aiViews.entries()).map(([id, view]) => {
+            const record = viewForensics.get(id)
+            const cssState = (() => {
+              try {
+                return viewCssState.get(view.webContents) ?? null
+              } catch {
+                return null
+              }
+            })()
+            const repair = textColourRepairs.get(id) ?? null
+            const budget = surfaceRestartBudget.get(id) ?? null
+            return [
+              id,
+              {
+                title: viewTitles.get(id) ?? '',
+                model: viewModelKeys.get(id) ?? '',
+                url: (() => {
+                  try {
+                    return view.webContents.isDestroyed() ? '' : view.webContents.getURL()
+                  } catch {
+                    return ''
+                  }
+                })(),
+                active: id === activeViewId,
+                verdict: record?.verdict ?? 'not probed',
+                verdictReason: record?.reason ?? '',
+                verdictAgoMs: record && record.at > 0 ? Date.now() - record.at : null,
+                meanLuminance: record?.meanLuminance ?? null,
+                darkFraction: record?.darkFraction ?? null,
+                domText: record?.domText ?? -1,
+                badFrames: record?.badFrames ?? 0,
+                rebuilds: record?.rebuilds ?? 0,
+                rebuildBudget: budget ? budget.count : 0,
+                stylesheet: cssState ? `${cssState.css.length}b` : 'none',
+                textRepair: repair ? { text: repair.text, at: repair.at, evidence: repair.evidence } : null,
+                appearance: record?.appearance ?? null
+              }
+            ]
+          })
+        )
+      },
       overlayState: {
         open: overlaysOpen,
         panels: lastOverlayKeys.length > 0 ? lastOverlayKeys : 'not reported',
         openForMs: overlaysOpen && overlaysOpenedAt > 0 ? Date.now() - overlaysOpenedAt : 0,
         activeViewId,
         activeViewVisible,
+        // Build 53: this map is the app's own record of "did I leave this view presented", not a
+        // measurement of the frame. It reads `false` for every tab whenever views are hidden — which is
+        // exactly the state the report is usually taken in, because the Diagnostics panel is open and the
+        // panel hides the AI view. It is reported with its meaning attached so it stops being read as six
+        // blank tabs: `viewForensics.views[...].verdict` is the measurement.
         presentedVisible: Object.fromEntries(presentedVisible),
+        presentedVisibleNote:
+          overlaysOpen || !activeViewVisible
+            ? 'views are currently hidden (overlay open or no active visible view); false here means "not presented right now", not "blank"'
+            : 'views are on screen; false here means the app left that tab unpresented',
         notificationCard: {
           visible: isAiNotificationVisible,
           suspended: aiToastManager.isSuspended(),
@@ -6631,6 +7004,9 @@ function ensureAiView(tabId: string, containerId?: unknown): Electron.WebContent
 
   // Transactional registration: register with TabDiscardManager BEFORE adding to window or setting in aiViews
   const viewGen = bumpTabViewGeneration(tabId)
+  // A brand-new document inherits nothing from the view it replaced — including the evidence that the
+  // old one was blank, and the rebuild budget that evidence had spent.
+  resetSurfaceForensics(tabId, 'new view')
   setTabAiLifecycle(tabId, 'unknown', { viewGeneration: viewGen, skipTimer: true })
   tabDiscardManager.registerView(tabId, view as unknown as DiscardableView)
 
@@ -7667,12 +8043,20 @@ function computeThemeCss(view, modelKey?: string): string {
   const theme = webviewTheme
   const url = view.webContents.getURL()
   const resolvedKey = modelKey || resolveModelKey('', url)
-  const overrides = getOverridesForTab(resolvedKey, url, tabIdForWebContents(view.webContents))
-  const on = overrides?.on === 'on' ? true : overrides?.on === 'off' ? false : (theme?.on ?? false)
+  const tabId = tabIdForWebContents(view.webContents)
+  const overrides = getOverridesForTab(resolvedKey, url, tabId)
+  // Build 53: if this view's text has been seen painted into its own background, the stylesheet goes on
+  // with text colours chosen against the background the page actually reports. The user's own colour
+  // choice still drives everything else; only the two text tokens are replaced, and only for this view.
+  const repair = tabId ? textColourRepairs.get(tabId) : undefined
+  const effective = repair
+    ? { ...(overrides || {}), colors: { ...((overrides && overrides.colors) || {}), text: repair.text, text2: repair.text2 } }
+    : overrides
+  const on = effective?.on === 'on' ? true : effective?.on === 'off' ? false : (theme?.on ?? false)
   if (on && theme?.colors) {
-    return buildWebviewThemeCss(theme, url, view.getBounds().width, overrides, resolvedKey)
+    return buildWebviewThemeCss(theme, url, view.getBounds().width, effective, resolvedKey)
   }
-  return overrides?.customCss ? overrides.customCss : ''
+  return effective?.customCss ? effective.customCss : ''
 }
 function applyWebviewTheme(view, modelKey?: string) {
   const wc = view.webContents
@@ -7728,6 +8112,19 @@ function applyWebviewTheme(view, modelKey?: string) {
       viewCssState.set(wc, { css: decision.css, key })
       for (const [id, v] of aiViews.entries()) {
         if (v.webContents === wc) {
+          // Build 53: record which stylesheet went onto which view, and with which colours in it.
+          //
+          // A page painted into its own background has almost always just had a stylesheet applied whose
+          // accent came from the tab's colour. The export could not previously say what had been applied
+          // — only that `insertCSS` had resolved. `key` is opaque, so the fingerprint is the length and a
+          // short digest, and `accent`/`aura` are the two values the overrides put at the top of the file.
+          const repaired = textColourRepairs.get(id)
+          traceViewOp(id, 'theme — stylesheet applied', {
+            fingerprint: `${decision.css.length}b`,
+            text: repaired ? `${repaired.text} (repaired for the page's own background)` : 'theme default',
+            accent: themeAccentFingerprint(id),
+            colours: repaired ? 'repaired' : 'nexus colours'
+          })
           sendToMainWindow('ai-theme-applied', id)
           break
         }

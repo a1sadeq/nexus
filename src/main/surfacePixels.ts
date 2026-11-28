@@ -22,7 +22,7 @@
  * this module only grades the answer.
  */
 
-export type SurfaceVerdict = 'painted' | 'blank-surface' | 'blank-page' | 'unknown'
+export type SurfaceVerdict = 'painted' | 'blank-surface' | 'blank-page' | 'dark-surface' | 'unknown'
 
 export interface SurfaceSample {
   /** Did `capturePage()` produce anything at all? */
@@ -33,6 +33,13 @@ export interface SurfaceSample {
   domTextLength: number
   /** Is a navigation still in flight? A loading page is legitimately blank. */
   loading: boolean
+  /**
+   * Mean luminance of the sampled pixels, 0–255. Absent when the caller did not measure it (older
+   * callers, and every test written before build 53) — in which case nothing about this verdict changes.
+   */
+  meanLuminance?: number
+  /** Share of sampled pixels darker than {@link DARK_PIXEL_LUMINANCE}, 0–1. */
+  darkFraction?: number
 }
 
 /** How far two channels may differ and still count as "the same colour". */
@@ -40,6 +47,60 @@ export const UNIFORM_TOLERANCE = 3
 
 /** Shortest page text that counts as content. Shorter than this is a placeholder, not a lost frame. */
 export const CONTENT_TEXT_THRESHOLD = 80
+
+/** A pixel this dark is "black" for the purposes of the dark-frame measure. */
+export const DARK_PIXEL_LUMINANCE = 24
+
+/**
+ * A frame below this mean luminance has content in it — the probe will say `painted` — and is still
+ * unreadable. This is the case the user reported as "the error keeps showing up": not a missing frame,
+ * a black one. 18/255 is low enough that a dark-themed chat page (which sits around 30–45) passes, and
+ * high enough that a page painted into its own background does not.
+ */
+export const DARK_FRAME_LUMINANCE = 18
+
+export interface BitmapMeasures {
+  meanLuminance: number
+  darkFraction: number
+}
+
+/**
+ * Mean luminance and darkness of the sampled pixels.
+ *
+ * `isUniformBitmap` answers "is there one colour everywhere?"; this answers "how dark is what is there?".
+ * A page that has been painted into its own background is not uniform, so the blank probe is right to
+ * leave it alone — and the user still cannot read it. Measuring both is what makes that visible.
+ */
+export function measureBitmap(
+  bitmap: Uint8Array | Buffer | null | undefined,
+  width: number,
+  height: number
+): BitmapMeasures | null {
+  if (!bitmap || width <= 0 || height <= 0) return null
+  const pixels = Math.floor(bitmap.length / 4)
+  if (pixels < 4) return null
+  const samples = Math.min(1024, pixels)
+  const step = Math.max(1, Math.floor(pixels / samples))
+  let total = 0
+  let counted = 0
+  let dark = 0
+  for (let i = 0; i < pixels; i += step) {
+    const offset = i * 4
+    if (offset + 2 >= bitmap.length) break
+    const b = bitmap[offset]
+    const g = bitmap[offset + 1]
+    const r = bitmap[offset + 2]
+    const luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
+    total += luminance
+    counted++
+    if (luminance < DARK_PIXEL_LUMINANCE) dark++
+  }
+  if (counted === 0) return null
+  return {
+    meanLuminance: Math.round((total / counted) * 100) / 100,
+    darkFraction: Math.round((dark / counted) * 1000) / 1000
+  }
+}
 
 /**
  * Read the BGRA bitmap the way a person would glance at it: same colour everywhere, or not.
@@ -91,7 +152,19 @@ export function judgeSurface(sample: SurfaceSample): SurfaceVerdict {
   // A page that is still loading is blank on purpose. Restarting it would abort the load the user asked
   // for, which is worse than the frame they are missing for another few hundred milliseconds.
   if (sample.loading) return 'unknown'
-  if (!sample.uniform) return 'painted'
+  // Painted, and black. The frame is not missing — it is unreadable, which is a different fault with a
+  // different cause, and reporting it as `painted` is how it survived three builds.
+  if (!sample.uniform) {
+    if (
+      typeof sample.meanLuminance === 'number' &&
+      Number.isFinite(sample.meanLuminance) &&
+      sample.meanLuminance < DARK_FRAME_LUMINANCE &&
+      sample.domTextLength >= CONTENT_TEXT_THRESHOLD
+    ) {
+      return 'dark-surface'
+    }
+    return 'painted'
+  }
   if (sample.domTextLength < 0) return 'unknown'
   return sample.domTextLength >= CONTENT_TEXT_THRESHOLD ? 'blank-surface' : 'blank-page'
 }

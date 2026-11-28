@@ -122,10 +122,12 @@ describe('the overlay that hides every view has to name itself', () => {
   })
 
   it('records the overlay state in the diagnostics export itself', () => {
-    const capture = source.slice(
-      source.indexOf("ipcMain.handle('capture_diagnostics'"),
-      source.indexOf("ipcMain.handle('capture_diagnostics'") + 4000
-    )
+    // The window covers the whole `capture_diagnostics` handler. It grew in build 53 — the handler now
+    // also hit-tests the shell's sidebar edge and reports per-view forensics before it builds this object,
+    // and a slice sized to build 51's handler would fail for a reason that has nothing to do with overlays.
+    const start = source.indexOf("ipcMain.handle('capture_diagnostics'")
+    const end = source.indexOf("ipcMain.handle('nav_trace_get'", start)
+    const capture = source.slice(start, end > start ? end : start + 24000)
     expect(capture).toContain('overlayState: {')
     expect(capture).toContain('panels: lastOverlayKeys.length > 0 ? lastOverlayKeys : \'not reported\'')
     expect(capture).toContain('presentedVisible: Object.fromEntries(presentedVisible)')
