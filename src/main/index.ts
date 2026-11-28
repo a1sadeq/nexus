@@ -335,6 +335,221 @@ function isViewAttached(view: Electron.WebContentsView): boolean | null {
 
 /** When the active view's surface was last refreshed because the window came back. */
 let lastResumeRefreshAt = 0
+
+/**
+ * Ask the view itself whether it is really on screen, and put it right if it is not.
+ *
+ * Everything the app has done about the blank AI view so far has been *assumption*: it sets the view
+ * visible and believes it, forces a repaint and believes that too. The build-44 diagnostics show where
+ * that ends — the trace is full of `setVisible {visible=true}` and `repaint forced`, and the user is
+ * still looking at an empty window. So the app now checks, with the only three facts Electron can give:
+ *
+ *   `contentView.children.includes(view)` — is the view in the window at all?
+ *   `view.getVisible()`                  — does the view think it is showing?
+ *   `view.getBounds()`                   — is it where the layout says it should be?
+ *
+ * Anything that disagrees is fixed on the spot, and every check is traced, so the next diagnostics
+ * answers "which of the three was wrong" instead of "the app thought it was fine".
+ */
+/**
+ * How many times this tab's view had to be put back into the window. A tab that needs it repeatedly is
+ * not being presented by the window for a reason worth seeing in Diagnostics.
+ */
+const attachCounts = new Map<string, number>()
+
+function verifyViewPresentation(
+  tabId: string,
+  view: Electron.WebContentsView,
+  reason: string
+): { attached: boolean | null; visible: boolean | null; fixed: string[] } {
+  const fixed: string[] = []
+  let attached: boolean | null = null
+  let visible: boolean | null = null
+
+  attached = isViewAttached(view)
+  if (attached === false && mainWindow && !mainWindow.isDestroyed()) {
+    try {
+      mainWindow.contentView.addChildView(view)
+      attachCounts.set(tabId, (attachCounts.get(tabId) ?? 0) + 1)
+      fixed.push('re-attached (it was not in the window)')
+      attached = true
+    } catch (error) {
+      fixed.push(`re-attach failed: ${(error as Error)?.message ?? error}`)
+    }
+  }
+
+  try {
+    visible = view.getVisible?.() ?? null
+  } catch {
+    visible = null
+  }
+  if (visible === false) {
+    try {
+      view.setVisible(true)
+      fixed.push('shown again (it was hidden)')
+      visible = true
+    } catch (error) {
+      fixed.push(`show failed: ${(error as Error)?.message ?? error}`)
+    }
+  }
+
+  const wanted = lastRealBounds.get(tabId)
+  if (wanted && wanted.width > 0 && wanted.height > 0) {
+    try {
+      const actual = view.getBounds()
+      if (
+        actual.x !== wanted.x ||
+        actual.y !== wanted.y ||
+        actual.width !== wanted.width ||
+        actual.height !== wanted.height
+      ) {
+        view.setBounds(wanted)
+        fixed.push(
+          `bounds restored ${actual.width}x${actual.height} → ${wanted.width}x${wanted.height}`
+        )
+      }
+    } catch {
+      /* bounds are checked again by the caller's repaint */
+    }
+  }
+
+  traceViewOp(tabId, 'presentation check', {
+    reason,
+    attached,
+    visible,
+    fixed: fixed.length ? fixed.join('; ') : 'none',
+    requested: Boolean(wanted)
+  })
+  return { attached, visible, fixed }
+}
+
+/**
+ * Ask the page whether it believes it is on screen.
+ *
+ * The one remaining explanation for "the app says the view is visible and nothing is drawn" is that the
+ * page's contents are still in Chromium's *hidden* state: a hidden renderer stops producing frames, and
+ * every provider UI paints on requestAnimationFrame, so nothing appears however often the surface is
+ * invalidated. That is also why closing an overlay — a hide → show transition the page actually has time
+ * to see — fixes the view when a dozen forced repaints did not.
+ */
+function readPageVisibility(view: Electron.WebContentsView): Promise<string> {
+  return new Promise((resolve) => {
+    try {
+      if (!view || view.webContents.isDestroyed()) return resolve('unknown')
+      const result = view.webContents.executeJavaScript('document.visibilityState', true)
+      if (result && typeof (result as Promise<unknown>).then === 'function') {
+        void (result as Promise<unknown>)
+          .then((state) => resolve(typeof state === 'string' ? state : 'unknown'))
+          .catch(() => resolve('unknown'))
+      } else {
+        resolve('unknown')
+      }
+    } catch {
+      resolve('unknown')
+    }
+  })
+}
+
+/**
+ * A gate for {@link forceViewRepaint}'s flip: resolve once the page has actually seen itself hidden.
+ *
+ * Polling the page is the only way to know the transition was real. Without it, hide+show inside one turn
+ * is a flip the page never observes, which is how every build up to 44 managed to log a visibility flip
+ * and leave the user with a blank window.
+ */
+function pageVisibilityGate(view: Electron.WebContentsView): { waitForPageHidden: (deadlineMs: number) => Promise<boolean> } {
+  return {
+    waitForPageHidden: async (deadlineMs: number) => {
+      const startedAt = Date.now()
+      // One turn first: the hide has to be delivered to the renderer before it can report anything.
+      while (Date.now() - startedAt < deadlineMs) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 30))
+        const state = await readPageVisibility(view)
+        if (state === 'hidden') return true
+        if (state === 'unknown') return false
+      }
+      return false
+    }
+  }
+}
+
+/**
+ * Ask the page whether it believes it is on screen, after a flip has completed.
+ *
+ * `allowFlip` is what stops this becoming a loop: one extra flip, then the trace reports what the page
+ * said and stops.
+ */
+function probeSurfaceState(
+  tabId: string,
+  view: Electron.WebContentsView,
+  reason: string,
+  allowFlip = true
+): void {
+  if (!view || view.webContents.isDestroyed()) return
+  void readPageVisibility(view).then((pageState) => {
+    traceViewOp(tabId, 'surface probe — what the page thinks', { pageState, reason })
+    if (
+      pageState === 'hidden' &&
+      allowFlip &&
+      tabId === activeViewId &&
+      activeViewVisible &&
+      !overlaysOpen
+    ) {
+      traceViewOp(tabId, 'page still reports hidden — flipping visibility again', { reason })
+      forceViewRepaint(view, {
+        bounds: lastRealBounds.get(tabId) ?? null,
+        reason: `${reason} / page reported hidden`,
+        force: true,
+        flipVisibility: true,
+        flipGate: pageVisibilityGate(view),
+        flipShouldRestore: () => tabId === activeViewId && activeViewVisible && !overlaysOpen,
+        log: (message) => console.log(`[viewRepaint] ${message}`)
+      })
+      setTimeout(() => probeSurfaceState(tabId, view, `${reason} / second probe`, false), 900)
+      return
+    }
+    // Nothing above is left to try once the second probe has run. If the page says it is visible and the
+    // window, the view and the layout all say the view is presented, then the blank is below the app —
+    // in the compositor — and no amount of repainting changes that. Say so in the trace, once, instead of
+    // leaving the next diagnostics to be read as "the app tried nothing".
+    if (!allowFlip && pageState === 'visible') {
+      traceViewOp(tabId, 'surface probe — page reports visible; the view is presented, so nothing on the app side is left to fix', {
+        reason
+      })
+    }
+  })
+}
+
+/**
+ * Make the active view really be on screen: verify the three facts, then hide/show it and ask both the
+ * compositor and the page for a frame.
+ */
+function ensureActiveViewPresented(reason: string): void {
+  const tabId = activeViewId
+  const view = tabId ? aiViews.get(tabId) : null
+  if (!tabId || !view || view.webContents.isDestroyed()) return
+  if (!activeViewVisible || overlaysOpen) return
+  verifyViewPresentation(tabId, view, reason)
+  surfaceRepair.forget(tabId)
+  const bounds = lastRealBounds.get(tabId) ?? null
+  const outcome = forceViewRepaint(view, {
+    bounds: bounds && bounds.width > 0 && bounds.height > 0 ? bounds : null,
+    reason,
+    force: true,
+    flipVisibility: true,
+    // Only show the view again once the page has seen it hidden — a flip the page never observes is
+    // not a flip. Capped so the view can never be left hidden.
+    flipGate: pageVisibilityGate(view),
+    maxFlipHiddenMs: 700,
+    // A flip that waits for the page can outlive a tab switch; never show a view that is no longer the
+    // one on screen.
+    flipShouldRestore: () => tabId === activeViewId && activeViewVisible && !overlaysOpen,
+    log: (message) => console.log(`[viewRepaint] ${message}`)
+  })
+  traceViewOp(tabId, 'presented — verified, then flipped', { outcome, reason })
+  // The gate shows the view again asynchronously, so the probe has to wait for it.
+  setTimeout(() => probeSurfaceState(tabId, view, `${reason} / after flip`, true), 820)
+}
 /** One pending deferred surface repair per tab — a repair never runs mid-navigation. */
 const repairDeferrals = new Map<string, NodeJS.Timeout>()
 /**
@@ -3577,18 +3792,11 @@ function refreshActiveViewSurfaceAfterResume(reason: string): void {
     return
   }
 
-  const bounds = lastRealBounds.get(tabId) ?? null
   // Not a failing repaint: this is a known transition, so it must not count towards escalation.
   surfaceRepair.forget(tabId)
-  // Always the strong repaint. A resume is the transition where the surface may be gone, and the
-  // bookkeeping that would say otherwise is what the build-43 trace shows failing.
-  const outcome = forceViewRepaint(view, {
-    bounds: bounds && bounds.width > 0 && bounds.height > 0 ? bounds : null,
-    reason: `window resumed (${reason})`,
-    force: true,
-    log: (message) => console.log(`[viewRepaint] ${message}`)
-  })
-  traceViewOp(tabId, 'repaint after resume — kept the existing surface', { outcome, reason })
+  // Verify and re-present, not just repaint: a resume is the transition where the surface — or the
+  // presenting of the view itself — may be gone.
+  ensureActiveViewPresented(`window resumed (${reason})`)
 }
 
 /** Rebuild one tab's surface in place, keeping its page. Never recreates the WebContents. */
@@ -3795,19 +4003,11 @@ function reconcileViewPresentation(): void {
           // Back from an overlay / a hidden window / another tab. This is a *known* transition, so it
           // does not count towards escalation — it gets the strongest safe repaint instead (invalidate,
           // a real 1 px geometry change, and a second invalidate once a frame could have been produced).
+          // Hide/show as well as invalidate+nudge — the user's own workaround, done on purpose — and
+          // first, a check that the view is actually in the window and showing, because the build-44
+          // trace shows `setVisible {visible=true}` being logged for a view that was not on screen.
           surfaceRepair.forget(activeViewId)
-          // Hide/show as well as invalidate+nudge. The nudge alone is what users defeat by hand:
-          // opening Settings and closing it works because of the visibility flip, not the geometry.
-          const outcome = forceViewRepaint(view, {
-            bounds: repaintBounds,
-            reason: 'coming back from hidden (overlay / tab switch)',
-            force: true,
-            flipVisibility: true,
-            log: (message) => console.log(`[viewRepaint] ${message}`)
-          })
-          traceViewOp(activeViewId, 'repaint forced — the view was hidden, geometry tells us nothing', {
-            outcome
-          })
+          ensureActiveViewPresented('coming back from hidden (overlay / tab switch)')
         } else {
           surfaceRepair.noteRepaint(activeViewId)
           forceViewRepaint(view, {
@@ -3824,7 +4024,13 @@ function reconcileViewPresentation(): void {
             Date.now() - lastOverlayCloseAt > 600 &&
             !justResumed
           ) {
-            repairTabSurface(activeViewId, 'reconciled twice without a frame', true)
+            // Escalation used to be a detach and re-attach. The build-44 trace settled that: no repair
+            // fired at all in that session (the resume path no longer detaches) and the view still went
+            // blank, so a detach is neither necessary nor sufficient — and it is the one operation that
+            // can destroy a surface. Escalation is now the same strong lever as everything else:
+            // verify the presentation, hide/show, invalidate, ask the page — repeated as needed, with
+            // the genuine detach left to the explicit "Repair AI View" command.
+            ensureActiveViewPresented('reconciled twice without a frame')
           } else if (surfaceRepair.shouldRepair(activeViewId)) {
             // A resume just ran the strong repaint. Escalating to a detach in the half-second after it
             // would replace the surface that repaint was about to produce — and a detach is the way to

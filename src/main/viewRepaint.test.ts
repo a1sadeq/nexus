@@ -216,6 +216,92 @@ describe('forced repaint', () => {
     expect(log).toHaveBeenCalledWith(expect.stringContaining('hide/show'))
   })
 
+  describe('a flip the page actually sees — build 45', () => {
+    it('keeps the view hidden until the page reports itself hidden', async () => {
+      const h = harness()
+      let release: (acknowledged: boolean) => void = () => undefined
+      const gate = {
+        waitForPageHidden: () =>
+          new Promise<boolean>((resolve) => {
+            release = resolve
+          })
+      }
+      forceViewRepaint(h.view, {
+        schedule: schedule(h),
+        now: 1000,
+        force: true,
+        flipVisibility: true,
+        flipGate: gate
+      })
+      // Hidden at once — but not shown again on a 24 ms timer: a show the page never saw is the whole bug.
+      expect(h.visibility).toEqual([false])
+      await new Promise((resolve) => setTimeout(resolve, 5))
+      expect(h.visibility).toEqual([false])
+
+      release(true)
+      await new Promise((resolve) => setTimeout(resolve, 5))
+      expect(h.visibility).toEqual([false, true])
+      expect(h.bounds).toEqual({ x: 280, y: 45, width: 1200, height: 800 })
+      expect(h.invalidations).toBe(2)
+    })
+
+    it('never leaves the view hidden when the page does not answer', () => {
+      const h = harness()
+      forceViewRepaint(h.view, {
+        schedule: schedule(h),
+        now: 1000,
+        force: true,
+        flipVisibility: true,
+        flipGate: { waitForPageHidden: () => new Promise<boolean>(() => undefined) },
+        maxFlipHiddenMs: 500
+      })
+      expect(h.visibility).toEqual([false])
+      // The deadline is scheduled too, and it is the one that shows the view when the gate hangs.
+      expect(h.scheduled.some((entry) => entry.ms === 500)).toBe(true)
+      runScheduled(h)
+      expect(h.visibility).toEqual([false, true])
+    })
+
+    it('leaves the view hidden when the tab moved on while the flip waited', () => {
+      const h = harness()
+      let release: (acknowledged: boolean) => void = () => undefined
+      forceViewRepaint(h.view, {
+        schedule: schedule(h),
+        now: 1000,
+        force: true,
+        flipVisibility: true,
+        flipGate: {
+          waitForPageHidden: () =>
+            new Promise<boolean>((resolve) => {
+              release = resolve
+            })
+        },
+        flipShouldRestore: () => false
+      })
+      expect(h.visibility).toEqual([false])
+      release(true)
+      return new Promise((resolve) => setTimeout(resolve, 5)).then(() => {
+        // Bounds are still restored, but the view is not put back on top of whichever tab is now active.
+        expect(h.visibility).toEqual([false])
+        expect(h.bounds).toEqual({ x: 280, y: 45, width: 1200, height: 800 })
+      })
+    })
+
+    it('records whether the page acknowledged the hide', async () => {
+      const h = harness()
+      const log = vi.fn()
+      forceViewRepaint(h.view, {
+        schedule: schedule(h),
+        now: 1,
+        flipVisibility: true,
+        flipGate: { waitForPageHidden: async () => true },
+        log
+      })
+      await new Promise((resolve) => setTimeout(resolve, 5))
+      expect(log).toHaveBeenCalledWith(expect.stringContaining('reported itself hidden'))
+    })
+  })
+
   it('logs a diagnosable reason', () => {
     const h = harness()
     const log = vi.fn()

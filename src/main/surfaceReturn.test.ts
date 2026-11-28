@@ -61,9 +61,11 @@ describe('build 37 — the wiring that makes it reachable', () => {
   })
 
   it('flips visibility on the strong path and after a re-attach', () => {
-    const strong = main.indexOf("reason: 'coming back from hidden (overlay / tab switch)'")
+    // Build 45 keeps the flip but moves it behind one helper, so the strong path now *delegates* the
+    // hide/show instead of inlining it — the invariant is the same: coming back from hidden must flip,
+    // and that flip must wait for the page to see it.
+    const strong = main.indexOf("ensureActiveViewPresented('coming back from hidden (overlay / tab switch)')")
     expect(strong).toBeGreaterThan(-1)
-    expect(main.slice(strong, strong + 400)).toContain('flipVisibility: true')
 
     const reattach = main.indexOf("reason: 'after re-attach'")
     expect(reattach).toBeGreaterThan(-1)

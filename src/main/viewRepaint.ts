@@ -65,6 +65,34 @@ export interface RepaintOptions {
    * layout changes.
    */
   flipVisibility?: boolean
+  /**
+   * How the flip waits for the page to notice.
+   *
+   * A synchronous hide-then-show in one turn is not a visibility transition as far as the page is
+   * concerned: `setVisible(false)` and `setVisible(true)` both queue work for the renderer, and if the
+   * show lands before the renderer has processed the hide, the page's `document.visibilityState` never
+   * changes and no new frame is ever built — the surface stays blank and the app logs a flip it never
+   * really made. That is exactly the shape of the build-44 diagnostics, and it is why *holding* the view
+   * hidden (opening Settings, switching tabs) fixes it when a 24 ms flip does not. With a gate, the show
+   * is deferred until the page itself reports hidden (or the deadline passes), so the transition is real.
+   */
+  flipGate?: FlipGate
+  /** Never keep a view hidden longer than this, gate or no gate. */
+  maxFlipHiddenMs?: number
+  /**
+   * May the view be shown again when the flip finishes?
+   *
+   * A gated flip can take several hundred milliseconds, and the user is free to switch tabs inside that
+   * window. Without this check the show would land on a view that is now in the background and put it on
+   * top of the tab the user is actually looking at. Defaults to "yes", so a caller that does not need the
+   * guard behaves exactly as before.
+   */
+  flipShouldRestore?: () => boolean
+}
+
+export interface FlipGate {
+  /** Resolves true once the page reports itself hidden; false if it never did. Never rejects. */
+  waitForPageHidden: (deadlineMs: number) => Promise<boolean>
 }
 
 export type RepaintOutcome = 'invalidated' | 'invalidated+nudged' | 'nudged' | 'skipped'
@@ -168,7 +196,10 @@ export function forceViewRepaint(
     return invalidated ? 'invalidated' : 'skipped'
   }
 
+  let restored = false
   const restore = (): void => {
+    if (restored) return
+    restored = true
     if (safeDestroyed(view)) return
     try {
       view.setBounds?.(scheduledBounds)
@@ -177,11 +208,21 @@ export function forceViewRepaint(
     }
     if (flip) {
       // The other half: presented again, with the new geometry already in place, so the frame is built
-      // for the surface the user is actually looking at.
+      // for the surface the user is actually looking at — unless the tab moved on while we waited.
+      let allowed = true
       try {
-        view.setVisible?.(true)
-      } catch (error) {
-        log(`visibility restore failed: ${(error as Error)?.message ?? error}`)
+        allowed = options.flipShouldRestore ? options.flipShouldRestore() : true
+      } catch {
+        allowed = true
+      }
+      if (!allowed) {
+        log('flip: the view is no longer the one on screen — left hidden, as the tab switch wants')
+      } else {
+        try {
+          view.setVisible?.(true)
+        } catch (error) {
+          log(`visibility restore failed: ${(error as Error)?.message ?? error}`)
+        }
       }
     }
     // A forced repaint asks once more after the geometry is back: the first invalidate() can be served
@@ -190,11 +231,34 @@ export function forceViewRepaint(
     if (forced) invalidate(view, log)
   }
 
-  try {
-    schedule(restore, options.restoreDelayMs ?? DEFAULT_RESTORE_DELAY_MS)
-  } catch {
-    // If the scheduler is unavailable, restore synchronously rather than leave bad geometry.
-    restore()
+  const maxHidden = options.flipGate ? (options.maxFlipHiddenMs ?? 700) : 0
+  const gate = flip ? options.flipGate : undefined
+  if (gate) {
+    // Never leave the view hidden, whatever the gate does.
+    try {
+      schedule(restore, maxHidden)
+    } catch {
+      /* the promise below still restores */
+    }
+    const startedAt = Date.now()
+    void gate
+      .waitForPageHidden(maxHidden)
+      .then((acknowledged) => {
+        log(
+          `flip: the page ${acknowledged ? 'reported itself hidden' : 'never reported hidden'} after ${
+            Date.now() - startedAt
+          }ms — showing the view again`
+        )
+        restore()
+      })
+      .catch(() => restore())
+  } else {
+    try {
+      schedule(restore, options.restoreDelayMs ?? DEFAULT_RESTORE_DELAY_MS)
+    } catch {
+      // If the scheduler is unavailable, restore synchronously rather than leave bad geometry.
+      restore()
+    }
   }
 
   log(
